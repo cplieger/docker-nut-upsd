@@ -1,0 +1,31 @@
+services:
+  nut-upsd:
+    image: ghcr.io/cplieger/nut-upsd:latest
+    container_name: nut-upsd
+    restart: unless-stopped
+    user: "0:0"  # required for config file permissions
+    mem_limit: 64m
+
+    environment:
+      TZ: "Europe/Paris"
+      UPS_NAME: "ups"
+      UPS_DESC: "My UPS"
+      UPS_DRIVER: "usbhid-ups"  # see NUT hardware compatibility list
+      UPS_PORT: "auto"  # auto = USB auto-detection
+      API_USER: "monuser"
+      API_PASSWORD: "secret"  # change from default
+
+    ports:
+      - "3493:3493"
+
+    devices:
+      - "/dev/bus/usb/001/001:/dev/bus/usb/001/001"  # find yours with: lsusb
+
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - upsc $$UPS_NAME@localhost 2>&1 | grep -q 'ups.status' || exit 1
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
