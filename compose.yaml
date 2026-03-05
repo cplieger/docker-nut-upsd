@@ -19,7 +19,7 @@ services:
       - "3493:3493"
 
     devices:
-      - "/dev/bus/usb/001/001:/dev/bus/usb/001/001"  # find yours with: lsusb
+      - /dev/bus/usb:/dev/bus/usb  # full bus — survives USB re-enumeration
 
     healthcheck:
       test:
