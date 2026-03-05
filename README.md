@@ -243,10 +243,7 @@ the driver is communicating with the UPS hardware.
 - upsd daemon is not responding
 
 **When it recovers:**
-- UPS device is reconnected and the driver re-establishes communication.
-  The entire USB bus is mapped, so device number changes after
-  reconnection are handled automatically. A container restart may still
-  be needed for the driver to re-detect the device.
+- UPS device is reconnected and the driver re-establishes communication. The entire USB bus is mapped, so device number changes after reconnection are handled automatically. A container restart may still be needed for the driver to re-detect the device.
 
 To check health manually:
 ```bash
@@ -268,14 +265,8 @@ All dependencies are updated automatically via [Renovate](https://github.com/ren
 
 ## Design Principles
 
-- **Always up to date**: Base images, packages, and libraries are
-  updated automatically via Renovate. Unlike many community Docker
-  images that ship outdated or abandoned dependencies, these images
-  receive continuous updates.
-- **Minimal attack surface**: When possible, pure Go apps use
-  `gcr.io/distroless/static:nonroot` (no shell, no package manager,
-  runs as non-root). Apps requiring system packages use Alpine with
-  the minimum necessary privileges.
+- **Always up to date**: Base images, packages, and libraries are updated automatically via Renovate. Unlike many community Docker images that ship outdated or abandoned dependencies, these images receive continuous updates.
+- **Minimal attack surface**: When possible, pure Go apps use `gcr.io/distroless/static:nonroot` (no shell, no package manager, runs as non-root). Apps requiring system packages use Alpine with the minimum necessary privileges.
 - **Digest-pinned**: Every `FROM` instruction pins a SHA256 digest. All GitHub Actions are digest-pinned.
 - **Multi-platform**: Built for `linux/amd64` and `linux/arm64`.
 - **Healthchecks**: Every container includes a Docker healthcheck.
@@ -287,22 +278,13 @@ Issues, suggestions, and pull requests are welcome.
 
 ## Credits
 
-This project packages [Network UPS Tools (NUT)](https://github.com/networkupstools/nut)
-into a container image. All credit for the core functionality
-goes to the upstream maintainers.
+This project packages [Network UPS Tools (NUT)](https://github.com/networkupstools/nut) into a container image. All credit for the core functionality goes to the upstream maintainers.
 
 ## Disclaimer
 
-These images are built with care and follow security best
-practices, but they are intended for **homelab use**. No
-guarantees of fitness for production environments. Use at
-your own risk.
+These images are built with care and follow security best practices, but they are intended for **homelab use**. No guarantees of fitness for production environments. Use at your own risk.
 
-This project was built with AI-assisted tooling using
-[Claude Opus](https://www.anthropic.com/claude) and
-[Kiro](https://kiro.dev). The human maintainer defines
-architecture, supervises implementation, and makes all
-final decisions.
+This project was built with AI-assisted tooling using [Claude Opus](https://www.anthropic.com/claude) and [Kiro](https://kiro.dev). The human maintainer defines architecture, supervises implementation, and makes all final decisions.
 
 ## License
 
