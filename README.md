@@ -41,6 +41,7 @@ track battery level, load, and runtime.
 This is an Alpine-based container that runs as root — NUT requires
 ownership changes on config files and USB device access at startup.
 
+
 ### How It Differs From Network UPS Tools (NUT)
 
 The upstream [NUT](https://networkupstools.org/) requires manual
@@ -231,6 +232,7 @@ Deployment section above for details.
 | Port | Description |
 |------|-------------|
 | `3493` | NUT protocol (upsd network clients) |
+
 
 ## Docker Healthcheck
 
