@@ -29,6 +29,37 @@ if [ "$API_PASSWORD" = "secret" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Input validation — reject values that could inject NUT config directives
+# ---------------------------------------------------------------------------
+validate_no_newlines() {
+    # Count lines — a clean value has exactly 1 line (or 0 if empty).
+    # An injected newline produces 2+ lines.
+    line_count=$(printf '%s' "$2" | wc -l)
+    if [ "$line_count" -gt 0 ]; then
+        echo "Error: $1 contains newline characters — possible config injection" >&2
+        exit 1
+    fi
+}
+
+validate_no_newlines "UPS_NAME" "$UPS_NAME"
+validate_no_newlines "UPS_DESC" "$UPS_DESC"
+validate_no_newlines "UPS_DRIVER" "$UPS_DRIVER"
+validate_no_newlines "UPS_PORT" "$UPS_PORT"
+validate_no_newlines "API_USER" "$API_USER"
+validate_no_newlines "API_PASSWORD" "$API_PASSWORD"
+validate_no_newlines "API_ADDRESS" "$API_ADDRESS"
+validate_no_newlines "API_PORT" "$API_PORT"
+validate_no_newlines "ADMIN_PASSWORD" "$ADMIN_PASSWORD"
+
+# Reject bracket characters in UPS_NAME to prevent section injection
+case "$UPS_NAME" in
+    *"["*|*"]"*)
+        echo "Error: UPS_NAME contains bracket characters — possible config injection" >&2
+        exit 1
+        ;;
+esac
+
+# ---------------------------------------------------------------------------
 # USB device validation
 # ---------------------------------------------------------------------------
 if [ ! -d /dev/bus/usb ]; then
