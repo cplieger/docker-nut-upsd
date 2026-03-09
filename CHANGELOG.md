@@ -1,11 +1,7 @@
 # Changelog
 
-## 2026.03.08 (2026-03-08)
+## 2026.03.09 (2026-03-09)
 
-### Added
+### Changed
 
-- Add input validation to prevent NUT config injection
-
-### Fixed
-
-- Improve newline injection detection in input validation
+- Rebuilt with updated publishing pipeline
