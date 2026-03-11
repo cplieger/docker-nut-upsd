@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026.03.11 (2026-03-11)
+
+### Fixed
+
+- Use loopback IP and improve configuration validation
+
+### Changed
+
+- Style(nut-upsd): improve shell script readability with explicit conditionals
+- Migrate to structured logging and enhance validation
+
 ## 2026.03.10 (2026-03-10)
 
 ### Changed

@@ -106,7 +106,7 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
-        - upsc $$UPS_NAME@localhost 2>&1 | grep -q 'ups.status' || exit 1
+        - upsc $$UPS_NAME@127.0.0.1 2>&1 | grep -q 'ups.status' || exit 1
       interval: 60s
       timeout: 10s
       retries: 3
@@ -254,7 +254,7 @@ docker inspect --format='{{json .State.Health.Log}}' nut-upsd | python3 -m json.
 
 | Type | Command | Meaning |
 |------|---------|---------|
-| NUT protocol | `upsc $UPS_NAME@localhost` | Exit 0 = UPS driver is communicating |
+| NUT protocol | `upsc $UPS_NAME@127.0.0.1` | Exit 0 = UPS driver is communicating |
 
 
 ## Dependencies

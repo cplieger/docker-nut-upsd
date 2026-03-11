@@ -25,7 +25,7 @@ set -eu
 : "${SHUTDOWN_ON_BATTERY_CRITICAL:=false}"
 
 if [ "$API_PASSWORD" = "secret" ]; then
-    echo "Warning: API_PASSWORD is using the default value 'secret' — set a secure password" >&2
+    printf 'level=warn msg="API_PASSWORD is using the default value — set a secure password"\n' >&2
 fi
 
 # ---------------------------------------------------------------------------
@@ -36,9 +36,18 @@ validate_no_newlines() {
     # An injected newline produces 2+ lines.
     line_count=$(printf '%s' "$2" | wc -l)
     if [ "$line_count" -gt 0 ]; then
-        echo "Error: $1 contains newline characters — possible config injection" >&2
+        printf 'level=error msg="env var contains newlines" var=%s\n' "$1" >&2
         exit 1
     fi
+}
+
+validate_numeric() {
+    case "$2" in
+        ''|*[!0-9]*)
+            printf 'level=error msg="env var must be a positive integer" var=%s value="%s"\n' "$1" "$2" >&2
+            exit 1
+            ;;
+    esac
 }
 
 validate_no_newlines "UPS_NAME" "$UPS_NAME"
@@ -50,20 +59,43 @@ validate_no_newlines "API_PASSWORD" "$API_PASSWORD"
 validate_no_newlines "API_ADDRESS" "$API_ADDRESS"
 validate_no_newlines "API_PORT" "$API_PORT"
 validate_no_newlines "ADMIN_PASSWORD" "$ADMIN_PASSWORD"
+validate_no_newlines "SHUTDOWN_ON_BATTERY_CRITICAL" "$SHUTDOWN_ON_BATTERY_CRITICAL"
 
-# Reject bracket characters in UPS_NAME to prevent section injection
-case "$UPS_NAME" in
-    *"["*|*"]"*)
-        echo "Error: UPS_NAME contains bracket characters — possible config injection" >&2
-        exit 1
-        ;;
-esac
+# Validate numeric parameters
+validate_numeric "API_PORT" "$API_PORT"
+validate_numeric "POLLFREQ" "$POLLFREQ"
+validate_numeric "POLLFREQALERT" "$POLLFREQALERT"
+validate_numeric "DEADTIME" "$DEADTIME"
+validate_numeric "FINALDELAY" "$FINALDELAY"
+validate_numeric "HOSTSYNC" "$HOSTSYNC"
+validate_numeric "NOCOMMWARNTIME" "$NOCOMMWARNTIME"
+validate_numeric "RBWARNTIME" "$RBWARNTIME"
+
+# Validate optional battery threshold overrides (numeric when set)
+for var in LOWBATT_PERCENT LOWBATT_RUNTIME CRITBATT_PERCENT CRITBATT_RUNTIME; do
+    eval "val=\${${var}:-}"
+    if [ -n "$val" ]; then
+        validate_no_newlines "$var" "$val"
+        validate_numeric "$var" "$val"
+    fi
+done
+
+# Reject bracket characters in UPS_NAME and API_USER to prevent section injection
+for var in UPS_NAME API_USER; do
+    eval "val=\$$var"
+    case "$val" in
+        *"["*|*"]"*)
+            printf 'level=error msg="env var contains bracket characters" var=%s\n' "$var" >&2
+            exit 1
+            ;;
+    esac
+done
 
 # ---------------------------------------------------------------------------
 # USB device validation
 # ---------------------------------------------------------------------------
 if [ ! -d /dev/bus/usb ]; then
-    echo "Error: /dev/bus/usb not found — map a USB device to the container" >&2
+    printf 'level=error msg="/dev/bus/usb not found — map a USB device to the container"\n' >&2
     exit 1
 fi
 
@@ -72,12 +104,16 @@ fi
 # ---------------------------------------------------------------------------
 if [ "$SHUTDOWN_ON_BATTERY_CRITICAL" = "true" ]; then
     if [ ! -S /run/dbus/system_bus_socket ]; then
-        echo "Error: SHUTDOWN_ON_BATTERY_CRITICAL=true but /run/dbus/system_bus_socket is not mounted" >&2
+        printf 'level=error msg="SHUTDOWN_ON_BATTERY_CRITICAL=true but D-Bus socket not mounted"\n' >&2
         exit 1
     fi
     SHUTDOWN_CMD="dbus-send --system --print-reply --dest=org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager.PowerOff boolean:true"
-    echo "Host shutdown enabled via D-Bus on battery critical" >&2
+    printf 'level=info msg="host shutdown enabled via D-Bus on battery critical"\n' >&2
 else
+    if [ "$SHUTDOWN_ON_BATTERY_CRITICAL" != "false" ]; then
+        printf 'level=warn msg="unrecognized SHUTDOWN_ON_BATTERY_CRITICAL value, treating as false" value="%s"\n' \
+            "$SHUTDOWN_ON_BATTERY_CRITICAL" >&2
+    fi
     SHUTDOWN_CMD="logger -t nut-upsd 'UPS forced shutdown (FSD) triggered'"
 fi
 
@@ -107,19 +143,23 @@ UPSEOF
     fi
 
     # Low-battery overrides
-    [ -n "${LOWBATT_PERCENT:-}" ] && \
+    if [ -n "${LOWBATT_PERCENT:-}" ]; then
         printf '    override.battery.charge.low = %s\n' "$LOWBATT_PERCENT" >> /etc/nut/ups.conf
-    [ -n "${LOWBATT_RUNTIME:-}" ] && \
+    fi
+    if [ -n "${LOWBATT_RUNTIME:-}" ]; then
         printf '    override.battery.runtime.low = %s\n' "$LOWBATT_RUNTIME" >> /etc/nut/ups.conf
+    fi
 
     # Critical-battery overrides
-    [ -n "${CRITBATT_PERCENT:-}" ] && \
+    if [ -n "${CRITBATT_PERCENT:-}" ]; then
         printf '    override.battery.charge.critical = %s\n' "$CRITBATT_PERCENT" >> /etc/nut/ups.conf
-    [ -n "${CRITBATT_RUNTIME:-}" ] && \
+    fi
+    if [ -n "${CRITBATT_RUNTIME:-}" ]; then
         printf '    override.battery.runtime.critical = %s\n' "$CRITBATT_RUNTIME" >> /etc/nut/ups.conf
+    fi
 else
     cp /etc/nut/ups.conf.user /etc/nut/ups.conf
-    echo "Using mounted ups.conf.user" >&2
+    printf 'level=info msg="using mounted ups.conf.user"\n' >&2
 fi
 
 # ---------------------------------------------------------------------------
@@ -131,7 +171,7 @@ LISTEN $API_ADDRESS $API_PORT
 UPSDEOF
 else
     cp /etc/nut/upsd.conf.user /etc/nut/upsd.conf
-    echo "Using mounted upsd.conf.user" >&2
+    printf 'level=info msg="using mounted upsd.conf.user"\n' >&2
 fi
 
 # ---------------------------------------------------------------------------
@@ -151,7 +191,7 @@ if [ ! -e /etc/nut/upsd.users.user ]; then
 USERSEOF
 else
     cp /etc/nut/upsd.users.user /etc/nut/upsd.users
-    echo "Using mounted upsd.users.user" >&2
+    printf 'level=info msg="using mounted upsd.users.user"\n' >&2
 fi
 
 # ---------------------------------------------------------------------------
@@ -159,7 +199,7 @@ fi
 # ---------------------------------------------------------------------------
 if [ ! -e /etc/nut/upsmon.conf.user ]; then
     cat > /etc/nut/upsmon.conf <<MONEOF
-MONITOR $UPS_NAME@localhost 1 "$API_USER" "$API_PASSWORD" primary
+MONITOR $UPS_NAME@127.0.0.1 1 "$API_USER" "$API_PASSWORD" primary
 SHUTDOWNCMD "$SHUTDOWN_CMD"
 POWERDOWNFLAG /var/run/nut/killpower
 NOTIFYCMD /usr/bin/logger
@@ -173,29 +213,32 @@ RBWARNTIME $RBWARNTIME
 MONEOF
 else
     cp /etc/nut/upsmon.conf.user /etc/nut/upsmon.conf
-    echo "Using mounted upsmon.conf.user" >&2
+    printf 'level=info msg="using mounted upsmon.conf.user"\n' >&2
 fi
 
 # ---------------------------------------------------------------------------
 # Permissions
 # ---------------------------------------------------------------------------
-chgrp -R nut /etc/nut
-chmod -R 640 /etc/nut/*
-chmod 750 /etc/nut
+chown -R root:nut /etc/nut
+find /etc/nut -type d -exec chmod 750 {} +
+find /etc/nut -type f -exec chmod 640 {} +
 chgrp -R nut /dev/bus/usb
 
 # ---------------------------------------------------------------------------
 # Start NUT services with signal handling
 # ---------------------------------------------------------------------------
-# shellcheck disable=SC2317
+# shellcheck disable=SC2317,SC2329
 cleanup() {
-    echo "Shutting down NUT services..." >&2
+    printf 'level=info msg="shutting down NUT services"\n' >&2
     /usr/sbin/upsmon -c stop 2>/dev/null || true
     /usr/sbin/upsd -c stop 2>/dev/null || true
     /usr/sbin/upsdrvctl stop 2>/dev/null || true
     exit 0
 }
 trap cleanup TERM INT
+
+printf 'level=info msg="starting NUT services" ups=%s driver=%s port=%s listen=%s:%s\n' \
+    "$UPS_NAME" "$UPS_DRIVER" "$UPS_PORT" "$API_ADDRESS" "$API_PORT" >&2
 
 /usr/sbin/upsdrvctl start
 /usr/sbin/upsd
