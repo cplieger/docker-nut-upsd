@@ -1,6 +1,6 @@
 # Changelog
 
-## 2026.03.11 (2026-03-11)
+## 2026.03.11-f24b8ab (2026-03-11)
 
 ### Fixed
 
@@ -10,12 +10,6 @@
 
 - Style(nut-upsd): improve shell script readability with explicit conditionals
 - Migrate to structured logging and enhance validation
-
-## 2026.03.10 (2026-03-10)
-
-### Changed
-
-- Minor code improvements and optimizations
 
 ## 2026.03.08-7da938e (2026-03-08)
 
