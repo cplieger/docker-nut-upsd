@@ -9,11 +9,11 @@ services:
     environment:
       TZ: "Europe/Paris"
       UPS_NAME: "ups"
-      UPS_DESC: "My UPS"
+      UPS_DESC: "\\My UPS"
       UPS_DRIVER: "usbhid-ups"  # see NUT hardware compatibility list
       UPS_PORT: "auto"  # auto = USB auto-detection
-      API_USER: "monuser"
-      API_PASSWORD: "secret"  # change from default
+      API_USER: "\\monuser"
+      API_PASSWORD: "\\secret"  # change from default
 
     ports:
       - "3493:3493"

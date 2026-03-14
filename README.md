@@ -91,11 +91,11 @@ services:
     environment:
       TZ: "Europe/Paris"
       UPS_NAME: "ups"
-      UPS_DESC: "My UPS"
+      UPS_DESC: "\\My UPS"
       UPS_DRIVER: "usbhid-ups"  # see NUT hardware compatibility list
       UPS_PORT: "auto"  # auto = USB auto-detection
-      API_USER: "monuser"
-      API_PASSWORD: "secret"  # change from default
+      API_USER: "\\monuser"
+      API_PASSWORD: "\\secret"  # change from default
 
     ports:
       - "3493:3493"
@@ -169,11 +169,11 @@ For additional configuration options not covered by this image's environment var
 |----------|-------------|---------|----------|
 | `TZ` | Container timezone | `Europe/Paris` | No |
 | `UPS_NAME` | NUT UPS identifier used in config files and queries | `ups` | No |
-| `UPS_DESC` | Human-readable UPS description shown in NUT clients | `My UPS` | No |
+| `UPS_DESC` | Human-readable UPS description shown in NUT clients | `\My UPS` | No |
 | `UPS_DRIVER` | NUT driver for your UPS model (see NUT hardware compatibility list) | `usbhid-ups` | Yes |
 | `UPS_PORT` | UPS device port — use `auto` for USB auto-detection | `auto` | No |
-| `API_USER` | Username for NUT network clients to authenticate with | `monuser` | No |
-| `API_PASSWORD` | Password for the NUT API user — change from default | `secret` | Yes |
+| `API_USER` | Username for NUT network clients to authenticate with | `\monuser` | No |
+| `API_PASSWORD` | Password for the NUT API user — change from default | `\secret` | Yes |
 
 ### Additional Environment Variables
 
