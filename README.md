@@ -257,6 +257,27 @@ docker inspect --format='{{json .State.Health.Log}}' nut-upsd | python3 -m json.
 | NUT protocol | `upsc $UPS_NAME@127.0.0.1` | Exit 0 = UPS driver is communicating |
 
 
+## Code Quality
+
+| Metric | Value |
+|--------|-------|
+| Language | POSIX shell (Alpine) |
+| Entrypoint | 252 lines |
+| Static Analysis | [ShellCheck](https://www.shellcheck.net/) (enforced in CI) |
+| Validation Tests | 177 |
+| Input Validation | Newline injection, numeric, bracket injection |
+
+The entrypoint generates NUT config files from environment variables
+with security-focused input validation: all values are checked for
+embedded newlines (prevents config injection), bracket characters
+(prevents INI section injection), and numeric parameters are
+validated as positive integers. The validation logic is tested via
+a shared reference library with 177 tests. ShellCheck enforced in CI.
+
+Not tested via unit tests: the config file generation and NUT daemon
+startup — validated on first deploy via the NUT protocol healthcheck
+(queries the UPS directly).
+
 ## Dependencies
 
 All dependencies are updated automatically via [Renovate](https://github.com/renovatebot/renovate) and pinned by digest or version for reproducibility.
