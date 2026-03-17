@@ -11,10 +11,10 @@ NUT UPS daemon with environment-variable-driven configuration
 ## Overview
 
 Runs the Network UPS Tools (NUT) upsd daemon in an Alpine container.
-The entrypoint script generates ups.conf, upsd.conf, upsd.users, and
-upsmon.conf from environment variables at startup. Supports USB HID
-UPS devices via device passthrough. Exposes the standard NUT protocol
-on port 3493 for network UPS clients.
+The entrypoint script generates ups.conf, upsd.conf,
+upsd.users, and upsmon.conf from environment variables at startup.
+Supports USB HID, Modbus, and SNMP UPS devices. Exposes the standard
+NUT protocol on port 3493 for network UPS clients.
 
 **Important:** This container is a NUT *server* — it monitors the UPS
 hardware and serves status data to NUT clients over the network. By
@@ -51,6 +51,9 @@ The entrypoint handles NUT's permission requirements and quiet init
 flags automatically.
 
 Compared to other NUT Docker images:
+- NUT, libmodbus, and net-snmp compiled from latest upstream sources (not distro packages) for zero known CVEs
+- Native cross-compilation via [xx](https://github.com/tonistiigi/xx) for fast multi-platform builds
+- All drivers included: USB HID, Modbus (APC Smart-UPS), and SNMP (network-managed UPS/PDU)
 - Stays on Alpine (not Debian) — smaller image, same functionality
 - Supports host shutdown via D-Bus without installing systemd in the container
 - Configurable low-battery and critical-battery thresholds via env vars
@@ -131,7 +134,9 @@ services:
 2. Set `UPS_DRIVER` to match your UPS model — see the
    [NUT hardware compatibility list](https://networkupstools.org/stable-hcl.html).
    Common drivers: `usbhid-ups` (most USB UPS),
-   `blazer_usb` (some Megatec/Q1 protocol UPS).
+   `blazer_usb` (some Megatec/Q1 protocol UPS),
+   `apc_modbus` (APC Smart-UPS via Modbus),
+   `snmp-ups` (network-managed UPS/PDU via SNMP).
 3. Change `API_PASSWORD` from the default. NUT clients on your
    network use `API_USER` and `API_PASSWORD` to connect.
 4. Port 3493 is the standard NUT protocol port. Point your NUT
@@ -278,13 +283,48 @@ Not tested via unit tests: the config file generation and NUT daemon
 startup — validated on first deploy via the NUT protocol healthcheck
 (queries the UPS directly).
 
+## Security Review
+
+**No dependency CVEs.** NUT, libmodbus, and net-snmp are compiled
+from patched upstream sources via native cross-compilation,
+eliminating all CVEs present in Alpine's older packages.
+
+| Tool | Result |
+|------|--------|
+| [shellcheck](https://www.shellcheck.net/) | Clean |
+| [hadolint](https://github.com/hadolint/hadolint) | DL3018 (unpinned apk, accepted) |
+| [gitleaks](https://github.com/gitleaks/gitleaks) | No secrets detected |
+| [trivy](https://trivy.dev/) | 0 dependency CVEs (Alpine base only) |
+| [grype](https://github.com/anchore/grype) | 0 dependency CVEs (Alpine base only) |
+| [semgrep](https://semgrep.dev/) | 1 info (missing USER, expected) |
+
+All three source versions are tracked by Renovate. The
+multi-stage build uses [xx](https://github.com/tonistiigi/xx)
+for native cross-compilation (no QEMU). The entrypoint validates
+all env vars before generating NUT config: newline injection
+prevention, numeric validation, and bracket injection checks.
+Runs as root (required for NUT config ownership and USB device
+access). Host shutdown via D-Bus is gated behind an explicit
+opt-in env var.
+
+**Details for advanced users:** NUT is built with
+`--disable-shared --enable-static` so all binaries are
+self-contained. Config files are 640 root:nut. Admin password
+auto-generated from `/dev/urandom` if not set. All NUT drivers
+are included (USB HID, Modbus, SNMP).
+
 ## Dependencies
 
 All dependencies are updated automatically via [Renovate](https://github.com/renovatebot/renovate) and pinned by digest or version for reproducibility.
 
 | Dependency | Version | Source |
 |------------|---------|--------|
+| tonistiigi/xx | `1.9.0` | [Docker Hub](https://hub.docker.com/_/xx) |
 | alpine | `3.23.3` | [Alpine](https://hub.docker.com/_/alpine) |
+| alpine | `3.23.3` | [Alpine](https://hub.docker.com/_/alpine) |
+| libmodbus | `v3.1.12` | [GitHub](https://github.com/stephane/libmodbus) |
+| netsnmp | `v5.9.5.2` | [GitHub](https://github.com/net-snmp/net-snmp) |
+| nut | `v2.8.4` | [GitHub](https://github.com/networkupstools/nut) |
 
 ## Design Principles
 
@@ -298,6 +338,13 @@ All dependencies are updated automatically via [Renovate](https://github.com/ren
 ## Credits
 
 This project packages [Network UPS Tools (NUT)](https://github.com/networkupstools/nut) into a container image. All credit for the core functionality goes to the upstream maintainers.
+- [libmodbus](https://github.com/stephane/libmodbus) by
+  [@stephane](https://github.com/stephane) — the Modbus protocol
+  library used by NUT's `apc_modbus` driver
+- [Net-SNMP](https://github.com/net-snmp/net-snmp) — the SNMP
+  library used by NUT's `snmp-ups` driver
+- [xx](https://github.com/tonistiigi/xx) — Dockerfile
+  cross-compilation helper for native multi-platform builds
 
 ## Disclaimer
 
