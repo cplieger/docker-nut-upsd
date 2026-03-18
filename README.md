@@ -52,7 +52,6 @@ flags automatically.
 
 Compared to other NUT Docker images:
 - NUT, libmodbus, and net-snmp compiled from latest upstream sources (not distro packages) for zero known CVEs
-- Native cross-compilation via [xx](https://github.com/tonistiigi/xx) for fast multi-platform builds
 - All drivers included: USB HID, Modbus (APC Smart-UPS), and SNMP (network-managed UPS/PDU)
 - Stays on Alpine (not Debian) — smaller image, same functionality
 - Supports host shutdown via D-Bus without installing systemd in the container
@@ -320,7 +319,6 @@ All dependencies are updated automatically via [Renovate](https://github.com/ren
 | Dependency | Version | Source |
 |------------|---------|--------|
 | tonistiigi/xx | `1.9.0` | [Docker Hub](https://hub.docker.com/_/xx) |
-| alpine | `3.23.3` | [Alpine](https://hub.docker.com/_/alpine) |
 | alpine | `3.23.3` | [Alpine](https://hub.docker.com/_/alpine) |
 | libmodbus | `v3.1.12` | [GitHub](https://github.com/stephane/libmodbus) |
 | netsnmp | `v5.9.5.2` | [GitHub](https://github.com/net-snmp/net-snmp) |
