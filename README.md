@@ -322,7 +322,7 @@ All dependencies are updated automatically via [Renovate](https://github.com/ren
 | alpine | `3.23.3` | [Alpine](https://hub.docker.com/_/alpine) |
 | libmodbus | `v3.1.12` | [GitHub](https://github.com/stephane/libmodbus) |
 | netsnmp | `v5.9.5.2` | [GitHub](https://github.com/net-snmp/net-snmp) |
-| nut | `v2.8.4` | [GitHub](https://github.com/networkupstools/nut) |
+| nut | `2.8.5` | [GitHub](https://github.com/networkupstools/nut) |
 
 ## Design Principles
 
