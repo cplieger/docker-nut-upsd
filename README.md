@@ -108,7 +108,7 @@ services:
     healthcheck:
       test:
         - CMD-SHELL
-        - upsc $$UPS_NAME@127.0.0.1 2>&1 | grep -q 'ups.status' || exit 1
+        - upsc $$UPS_NAME@127.0.0.1 2>/dev/null | grep -q 'ups.status' || exit 1
       interval: 30s
       timeout: 5s
       retries: 3
@@ -266,17 +266,18 @@ docker inspect --format='{{json .State.Health.Log}}' nut-upsd | python3 -m json.
 | Metric | Value |
 |--------|-------|
 | Language | POSIX shell (Alpine) |
-| Entrypoint | 252 lines |
+| Entrypoint | 284 lines |
 | Static Analysis | [ShellCheck](https://www.shellcheck.net/) (enforced in CI) |
-| Validation Tests | 177 |
-| Input Validation | Newline injection, numeric, bracket injection |
+| Validation Tests | 181 |
+| Input Validation | Newline injection, numeric, bracket injection, quote injection |
 
 The entrypoint generates NUT config files from environment variables
 with security-focused input validation: all values are checked for
 embedded newlines (prevents config injection), bracket characters
-(prevents INI section injection), and numeric parameters are
-validated as positive integers. The validation logic is tested via
-a shared reference library with 177 tests. ShellCheck enforced in CI.
+(prevents INI section injection), double-quote characters (prevents
+NUT config quoting breakout), and numeric parameters are validated
+as positive integers. The validation logic is tested via a shared
+reference library with 181 tests. ShellCheck enforced in CI.
 
 Not tested via unit tests: the config file generation and NUT daemon
 startup — validated on first deploy via the NUT protocol healthcheck
@@ -301,7 +302,8 @@ All three source versions are tracked by Renovate. The
 multi-stage build uses [xx](https://github.com/tonistiigi/xx)
 for native cross-compilation (no QEMU). The entrypoint validates
 all env vars before generating NUT config: newline injection
-prevention, numeric validation, and bracket injection checks.
+prevention, numeric validation, bracket injection checks, and
+double-quote injection prevention for config file quoting.
 Runs as root (required for NUT config ownership and USB device
 access). Host shutdown via D-Bus is gated behind an explicit
 opt-in env var.
@@ -322,7 +324,7 @@ All dependencies are updated automatically via [Renovate](https://github.com/ren
 | alpine | `3.23.3` | [Alpine](https://hub.docker.com/_/alpine) |
 | libmodbus | `v3.1.12` | [GitHub](https://github.com/stephane/libmodbus) |
 | netsnmp | `v5.9.5.2` | [GitHub](https://github.com/net-snmp/net-snmp) |
-| nut | `2.8.5` | [GitHub](https://github.com/networkupstools/nut) |
+| nut | `v2.8.5` | [GitHub](https://github.com/networkupstools/nut) |
 
 ## Design Principles
 

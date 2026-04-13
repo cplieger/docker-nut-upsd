@@ -50,6 +50,24 @@ validate_numeric() {
     esac
 }
 
+validate_no_brackets() {
+    case "$2" in
+        *"["*|*"]"*)
+            printf 'level=error msg="env var contains bracket characters" var=%s\n' "$1" >&2
+            exit 1
+            ;;
+    esac
+}
+
+validate_no_quotes() {
+    case "$2" in
+        *'"'*)
+            printf 'level=error msg="env var contains double-quote" var=%s\n' "$1" >&2
+            exit 1
+            ;;
+    esac
+}
+
 validate_no_newlines "UPS_NAME" "$UPS_NAME"
 validate_no_newlines "UPS_DESC" "$UPS_DESC"
 validate_no_newlines "UPS_DRIVER" "$UPS_DRIVER"
@@ -81,15 +99,24 @@ for var in LOWBATT_PERCENT LOWBATT_RUNTIME CRITBATT_PERCENT CRITBATT_RUNTIME; do
 done
 
 # Reject bracket characters in UPS_NAME and API_USER to prevent section injection
-for var in UPS_NAME API_USER; do
-    eval "val=\$$var"
-    case "$val" in
-        *"["*|*"]"*)
-            printf 'level=error msg="env var contains bracket characters" var=%s\n' "$var" >&2
-            exit 1
-            ;;
-    esac
-done
+validate_no_brackets "UPS_NAME" "$UPS_NAME"
+validate_no_brackets "API_USER" "$API_USER"
+
+# Reject double-quote characters that would break NUT config file quoting
+validate_no_quotes "UPS_DESC" "$UPS_DESC"
+validate_no_quotes "API_USER" "$API_USER"
+validate_no_quotes "API_PASSWORD" "$API_PASSWORD"
+validate_no_quotes "ADMIN_PASSWORD" "$ADMIN_PASSWORD"
+validate_no_quotes "UPS_NAME" "$UPS_NAME"
+
+# Reject spaces/tabs in UPS_NAME (NUT doesn't support them, and they break
+# the healthcheck's upsc command due to shell word-splitting)
+case "$UPS_NAME" in
+    *" "*|*"	"*)
+        printf 'level=error msg="UPS_NAME must not contain spaces or tabs"\n' >&2
+        exit 1
+        ;;
+esac
 
 # ---------------------------------------------------------------------------
 # USB device validation
@@ -230,9 +257,9 @@ chgrp -R nut /dev/bus/usb
 # shellcheck disable=SC2317,SC2329
 cleanup() {
     printf 'level=info msg="shutting down NUT services"\n' >&2
-    /usr/sbin/upsmon -c stop 2>/dev/null || true
-    /usr/sbin/upsd -c stop 2>/dev/null || true
-    /usr/sbin/upsdrvctl stop 2>/dev/null || true
+    /usr/sbin/upsmon -c stop || true
+    /usr/sbin/upsd -c stop || true
+    /usr/sbin/upsdrvctl stop || true
     exit 0
 }
 trap cleanup TERM INT
@@ -240,12 +267,17 @@ trap cleanup TERM INT
 printf 'level=info msg="starting NUT services" ups=%s driver=%s port=%s listen=%s:%s\n' \
     "$UPS_NAME" "$UPS_DRIVER" "$UPS_PORT" "$API_ADDRESS" "$API_PORT" >&2
 
+printf 'level=info msg="starting upsdrvctl"\n' >&2
 /usr/sbin/upsdrvctl start
+printf 'level=info msg="starting upsd"\n' >&2
 /usr/sbin/upsd
 
 # Run upsmon in the background so the trap can fire
+printf 'level=info msg="starting upsmon"\n' >&2
 /usr/sbin/upsmon -D &
 UPSMON_PID=$!
+
+printf 'level=info msg="NUT services started successfully"\n' >&2
 
 # Wait for upsmon — propagate its exit code on unexpected exit
 wait "$UPSMON_PID"

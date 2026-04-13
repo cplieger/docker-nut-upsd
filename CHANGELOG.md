@@ -1,5 +1,16 @@
 # Changelog
 
+## 2026.04.13-98ff0b3 (2026-04-13)
+
+### Fixed
+
+- Update NUT_VERSION ARG to include version prefix
+- Improve input validation and error handling
+
+### Dependencies
+
+- Update networkupstools/nut to v2.8.5
+
 ## 2026.04.01-878c624 (2026-04-01)
 
 ### Added

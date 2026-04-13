@@ -60,7 +60,7 @@ RUN SYSROOT=$(xx-info sysroot) \
     && cp -r include/net-snmp "${SYSROOT}/usr/include/"
 
 # renovate: datasource=github-releases depName=networkupstools/nut
-ARG NUT_VERSION=2.8.5
+ARG NUT_VERSION=v2.8.5
 WORKDIR /build/nut
 RUN SYSROOT=$(xx-info sysroot) \
     && wget -qO- \
