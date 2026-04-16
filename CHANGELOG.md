@@ -1,5 +1,11 @@
 # Changelog
 
+## 2026.04.16-ce72580 (2026-04-16)
+
+### Dependencies
+
+- Update alpine:3.23.4 docker digest to 5b10f43 (#197)
+
 ## 2026.04.13-98ff0b3 (2026-04-13)
 
 ### Fixed

@@ -4,7 +4,7 @@
 [![GitHub release](https://img.shields.io/github/v/release/cplieger/docker-nut-upsd)](https://github.com/cplieger/docker-nut-upsd/releases)
 [![Image Size](https://ghcr-badge.egpl.dev/cplieger/nut-upsd/size)](https://github.com/cplieger/docker-nut-upsd/pkgs/container/nut-upsd)
 ![Platforms](https://img.shields.io/badge/platforms-amd64%20%7C%20arm64-blue)
-![base: Alpine 3.23.3](https://img.shields.io/badge/base-Alpine_3.23.3-0D597F?logo=alpinelinux)
+![base: Alpine 3.23.4](https://img.shields.io/badge/base-Alpine_3.23.4-0D597F?logo=alpinelinux)
 
 NUT UPS daemon with environment-variable-driven configuration
 
@@ -321,7 +321,7 @@ All dependencies are updated automatically via [Renovate](https://github.com/ren
 | Dependency | Version | Source |
 |------------|---------|--------|
 | tonistiigi/xx | `1.9.0` | [Docker Hub](https://hub.docker.com/_/xx) |
-| alpine | `3.23.3` | [Alpine](https://hub.docker.com/_/alpine) |
+| alpine | `3.23.4` | [Alpine](https://hub.docker.com/_/alpine) |
 | libmodbus | `v3.1.12` | [GitHub](https://github.com/stephane/libmodbus) |
 | netsnmp | `v5.9.5.2` | [GitHub](https://github.com/net-snmp/net-snmp) |
 | nut | `v2.8.5` | [GitHub](https://github.com/networkupstools/nut) |

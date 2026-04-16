@@ -2,7 +2,7 @@
 # renovate: datasource=docker depName=tonistiigi/xx
 FROM --platform=$BUILDPLATFORM tonistiigi/xx:1.9.0@sha256:c64defb9ed5a91eacb37f96ccc3d4cd72521c4bd18d5442905b95e2226b0e707 AS xx
 
-FROM --platform=$BUILDPLATFORM alpine:3.23.3@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659 AS builder
+FROM --platform=$BUILDPLATFORM alpine:3.23.4@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11 AS builder
 
 COPY --from=xx / /
 SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
@@ -101,7 +101,7 @@ RUN SYSROOT=$(xx-info sysroot) \
     && cp "${SYSROOT}/usr/lib/libmodbus.so"* /out/usr/lib/ \
     && cp "${SYSROOT}/usr/lib/libnetsnmp.so"* /out/usr/lib/
 
-FROM alpine:3.23.3@sha256:25109184c71bdad752c8312a8623239686a9a2071e8825f20acb8f2198c3f659
+FROM alpine:3.23.4@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
 
 RUN apk add --no-cache \
         dbus \
