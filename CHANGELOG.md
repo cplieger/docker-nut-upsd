@@ -1,5 +1,24 @@
 # Changelog
 
+## 2026.05.19-5a9181d (2026-05-21)
+
+### Fixed
+
+- Silence shellcheck SC2317 in trap handler
+
+### Changed
+
+- Shellcheck v0.11.0 housekeeping
+- Annotate entrypoint sources for stricter shellcheck
+- Compact skill specs + refactor age/nut-upsd/smtp-relay/docker-cron + kweb improvements (#289)
+- Move healthcheck to Dockerfile and standardize resource limits
+- Simplify credentials documentation
+- Docs(nut-upsd): clarify admin password persistence behavior
+- Warn on weak API password instead of blocking startup
+- Poll for PID file instead of pgrep to verify daemon startup
+- Clear stale PID files at startup
+- Harden entrypoint, rotate default password, bind to LAN only
+
 ## 2026.04.16-ce72580 (2026-04-16)
 
 ### Dependencies

@@ -126,5 +126,14 @@ COPY --from=builder /out/usr/share/cmdvartab /usr/share/cmdvartab
 ENV NUT_QUIET_INIT_UPSNOTIFY=true \
     NUT_QUIET_INIT_SSL=true
 COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY --chmod=755 validate.sh /usr/local/bin/validate.sh
+COPY --chmod=755 generate-config.sh /usr/local/bin/generate-config.sh
+COPY --chmod=755 lifecycle.sh /usr/local/bin/lifecycle.sh
+COPY --chmod=755 password.sh /usr/local/bin/password.sh
+COPY --chmod=755 nut-notify.sh /usr/local/bin/nut-notify.sh
+COPY --chmod=755 nut-shutdown.sh /usr/local/bin/nut-shutdown.sh
+COPY --chmod=755 nut-shutdown-noop.sh /usr/local/bin/nut-shutdown-noop.sh
 EXPOSE 3493
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=15s \
+    CMD timeout 3 upsc "$UPS_NAME@127.0.0.1" 2>/dev/null | grep -q 'ups.status' || exit 1
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

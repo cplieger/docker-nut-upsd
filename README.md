@@ -88,31 +88,21 @@ services:
     container_name: nut-upsd
     restart: unless-stopped
     user: "0:0"  # required for config file permissions
-    mem_limit: 64m
 
     environment:
       TZ: "Europe/Paris"
       UPS_NAME: "ups"
-      UPS_DESC: "\\My UPS"
+      UPS_DESC: "My UPS"
       UPS_DRIVER: "usbhid-ups"  # see NUT hardware compatibility list
       UPS_PORT: "auto"  # auto = USB auto-detection
-      API_USER: "\\monuser"
-      API_PASSWORD: "\\secret"  # change from default
+      API_USER: "monuser"
+      API_PASSWORD: "secret"  # rotate if your NUT client supports custom credentials
 
     ports:
       - "3493:3493"
 
     devices:
       - /dev/bus/usb:/dev/bus/usb  # full bus — survives USB re-enumeration
-
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - upsc $$UPS_NAME@127.0.0.1 2>/dev/null | grep -q 'ups.status' || exit 1
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
 ```
 
 ## Deployment
@@ -136,8 +126,15 @@ services:
    `blazer_usb` (some Megatec/Q1 protocol UPS),
    `apc_modbus` (APC Smart-UPS via Modbus),
    `snmp-ups` (network-managed UPS/PDU via SNMP).
-3. Change `API_PASSWORD` from the default. NUT clients on your
-   network use `API_USER` and `API_PASSWORD` to connect.
+3. The default `API_USER`/`API_PASSWORD` are NUT's legacy
+   `monuser`/`secret` — the values most clients default to (including
+   appliances like Synology DSM that hard-code them with no UI
+   override). The entrypoint logs a warn line when these defaults are
+   used so they stay visible in your logs, but does not block startup.
+   Rotate to a strong value if your NUT client supports custom
+   credentials; leave as-is for clients that don't. NUT reads are
+   anonymous anyway — the credential only gates SET/INSTCMD/FSD
+   operations.
 4. Port 3493 is the standard NUT protocol port. Point your NUT
    clients (e.g. `upsmon` on other hosts,
    [PeaNUT](https://github.com/Brandawg93/PeaNUT) dashboard)
@@ -172,12 +169,12 @@ For additional configuration options not covered by this image's environment var
 | Variable | Description | Default | Required |
 |----------|-------------|---------|----------|
 | `TZ` | Container timezone | `Europe/Paris` | No |
-| `UPS_NAME` | NUT UPS identifier used in config files and queries | `ups` | No |
-| `UPS_DESC` | Human-readable UPS description shown in NUT clients | `\My UPS` | No |
-| `UPS_DRIVER` | NUT driver for your UPS model (see NUT hardware compatibility list) | `usbhid-ups` | Yes |
+| `UPS_NAME` | NUT UPS identifier used in config files and queries (default: ups) | `ups` | No |
+| `UPS_DESC` | Human-readable UPS description shown in NUT clients | `My UPS` | No |
+| `UPS_DRIVER` | NUT driver for your UPS model (default: usbhid-ups; see NUT hardware compatibility list) | `usbhid-ups` | No |
 | `UPS_PORT` | UPS device port — use `auto` for USB auto-detection | `auto` | No |
-| `API_USER` | Username for NUT network clients to authenticate with | `\monuser` | No |
-| `API_PASSWORD` | Password for the NUT API user — change from default | `\secret` | Yes |
+| `API_USER` | Username for NUT network clients to authenticate with. Set via NUT_API_USER in your .env file; defaults to monuser | `monuser` | No |
+| `API_PASSWORD` | Password for the NUT API user. Set via NUT_API_PASSWORD in your .env file; defaults to NUT legacy secret. The entrypoint warns on weak credentials but does not block startup. | `secret` | No |
 
 ### Additional Environment Variables
 
@@ -228,7 +225,7 @@ Deployment section above for details.
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `ADMIN_PASSWORD` | Password for the NUT admin user (set/FSD actions) | Random |
+| `ADMIN_PASSWORD` | Password for the NUT admin user (set/FSD actions). If unset, generated randomly on first start and cached at `/var/run/nut/admin_password` inside the container — stable across restarts within the same container, but regenerated whenever the container is recreated (e.g. on compose redeploy). | Random (cached) |
 
 
 ## Ports
@@ -266,9 +263,9 @@ docker inspect --format='{{json .State.Health.Log}}' nut-upsd | python3 -m json.
 | Metric | Value |
 |--------|-------|
 | Language | POSIX shell (Alpine) |
-| Entrypoint | 284 lines |
+| Entrypoint | 454 lines |
 | Static Analysis | [ShellCheck](https://www.shellcheck.net/) (enforced in CI) |
-| Validation Tests | 181 |
+| Validation Tests | 242 |
 | Input Validation | Newline injection, numeric, bracket injection, quote injection |
 
 The entrypoint generates NUT config files from environment variables
@@ -277,7 +274,7 @@ embedded newlines (prevents config injection), bracket characters
 (prevents INI section injection), double-quote characters (prevents
 NUT config quoting breakout), and numeric parameters are validated
 as positive integers. The validation logic is tested via a shared
-reference library with 181 tests. ShellCheck enforced in CI.
+reference library with 242 tests. ShellCheck enforced in CI.
 
 Not tested via unit tests: the config file generation and NUT daemon
 startup — validated on first deploy via the NUT protocol healthcheck

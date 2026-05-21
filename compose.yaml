@@ -4,28 +4,18 @@ services:
     container_name: nut-upsd
     restart: unless-stopped
     user: "0:0"  # required for config file permissions
-    mem_limit: 64m
 
     environment:
       TZ: "Europe/Paris"
       UPS_NAME: "ups"
-      UPS_DESC: "\\My UPS"
+      UPS_DESC: "My UPS"
       UPS_DRIVER: "usbhid-ups"  # see NUT hardware compatibility list
       UPS_PORT: "auto"  # auto = USB auto-detection
-      API_USER: "\\monuser"
-      API_PASSWORD: "\\secret"  # change from default
+      API_USER: "monuser"
+      API_PASSWORD: "secret"  # rotate if your NUT client supports custom credentials
 
     ports:
       - "3493:3493"
 
     devices:
       - /dev/bus/usb:/dev/bus/usb  # full bus — survives USB re-enumeration
-
-    healthcheck:
-      test:
-        - CMD-SHELL
-        - upsc $$UPS_NAME@127.0.0.1 2>/dev/null | grep -q 'ups.status' || exit 1
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 15s
