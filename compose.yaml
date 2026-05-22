@@ -1,6 +1,6 @@
 services:
   nut-upsd:
-    image: ghcr.io/cplieger/nut-upsd:latest
+    image: ghcr.io/cplieger/nut-upsd:latest@sha256:dd7332994843621b5121dbd527e296d5334e688eda587da554b0c1185bb32cfa
     container_name: nut-upsd
     restart: unless-stopped
     user: "0:0"  # required for config file permissions
