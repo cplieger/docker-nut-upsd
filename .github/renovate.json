@@ -66,5 +66,8 @@
   ],
   "ignorePaths": [
     "compose.yaml"
+  ],
+  "dependencyDashboardLabels": [
+    "renovate"
   ]
 }
