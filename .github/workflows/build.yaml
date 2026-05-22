@@ -19,7 +19,7 @@ permissions:
   attestations: write
 
 env:
-  IMAGE_NAME: ${{ github.repository_owner }}/nut-upsd
+  IMAGE_NAME: ${{ github.repository_owner }}/${{ github.event.repository.name }}
   REGISTRY: ghcr.io
 
 jobs:
