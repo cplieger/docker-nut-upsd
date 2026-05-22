@@ -1,22 +1,35 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["config:best-practices"],
+  "extends": [
+    "config:best-practices"
+  ],
   "timezone": "Europe/Paris",
   "automerge": true,
   "automergeType": "pr",
   "platformAutomerge": true,
-  "labels": ["dependencies"],
+  "labels": [
+    "dependencies"
+  ],
   "packageRules": [
     {
       "description": "Auto-merge minor, patch, digest, pin",
-      "matchUpdateTypes": ["minor", "patch", "digest", "pin"],
+      "matchUpdateTypes": [
+        "minor",
+        "patch",
+        "digest",
+        "pin"
+      ],
       "automerge": true
     },
     {
       "description": "Major updates require manual approval",
-      "matchUpdateTypes": ["major"],
+      "matchUpdateTypes": [
+        "major"
+      ],
       "automerge": false,
-      "labels": ["major-update"]
+      "labels": [
+        "major-update"
+      ]
     },
     {
       "description": "NUT build deps (libmodbus, net-snmp, nut): group together, require approval",
@@ -33,10 +46,15 @@
     {
       "customType": "regex",
       "description": "Dockerfile ARG versions with renovate comments",
-      "managerFilePatterns": ["/Dockerfile$/"],
+      "managerFilePatterns": [
+        "/Dockerfile$/"
+      ],
       "matchStrings": [
         "#\\s*renovate:\\s*datasource=(?<datasource>[a-z-]+)\\s+depName=(?<depName>[^\\s]+)(\\s+versioning=(?<versioning>[a-z-]+))?\\nARG\\s+\\w+=(?<currentValue>\\S+)"
       ]
     }
+  ],
+  "ignorePaths": [
+    "compose.yaml"
   ]
 }
