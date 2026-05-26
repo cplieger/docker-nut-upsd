@@ -6,80 +6,31 @@
 ![Platforms](https://img.shields.io/badge/platforms-amd64%20%7C%20arm64-blue)
 ![base: Alpine 3.23.4](https://img.shields.io/badge/base-Alpine_3.23.4-0D597F?logo=alpinelinux)
 
-NUT UPS daemon with environment-variable-driven configuration
+Monitor your UPS and let networked machines shut down gracefully during power outages.
 
-## Overview
+## What it does
 
-Runs the Network UPS Tools (NUT) upsd daemon in an Alpine container.
-The entrypoint script generates ups.conf, upsd.conf,
-upsd.users, and upsmon.conf from environment variables at startup.
-Supports USB HID, Modbus, and SNMP UPS devices. Exposes the standard
-NUT protocol on port 3493 for network UPS clients.
+Monitors your UPS (uninterruptible power supply) and exposes its status over the network so other machines can shut down gracefully during a power outage. A UPS is a battery backup that keeps your equipment running when the power goes out — this container watches that battery and tells every machine on your network when it's time to shut down safely.
 
-**Important:** This container is a NUT *server* — it monitors the UPS
-hardware and serves status data to NUT clients over the network. By
-default, `SHUTDOWNCMD` only logs inside the container. Each host that
-needs graceful shutdown should run its own `upsmon` client pointing at
-this server.
+The container runs the Network UPS Tools (NUT) upsd daemon in Alpine Linux. The entrypoint script generates all NUT configuration files (`ups.conf`, `upsd.conf`, `upsd.users`, `upsmon.conf`) from environment variables at startup.
 
-**Host shutdown support:** If you set `SHUTDOWN_ON_BATTERY_CRITICAL=true`
-and mount the host's D-Bus socket (`/run/dbus/system_bus_socket`), the
-container can power off the host via systemd when the UPS reaches
-critical battery. This works on any systemd-based host without
-switching to a Debian base image.
-
-**Custom config override:** For advanced users, mount your own NUT
-config files as `*.user` (e.g. `ups.conf.user`) into `/etc/nut/` and
-the entrypoint will use them instead of generating from env vars.
-
-**Example use case:** You have a USB UPS connected to one server and want
-other machines on your network to monitor its status. This container
-exposes the UPS over NUT's network protocol so any host can run `upsmon`
-or a dashboard like [PeaNUT](https://github.com/Brandawg93/PeaNUT) to
-track battery level, load, and runtime.
-
-This is an Alpine-based container that runs as root — NUT requires
-ownership changes on config files and USB device access at startup.
-
-
-### How It Differs From Network UPS Tools (NUT)
-
-The upstream [NUT](https://networkupstools.org/) requires manual
-configuration file editing. This image generates all config files from
-environment variables, making it fully declarative and Docker-native.
-The entrypoint handles NUT's permission requirements and quiet init
-flags automatically.
-
-Compared to other NUT Docker images:
-- NUT, libmodbus, and net-snmp compiled from latest upstream sources (not distro packages) for zero known CVEs
-- All drivers included: USB HID, Modbus (APC Smart-UPS), and SNMP (network-managed UPS/PDU)
-- Stays on Alpine (not Debian) — smaller image, same functionality
-- Supports host shutdown via D-Bus without installing systemd in the container
-- Configurable low-battery and critical-battery thresholds via env vars
-- Custom config override via `*.user` file mounts
-- Configurable upsmon tuning (poll frequency, deadtime, etc.)
+- Supports USB HID, Modbus, and SNMP UPS devices
+- Exposes the standard NUT protocol on port 3493 for network clients
+- Optional host shutdown via D-Bus when the UPS reaches critical battery (`SHUTDOWN_ON_BATTERY_CRITICAL=true`)
+- Custom config override: mount your own NUT config files as `*.user` (e.g. `ups.conf.user`) into `/etc/nut/` to bypass env-var generation
+- Configurable low-battery and critical-battery thresholds
 - Clean signal handling — SIGTERM gracefully stops all NUT services
 
-## Container Registries
+### Why this design
 
-This image is published to both GHCR and Docker Hub:
+- **Environment-variable config** — no need to hand-edit `nut.conf` files; the entrypoint generates them declaratively from env vars
+- **Single container replaces three daemons** — bundles the NUT driver, `upsd`, and `upsmon` so you deploy one service instead of three
+- **Minimal Alpine base** — small image with only the packages NUT needs; no extras that increase attack surface
+- **Compiled from upstream sources** — NUT, libmodbus, and net-snmp built from latest upstream (not distro packages) for zero known CVEs
 
-| Registry | Image |
-|----------|-------|
-| GHCR | `ghcr.io/cplieger/nut-upsd` |
-| Docker Hub | `docker.io/cplieger/nut-upsd` |
+## Quick start
 
-```bash
-# Pull from GHCR
-docker pull ghcr.io/cplieger/nut-upsd:latest
-
-# Pull from Docker Hub
-docker pull cplieger/nut-upsd:latest
-```
-
-Both registries receive identical images and tags. Use whichever you prefer.
-
-## Quick Start
+Available from both `ghcr.io/cplieger/nut-upsd` and `docker.io/cplieger/nut-upsd` — identical images and tags.
 
 ```yaml
 services:
@@ -105,105 +56,25 @@ services:
       - /dev/bus/usb:/dev/bus/usb  # full bus — survives USB re-enumeration
 ```
 
-## Deployment
+## Configuration reference
 
-1. The compose file maps the entire USB bus (`/dev/bus/usb:/dev/bus/usb`)
-   so the NUT driver can find the UPS regardless of device number changes
-   after reboots or USB re-enumeration. Verify your UPS is visible:
-   ```bash
-   lsusb
-   # Example output: Bus 001 Device 003: ID 0764:0601 Cyber Power System, Inc.
-   ```
-   > **Note:** Mapping the full bus exposes all USB devices to the container.
-   > The NUT driver only opens the device it recognizes, but if you prefer
-   > tighter isolation you can restrict the mapping to a specific device
-   > (e.g. `/dev/bus/usb/001/003:/dev/bus/usb/001/003`). Keep in mind that
-   > the device number may change after a reboot or USB re-enumeration, so
-   > you would need to update the path when that happens.
-2. Set `UPS_DRIVER` to match your UPS model — see the
-   [NUT hardware compatibility list](https://networkupstools.org/stable-hcl.html).
-   Common drivers: `usbhid-ups` (most USB UPS),
-   `blazer_usb` (some Megatec/Q1 protocol UPS),
-   `apc_modbus` (APC Smart-UPS via Modbus),
-   `snmp-ups` (network-managed UPS/PDU via SNMP).
-3. The default `API_USER`/`API_PASSWORD` are NUT's legacy
-   `monuser`/`secret` — the values most clients default to (including
-   appliances like Synology DSM that hard-code them with no UI
-   override). The entrypoint logs a warn line when these defaults are
-   used so they stay visible in your logs, but does not block startup.
-   Rotate to a strong value if your NUT client supports custom
-   credentials; leave as-is for clients that don't. NUT reads are
-   anonymous anyway — the credential only gates SET/INSTCMD/FSD
-   operations.
-4. Port 3493 is the standard NUT protocol port. Point your NUT
-   clients (e.g. `upsmon` on other hosts,
-   [PeaNUT](https://github.com/Brandawg93/PeaNUT) dashboard)
-   at `<host-ip>:3493`.
-5. This container runs as root because NUT requires ownership changes on config files and USB devices at startup.
-
-**Host shutdown (optional):**
-To enable automatic host poweroff on battery critical, add these to your
-compose file:
-```yaml
-environment:
-  SHUTDOWN_ON_BATTERY_CRITICAL: "true"
-volumes:
-  - /run/dbus/system_bus_socket:/run/dbus/system_bus_socket
-```
-This uses D-Bus to call `org.freedesktop.login1.Manager.PowerOff` on
-the host's systemd. Works on any systemd-based Linux distribution.
-
-**Custom NUT config (advanced):**
-Mount your own config files with a `.user` suffix to bypass env-var
-generation:
-```yaml
-volumes:
-  - ./ups.conf:/etc/nut/ups.conf.user:ro
-  - ./upsd.users:/etc/nut/upsd.users.user:ro
-```
-
-For additional configuration options not covered by this image's environment variables, refer to the [Network UPS Tools (NUT) documentation](https://networkupstools.org/docs/user-manual.chunked/index.html).
-
-## Environment Variables
-
-| Variable | Description | Default | Required |
-|----------|-------------|---------|----------|
-| `TZ` | Container timezone | `Europe/Paris` | No |
-| `UPS_NAME` | NUT UPS identifier used in config files and queries (default: ups) | `ups` | No |
-| `UPS_DESC` | Human-readable UPS description shown in NUT clients | `My UPS` | No |
-| `UPS_DRIVER` | NUT driver for your UPS model (default: usbhid-ups; see NUT hardware compatibility list) | `usbhid-ups` | No |
-| `UPS_PORT` | UPS device port — use `auto` for USB auto-detection | `auto` | No |
-| `API_USER` | Username for NUT network clients to authenticate with. Set via NUT_API_USER in your .env file; defaults to monuser | `monuser` | No |
-| `API_PASSWORD` | Password for the NUT API user. Set via NUT_API_PASSWORD in your .env file; defaults to NUT legacy secret. The entrypoint warns on weak credentials but does not block startup. | `secret` | No |
-
-### Additional Environment Variables
-
-The following optional environment variables are also supported but not included in the compose example above. Add them to your `environment:` block as needed.
-
-**Network configuration:**
+### Environment variables
 
 | Variable | Description | Default |
 |----------|-------------|---------|
+| `TZ` | Container timezone | `Europe/Paris` |
+| `UPS_NAME` | NUT UPS identifier used in config files and queries | `ups` |
+| `UPS_DESC` | Human-readable UPS description shown in NUT clients | `My UPS` |
+| `UPS_DRIVER` | NUT driver for your UPS model (see [NUT HCL](https://networkupstools.org/stable-hcl.html)) | `usbhid-ups` |
+| `UPS_PORT` | UPS device port — use `auto` for USB auto-detection | `auto` |
+| `API_USER` | Username for NUT network clients to authenticate with | `monuser` |
+| `API_PASSWORD` | Password for the NUT API user (entrypoint warns on weak credentials) | `secret` |
 | `API_ADDRESS` | Listen address for upsd | `0.0.0.0` |
 | `API_PORT` | Listen port for upsd | `3493` |
-
-**Battery threshold overrides:**
-
-Override when the UPS reports low or critical battery. Setting any of
-these variables automatically enables `ignorelb` in ups.conf, telling
-NUT to use your thresholds instead of the hardware defaults.
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `LOWBATT_PERCENT` | Low-battery threshold percentage | Hardware default |
-| `LOWBATT_RUNTIME` | Low-battery threshold runtime (seconds) | Hardware default |
-| `CRITBATT_PERCENT` | Critical-battery threshold percentage | Hardware default |
-| `CRITBATT_RUNTIME` | Critical-battery threshold runtime (seconds) | Hardware default |
-
-**upsmon tuning:**
-
-| Variable | Description | Default |
-|----------|-------------|---------|
+| `LOWBATT_PERCENT` | Low-battery threshold percentage (enables `ignorelb`) | Hardware default |
+| `LOWBATT_RUNTIME` | Low-battery threshold runtime in seconds (enables `ignorelb`) | Hardware default |
+| `CRITBATT_PERCENT` | Critical-battery threshold percentage (enables `ignorelb`) | Hardware default |
+| `CRITBATT_RUNTIME` | Critical-battery threshold runtime in seconds (enables `ignorelb`) | Hardware default |
 | `POLLFREQ` | Seconds between UPS status polls | `5` |
 | `POLLFREQALERT` | Seconds between polls when on battery | `5` |
 | `DEADTIME` | Seconds before declaring UPS stale | `15` |
@@ -211,54 +82,22 @@ NUT to use your thresholds instead of the hardware defaults.
 | `HOSTSYNC` | Seconds to wait for secondary hosts to disconnect | `15` |
 | `NOCOMMWARNTIME` | Seconds before warning about lost UPS communication | `300` |
 | `RBWARNTIME` | Seconds between "replace battery" warnings | `43200` |
-
-**Host shutdown:**
-
-| Variable | Description | Default |
-|----------|-------------|---------|
 | `SHUTDOWN_ON_BATTERY_CRITICAL` | Power off host via D-Bus on battery critical | `false` |
+| `ADMIN_PASSWORD` | Password for the NUT admin user (set/FSD actions); auto-generated if unset | Random (cached) |
 
-Requires mounting `/run/dbus/system_bus_socket` from the host. See
-Deployment section above for details.
+### Volumes
 
-**Authentication:**
+| Mount | Description |
+|-------|-------------|
+| `/dev/bus/usb` | Full USB bus (device passthrough for UPS hardware) |
+| `/run/dbus/system_bus_socket` | Host D-Bus socket (required only if `SHUTDOWN_ON_BATTERY_CRITICAL=true`) |
+| `/etc/nut/*.user` | Custom NUT config overrides (e.g. `ups.conf.user`) — bypasses env-var generation |
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `ADMIN_PASSWORD` | Password for the NUT admin user (set/FSD actions). If unset, generated randomly on first start and cached at `/var/run/nut/admin_password` inside the container — stable across restarts within the same container, but regenerated whenever the container is recreated (e.g. on compose redeploy). | Random (cached) |
+## Healthcheck
 
+The built-in healthcheck runs `upsc $UPS_NAME@127.0.0.1` to verify the NUT driver is communicating with the UPS hardware. It becomes unhealthy when the UPS device is disconnected, the driver failed to start, or upsd is not responding, and recovers once the device is reconnected and the driver re-establishes communication.
 
-## Ports
-
-| Port | Description |
-|------|-------------|
-| `3493` | NUT protocol (upsd network clients) |
-
-
-## Docker Healthcheck
-
-The healthcheck queries the UPS status via the NUT protocol to verify
-the driver is communicating with the UPS hardware.
-
-**When it becomes unhealthy:**
-- UPS device is disconnected or powered off
-- UPS driver failed to start (wrong driver for the hardware)
-- upsd daemon is not responding
-
-**When it recovers:**
-- UPS device is reconnected and the driver re-establishes communication. The entire USB bus is mapped, so device number changes after reconnection are handled automatically. A container restart may still be needed for the driver to re-detect the device.
-
-To check health manually:
-```bash
-docker inspect --format='{{json .State.Health.Log}}' nut-upsd | python3 -m json.tool
-```
-
-| Type | Command | Meaning |
-|------|---------|---------|
-| NUT protocol | `upsc $UPS_NAME@127.0.0.1` | Exit 0 = UPS driver is communicating |
-
-
-## Code Quality
+## Code quality
 
 | Metric | Value |
 |--------|-------|
@@ -280,7 +119,7 @@ Not tested via unit tests: the config file generation and NUT daemon
 startup — validated on first deploy via the NUT protocol healthcheck
 (queries the UPS directly).
 
-## Security Review
+## Security
 
 **No dependency CVEs.** NUT, libmodbus, and net-snmp are compiled
 from patched upstream sources via native cross-compilation,
@@ -323,15 +162,6 @@ All dependencies are updated automatically via [Renovate](https://github.com/ren
 | netsnmp | `v5.9.5.2` | [GitHub](https://github.com/net-snmp/net-snmp) |
 | nut | `v2.8.5` | [GitHub](https://github.com/networkupstools/nut) |
 
-## Design Principles
-
-- **Always up to date**: Base images, packages, and libraries are updated automatically via Renovate. Unlike many community Docker images that ship outdated or abandoned dependencies, these images receive continuous updates.
-- **Minimal attack surface**: When possible, pure Go apps use `gcr.io/distroless/static:nonroot` (no shell, no package manager, runs as non-root). Apps requiring system packages use Alpine with the minimum necessary privileges.
-- **Digest-pinned**: Every `FROM` instruction pins a SHA256 digest. All GitHub Actions are digest-pinned.
-- **Multi-platform**: Built for `linux/amd64` and `linux/arm64`.
-- **Healthchecks**: Every container includes a Docker healthcheck.
-- **Provenance**: Build provenance is attested via GitHub Actions, verifiable with `gh attestation verify`.
-
 ## Credits
 
 This project packages [Network UPS Tools (NUT)](https://github.com/networkupstools/nut) into a container image. All credit for the core functionality goes to the upstream maintainers.
@@ -342,6 +172,11 @@ This project packages [Network UPS Tools (NUT)](https://github.com/networkupstoo
   library used by NUT's `snmp-ups` driver
 - [xx](https://github.com/tonistiigi/xx) — Dockerfile
   cross-compilation helper for native multi-platform builds
+
+## Contributing
+
+Issues and pull requests are welcome. Please open an issue first for
+larger changes so the approach can be discussed before implementation.
 
 ## Disclaimer
 
