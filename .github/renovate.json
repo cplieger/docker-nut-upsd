@@ -1,6 +1,6 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["github>cplieger/ci"],
+  "extends": ["github>cplieger/.github"],
   "packageRules": [
     {
       "description": "NUT build deps (libmodbus, net-snmp, nut): group together, require approval",
