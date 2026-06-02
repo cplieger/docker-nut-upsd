@@ -5,8 +5,6 @@ on:
     paths:
       - "Dockerfile"
       - ".github/workflows/security.yml"
-  schedule:
-    - cron: "17 5 * * 1"
   workflow_dispatch:
 
 permissions:
@@ -15,6 +13,4 @@ permissions:
 
 jobs:
   scan:
-    uses: cplieger/ci/.github/workflows/security-scan.yaml@19357decce18d479bf83e80a8d78b67226dfaf24 # v1
-    with:
-      scan-type: "both"
+    uses: cplieger/ci/.github/workflows/security-scan.yaml@v1
