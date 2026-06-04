@@ -2,7 +2,7 @@
 
 ![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue)
 [![GitHub release](https://img.shields.io/github/v/release/cplieger/docker-nut-upsd)](https://github.com/cplieger/docker-nut-upsd/releases)
-[![Image Size](https://ghcr-badge.egpl.dev/cplieger/nut-upsd/size)](https://github.com/cplieger/docker-nut-upsd/pkgs/container/nut-upsd)
+[![Image Size](https://ghcr-badge.egpl.dev/cplieger/docker-nut-upsd/size)](https://github.com/cplieger/docker-nut-upsd/pkgs/container/nut-upsd)
 ![Platforms](https://img.shields.io/badge/platforms-amd64%20%7C%20arm64-blue)
 ![base: Alpine 3.23.4](https://img.shields.io/badge/base-Alpine_3.23.4-0D597F?logo=alpinelinux)
 
@@ -30,12 +30,12 @@ The container runs the Network UPS Tools (NUT) upsd daemon in Alpine Linux. The 
 
 ## Quick start
 
-Available from both `ghcr.io/cplieger/nut-upsd` and `docker.io/cplieger/nut-upsd` — identical images and tags.
+Available from both `ghcr.io/cplieger/docker-nut-upsd` and `docker.io/cplieger/docker-nut-upsd` — identical images and tags.
 
 ```yaml
 services:
   nut-upsd:
-    image: ghcr.io/cplieger/nut-upsd:latest
+    image: ghcr.io/cplieger/docker-nut-upsd:latest
     container_name: nut-upsd
     restart: unless-stopped
     user: "0:0"  # required for config file permissions

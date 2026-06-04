@@ -1,6 +1,6 @@
 services:
   nut-upsd:
-    image: ghcr.io/cplieger/nut-upsd:latest
+    image: ghcr.io/cplieger/docker-nut-upsd:latest
     container_name: nut-upsd
     restart: unless-stopped
     user: "0:0"  # required for config file permissions
