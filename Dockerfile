@@ -134,6 +134,16 @@ COPY --chmod=755 nut-notify.sh /usr/local/bin/nut-notify.sh
 COPY --chmod=755 nut-shutdown.sh /usr/local/bin/nut-shutdown.sh
 COPY --chmod=755 nut-shutdown-noop.sh /usr/local/bin/nut-shutdown-noop.sh
 EXPOSE 3493
+
+# trivy:ignore:DS-0002 — NUT needs root at container init for two reasons:
+# 1. upsdrvctl (driver startup) accesses /dev/bus/usb/* via libusb, which
+#    requires root or CAP_SYS_RAWIO + the host-side USB device passthrough
+#    (--device=/dev/bus/usb/...) is keyed to root by udev defaults.
+# 2. The entrypoint chowns /etc/nut + /var/run/nut to the nut user before
+#    exec'ing upsd.
+# upsd (the daemon serving port 3493) drops to user "nut" internally via
+# the --with-user=nut --with-group=nut configure flags used at build time.
+# So the NUT process IS non-root at runtime; only the container init is.
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=15s \
     CMD timeout 3 upsc "$UPS_NAME@127.0.0.1" 2>/dev/null | grep -q 'ups.status' || exit 1
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
