@@ -1,74 +1,62 @@
 # check=error=true
-# renovate: datasource=docker depName=tonistiigi/xx
-FROM --platform=$BUILDPLATFORM tonistiigi/xx:1.9.0@sha256:c64defb9ed5a91eacb37f96ccc3d4cd72521c4bd18d5442905b95e2226b0e707 AS xx
 
-FROM --platform=$BUILDPLATFORM alpine:3.23.4@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11 AS builder
+FROM alpine:3.23.4@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11 AS builder
 
-COPY --from=xx / /
 SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
 
-RUN apk add --no-cache automake build-base clang libtool lld perl pkgconf
-
-ARG TARGETPLATFORM
-RUN xx-apk add --no-cache \
+RUN apk add --no-cache automake build-base clang libtool lld perl pkgconf \
         gcc musl-dev libusb-compat-dev openssl-dev linux-headers
 
 # renovate: datasource=github-releases depName=stephane/libmodbus
 ARG LIBMODBUS_VERSION=v3.1.12
 WORKDIR /build/libmodbus
-RUN SYSROOT=$(xx-info sysroot) \
-    && wget -qO- \
+RUN wget -qO- \
       "https://github.com/stephane/libmodbus/releases/download/${LIBMODBUS_VERSION}/libmodbus-${LIBMODBUS_VERSION#v}.tar.gz" \
       | tar xz --strip-components=1 \
     && ./configure --prefix=/usr --disable-static \
-       --host="$(xx-clang --print-target-triple)" \
-       CC=xx-clang \
+       CC=clang \
     && make -j"$(nproc)" -C src \
-    && mkdir -p "${SYSROOT}/usr/lib" "${SYSROOT}/usr/include/modbus" \
-       "${SYSROOT}/usr/lib/pkgconfig" \
-    && xx-clang -shared -o "${SYSROOT}/usr/lib/libmodbus.so.5.1.0" \
+    && mkdir -p /usr/lib /usr/include/modbus \
+       /usr/lib/pkgconfig \
+    && clang -shared -o /usr/lib/libmodbus.so.5.1.0 \
        src/.libs/modbus.o src/.libs/modbus-data.o \
        src/.libs/modbus-rtu.o src/.libs/modbus-tcp.o \
        -Wl,-soname,libmodbus.so.5 \
-    && ln -s libmodbus.so.5.1.0 "${SYSROOT}/usr/lib/libmodbus.so.5" \
-    && ln -s libmodbus.so.5.1.0 "${SYSROOT}/usr/lib/libmodbus.so" \
+    && ln -s libmodbus.so.5.1.0 /usr/lib/libmodbus.so.5 \
+    && ln -s libmodbus.so.5.1.0 /usr/lib/libmodbus.so \
     && cp src/modbus.h src/modbus-version.h src/modbus-rtu.h \
-       src/modbus-tcp.h "${SYSROOT}/usr/include/modbus/" \
-    && cp libmodbus.pc "${SYSROOT}/usr/lib/pkgconfig/"
+       src/modbus-tcp.h /usr/include/modbus/ \
+    && cp libmodbus.pc /usr/lib/pkgconfig/
 
 # renovate: datasource=github-tags depName=net-snmp/net-snmp
 ARG NETSNMP_VERSION=v5.9.5.2
 WORKDIR /build/netsnmp
-RUN SYSROOT=$(xx-info sysroot) \
-    && wget -qO- \
+RUN wget -qO- \
       "https://github.com/net-snmp/net-snmp/archive/refs/tags/${NETSNMP_VERSION}.tar.gz" \
       | tar xz --strip-components=1 \
     && ./configure --prefix=/usr --disable-static \
        --build="$(uname -m)-linux-musl" \
-       --host="$(xx-clang --print-target-triple)" \
-       CC=xx-clang \
+       CC=clang \
        --with-defaults \
        --disable-applications \
        --disable-manuals --disable-scripts --disable-mibs \
        --enable-shared --with-openssl \
     && make -j"$(nproc)" -C snmplib \
-    && mkdir -p "${SYSROOT}/usr/lib" \
-    && xx-clang -shared -o "${SYSROOT}/usr/lib/libnetsnmp.so.45.0.0" \
+    && mkdir -p /usr/lib \
+    && clang -shared -o /usr/lib/libnetsnmp.so.45.0.0 \
        snmplib/.libs/*.o -lssl -lcrypto \
-    && ln -s libnetsnmp.so.45.0.0 "${SYSROOT}/usr/lib/libnetsnmp.so.45" \
-    && ln -s libnetsnmp.so.45.0.0 "${SYSROOT}/usr/lib/libnetsnmp.so" \
-    && cp -r include/net-snmp "${SYSROOT}/usr/include/"
+    && ln -s libnetsnmp.so.45.0.0 /usr/lib/libnetsnmp.so.45 \
+    && ln -s libnetsnmp.so.45.0.0 /usr/lib/libnetsnmp.so \
+    && cp -r include/net-snmp /usr/include/
 
 # renovate: datasource=github-releases depName=networkupstools/nut
 ARG NUT_VERSION=v2.8.5
 WORKDIR /build/nut
-RUN SYSROOT=$(xx-info sysroot) \
-    && wget -qO- \
+RUN wget -qO- \
       "https://github.com/networkupstools/nut/releases/download/${NUT_VERSION}/nut-${NUT_VERSION#v}.tar.gz" \
       | tar xz --strip-components=1 \
     && sed -i 's/as_fn_error.*Net-SNMP libraries not found/: #/' configure \
-    && PKG_CONFIG_SYSROOT_DIR="${SYSROOT}" \
-       PKG_CONFIG_LIBDIR="${SYSROOT}/usr/lib/pkgconfig" \
+    && PKG_CONFIG_LIBDIR="/usr/lib/pkgconfig" \
        LIBS="-lssl -lcrypto" \
        ac_cv_func_setpgrp_void=yes \
        ac_cv_func_memcmp_working=yes \
@@ -78,10 +66,9 @@ RUN SYSROOT=$(xx-info sysroot) \
        --with-statepath=/var/run/nut \
        --with-drvpath=/usr/lib/nut \
        --with-user=nut --with-group=nut \
-       --host="$(xx-clang --print-target-triple)" \
-       CC=xx-clang CXX="xx-clang++" \
+       CC=clang CXX=clang++ \
        --with-usb --with-snmp --with-modbus \
-       --with-snmp-includes="-I${SYSROOT}/usr/include" \
+       --with-snmp-includes="-I/usr/include" \
        --with-snmp-libs="-lnetsnmp -lssl -lcrypto" \
        --disable-shared --enable-static \
        --without-cgi --without-doc --without-avahi \
@@ -97,9 +84,8 @@ RUN SYSROOT=$(xx-info sysroot) \
        ! -name upsdrvctl -exec cp {} /out/usr/lib/nut/ \; \
     && cp data/driver.list /out/usr/share/nut/ \
     && cp data/cmdvartab /out/usr/share/ \
-    && xx-verify /out/usr/sbin/upsd \
-    && cp "${SYSROOT}/usr/lib/libmodbus.so"* /out/usr/lib/ \
-    && cp "${SYSROOT}/usr/lib/libnetsnmp.so"* /out/usr/lib/
+    && cp /usr/lib/libmodbus.so* /out/usr/lib/ \
+    && cp /usr/lib/libnetsnmp.so* /out/usr/lib/
 
 FROM alpine:3.23.4@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
 
