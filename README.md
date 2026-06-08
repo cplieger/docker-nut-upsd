@@ -165,6 +165,7 @@ All dependencies are updated automatically via [Renovate](https://github.com/ren
 ## Credits
 
 This project packages [Network UPS Tools (NUT)](https://github.com/networkupstools/nut) into a container image. All credit for the core functionality goes to the upstream maintainers.
+
 - [libmodbus](https://github.com/stephane/libmodbus) by
   [@stephane](https://github.com/stephane) — the Modbus protocol
   library used by NUT's `apc_modbus` driver
