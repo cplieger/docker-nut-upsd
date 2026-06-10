@@ -1,6 +1,6 @@
 # check=error=true
 
-FROM alpine:3.24.0@sha256:660e0827bd401543d81323d4886abbd08fda0fe3ba84337837d0b11a67251283 AS builder
+FROM alpine:3.24.0@sha256:8ddefa941e689fc29abcdeb8dae3b3c6d139cc08ce9a52633931160701770685 AS builder
 
 SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
 
@@ -87,7 +87,7 @@ RUN wget -qO- \
     && cp /usr/lib/libmodbus.so* /out/usr/lib/ \
     && cp /usr/lib/libnetsnmp.so* /out/usr/lib/
 
-FROM alpine:3.24.0@sha256:660e0827bd401543d81323d4886abbd08fda0fe3ba84337837d0b11a67251283
+FROM alpine:3.24.0@sha256:8ddefa941e689fc29abcdeb8dae3b3c6d139cc08ce9a52633931160701770685
 
 RUN apk add --no-cache \
         dbus \
