@@ -97,28 +97,6 @@ services:
 
 The built-in healthcheck runs `upsc $UPS_NAME@127.0.0.1` to verify the NUT driver is communicating with the UPS hardware. It becomes unhealthy when the UPS device is disconnected, the driver failed to start, or upsd is not responding, and recovers once the device is reconnected and the driver re-establishes communication.
 
-## Code quality
-
-| Metric | Value |
-|--------|-------|
-| Language | POSIX shell (Alpine) |
-| Entrypoint | 454 lines |
-| Static Analysis | [ShellCheck](https://www.shellcheck.net/) (enforced in CI) |
-| Validation Tests | 242 |
-| Input Validation | Newline injection, numeric, bracket injection, quote injection |
-
-The entrypoint generates NUT config files from environment variables
-with security-focused input validation: all values are checked for
-embedded newlines (prevents config injection), bracket characters
-(prevents INI section injection), double-quote characters (prevents
-NUT config quoting breakout), and numeric parameters are validated
-as positive integers. The validation logic is tested via a shared
-reference library with 242 tests. ShellCheck enforced in CI.
-
-Not tested via unit tests: the config file generation and NUT daemon
-startup — validated on first deploy via the NUT protocol healthcheck
-(queries the UPS directly).
-
 ## Security
 
 **No dependency CVEs.** NUT, libmodbus, and net-snmp are compiled
