@@ -113,7 +113,7 @@ eliminating all CVEs present in Alpine's older packages.
 | [grype](https://github.com/anchore/grype) | 0 dependency CVEs (Alpine base only) |
 | [semgrep](https://semgrep.dev/) | 1 info (missing USER, expected) |
 
-All three source versions are tracked by Renovate. The
+All source versions are tracked by Renovate. The
 multi-stage build uses [xx](https://github.com/tonistiigi/xx)
 for native cross-compilation (no QEMU). The entrypoint validates
 all env vars before generating NUT config: newline injection
@@ -133,13 +133,13 @@ are included (USB HID, Modbus, SNMP).
 
 All dependencies are updated automatically via [Renovate](https://github.com/renovatebot/renovate) and pinned by digest or version for reproducibility.
 
-| Dependency | Version | Source |
-|------------|---------|--------|
-| tonistiigi/xx | `1.9.0` | [Docker Hub](https://hub.docker.com/_/xx) |
-| alpine | `3.23.4` | [Alpine](https://hub.docker.com/_/alpine) |
-| libmodbus | `v3.1.12` | [GitHub](https://github.com/stephane/libmodbus) |
-| netsnmp | `v5.9.5.2` | [GitHub](https://github.com/net-snmp/net-snmp) |
-| nut | `v2.8.5` | [GitHub](https://github.com/networkupstools/nut) |
+| Dependency | Source |
+|------------|--------|
+| tonistiigi/xx | [Docker Hub](https://hub.docker.com/_/xx) |
+| alpine | [Alpine](https://hub.docker.com/_/alpine) |
+| libmodbus | [GitHub](https://github.com/stephane/libmodbus) |
+| netsnmp | [GitHub](https://github.com/net-snmp/net-snmp) |
+| nut | [GitHub](https://github.com/networkupstools/nut) |
 
 ## Credits
 

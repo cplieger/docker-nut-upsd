@@ -8,7 +8,7 @@ a single file.
 ## Script layout
 
 `entrypoint.sh` (`#!/bin/sh`, `set -eu`) is the only executable entry
-point. It sources four helper modules and orchestrates startup; the
+point. It sources the helper modules and orchestrates startup; the
 helpers are libraries, not programs:
 
 | Script | Role |
@@ -18,7 +18,7 @@ helpers are libraries, not programs:
 | `lifecycle.sh` | `stop_services`, `wait_for_pidfile` daemon helpers |
 | `password.sh` | `ADMIN_PASSWORD` generation/caching, weak-password warning |
 
-Three more scripts are invoked by NUT at runtime (not sourced):
+More scripts are invoked by NUT at runtime (not sourced):
 
 - `nut-notify.sh` — `NOTIFYCMD`; turns UPS events into structured
   `level=… msg=…` log lines.
