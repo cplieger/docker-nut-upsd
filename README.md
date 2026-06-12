@@ -1,10 +1,12 @@
 # docker-nut-upsd
 
-![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue)
+[![CI](https://github.com/cplieger/docker-nut-upsd/actions/workflows/ci.yaml/badge.svg)](https://github.com/cplieger/docker-nut-upsd/actions/workflows/ci.yaml)
 [![GitHub release](https://img.shields.io/github/v/release/cplieger/docker-nut-upsd)](https://github.com/cplieger/docker-nut-upsd/releases)
 [![Image Size](https://ghcr-badge.egpl.dev/cplieger/docker-nut-upsd/size)](https://github.com/cplieger/docker-nut-upsd/pkgs/container/nut-upsd)
 ![Platforms](https://img.shields.io/badge/platforms-amd64%20%7C%20arm64-blue)
-![base: Alpine 3.23.4](https://img.shields.io/badge/base-Alpine_3.23.4-0D597F?logo=alpinelinux)
+![base: Alpine](https://img.shields.io/badge/base-Alpine-0D597F?logo=alpinelinux)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/docker-nut-upsd/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/docker-nut-upsd)
+[![License: GPL-3.0](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
 
 Monitor your UPS and let networked machines shut down gracefully during power outages.
 
