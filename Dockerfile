@@ -87,7 +87,7 @@ RUN wget -qO- \
     && cp /usr/lib/libmodbus.so* /out/usr/lib/ \
     && cp /usr/lib/libnetsnmp.so* /out/usr/lib/
 
-FROM alpine:3.24.0@sha256:a2d49ea686c2adfe3c992e47dc3b5e7fa6e6b5055609400dc2acaeb241c829f4
+FROM alpine:3.24.0@sha256:a2d49ea686c2adfe3c992e47dc3b5e7fa6e6b5055609400dc2acaeb241c829f4 AS runtime
 
 # apk upgrade: the pinned base ships some packages (e.g. libssl3) at a stale,
 # CVE-affected revision; upgrading floats them forward on each rebuild.
@@ -123,6 +123,24 @@ COPY --chmod=755 nut-notify.sh /usr/local/bin/nut-notify.sh
 COPY --chmod=755 nut-shutdown.sh /usr/local/bin/nut-shutdown.sh
 COPY --chmod=755 nut-shutdown-noop.sh /usr/local/bin/nut-shutdown-noop.sh
 EXPOSE 3493
+
+# ---------------------------------------------------------------------------
+# Test stage — runs the build-time smoke test (NUT binaries run; the
+# entrypoint's env -> config generation and input-validation guards behave).
+# A failure here fails the centralized `ci / validate` docker build gate,
+# because the final stage below depends on this stage's marker.
+# ---------------------------------------------------------------------------
+FROM runtime AS test
+COPY tests/ /tmp/tests/
+RUN sh /tmp/tests/smoke.sh && touch /tests-passed
+
+# ---------------------------------------------------------------------------
+# Final stage — the runtime image. Must remain last so the CI build gate
+# (which builds the default target) produces it; the marker COPY forces the
+# test stage to build and pass first.
+# ---------------------------------------------------------------------------
+FROM runtime AS final
+COPY --from=test /tests-passed /tests-passed
 
 # Note: this image runs as root by design — NUT needs root at init for USB
 # device access (upsdrvctl) and to chown the runtime directories. The upsd
