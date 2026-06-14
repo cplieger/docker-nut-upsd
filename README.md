@@ -1,12 +1,11 @@
 # docker-nut-upsd
 
-[![CI](https://github.com/cplieger/docker-nut-upsd/actions/workflows/ci.yaml/badge.svg)](https://github.com/cplieger/docker-nut-upsd/actions/workflows/ci.yaml)
-[![GitHub release](https://img.shields.io/github/v/release/cplieger/docker-nut-upsd)](https://github.com/cplieger/docker-nut-upsd/releases)
 [![Image Size](https://ghcr-badge.egpl.dev/cplieger/docker-nut-upsd/size)](https://github.com/cplieger/docker-nut-upsd/pkgs/container/nut-upsd)
 ![Platforms](https://img.shields.io/badge/platforms-amd64%20%7C%20arm64-blue)
 ![base: Alpine](https://img.shields.io/badge/base-Alpine-0D597F?logo=alpinelinux)
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/docker-nut-upsd/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/docker-nut-upsd)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13206/badge)](https://www.bestpractices.dev/projects/13206)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/docker-nut-upsd/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/docker-nut-upsd)
+[![SBOM](https://img.shields.io/badge/SBOM-SPDX-1D4ED8)](https://github.com/cplieger/docker-nut-upsd/releases)
 
 Monitor your UPS and let networked machines shut down gracefully during power outages.
 
