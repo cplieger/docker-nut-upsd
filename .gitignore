@@ -1,4 +1,5 @@
 # Kiro skill artifacts (code-review, refactor, steering-maintenance)
 **/.code-review/
+**/.judgement/
 **/.refactor/
 **/.steering-maintenance/
