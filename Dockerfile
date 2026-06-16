@@ -21,6 +21,10 @@ RUN wget -qO- \
 # renovate: datasource=github-tags depName=net-snmp/net-snmp
 ARG NETSNMP_VERSION=v5.9.5.2
 WORKDIR /build/netsnmp
+# The conditional netsnmp.pc fallback below writes literal ${prefix}/${libdir}
+# for pkg-config to expand at consume time, NOT the shell — hence the
+# single-quoted printf format string. SC2016 is a false positive here.
+# hadolint ignore=SC2016
 RUN wget -qO- \
       "https://github.com/net-snmp/net-snmp/archive/refs/tags/${NETSNMP_VERSION}.tar.gz" \
       | tar xz --strip-components=1 \
