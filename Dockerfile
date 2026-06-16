@@ -15,18 +15,8 @@ RUN wget -qO- \
       | tar xz --strip-components=1 \
     && ./configure --prefix=/usr --disable-static \
        CC=clang \
-    && make -j"$(nproc)" -C src \
-    && mkdir -p /usr/lib /usr/include/modbus \
-       /usr/lib/pkgconfig \
-    && clang -shared -o /usr/lib/libmodbus.so.5.1.0 \
-       src/.libs/modbus.o src/.libs/modbus-data.o \
-       src/.libs/modbus-rtu.o src/.libs/modbus-tcp.o \
-       -Wl,-soname,libmodbus.so.5 \
-    && ln -s libmodbus.so.5.1.0 /usr/lib/libmodbus.so.5 \
-    && ln -s libmodbus.so.5.1.0 /usr/lib/libmodbus.so \
-    && cp src/modbus.h src/modbus-version.h src/modbus-rtu.h \
-       src/modbus-tcp.h /usr/include/modbus/ \
-    && cp libmodbus.pc /usr/lib/pkgconfig/
+    && make -j"$(nproc)" \
+    && make install
 
 # renovate: datasource=github-tags depName=net-snmp/net-snmp
 ARG NETSNMP_VERSION=v5.9.5.2
@@ -42,12 +32,14 @@ RUN wget -qO- \
        --disable-manuals --disable-scripts --disable-mibs \
        --enable-shared --with-openssl \
     && make -j"$(nproc)" -C snmplib \
-    && mkdir -p /usr/lib \
-    && clang -shared -o /usr/lib/libnetsnmp.so.45.0.0 \
-       snmplib/.libs/*.o -lssl -lcrypto \
-    && ln -s libnetsnmp.so.45.0.0 /usr/lib/libnetsnmp.so.45 \
-    && ln -s libnetsnmp.so.45.0.0 /usr/lib/libnetsnmp.so \
-    && cp -r include/net-snmp /usr/include/
+    && make -C snmplib install \
+    && cp -r include/net-snmp /usr/include/ \
+    && if [ ! -f /usr/lib/pkgconfig/netsnmp.pc ]; then \
+         mkdir -p /usr/lib/pkgconfig \
+         && printf 'prefix=/usr\nexec_prefix=${prefix}\nlibdir=${exec_prefix}/lib\nincludedir=${prefix}/include\n\nName: netsnmp\nDescription: Net-SNMP library\nVersion: %s\nLibs: -L${libdir} -lnetsnmp\nLibs.private: -lssl -lcrypto\nCflags: -I${includedir}\n' \
+           "$(echo "${NETSNMP_VERSION}" | sed 's/^v//')" \
+           > /usr/lib/pkgconfig/netsnmp.pc; \
+       fi
 
 # renovate: datasource=github-releases depName=networkupstools/nut
 ARG NUT_VERSION=v2.8.5
@@ -55,21 +47,17 @@ WORKDIR /build/nut
 RUN wget -qO- \
       "https://github.com/networkupstools/nut/releases/download/${NUT_VERSION}/nut-${NUT_VERSION#v}.tar.gz" \
       | tar xz --strip-components=1 \
-    && sed -i 's/as_fn_error.*Net-SNMP libraries not found/: #/' configure \
     && PKG_CONFIG_LIBDIR="/usr/lib/pkgconfig" \
        LIBS="-lssl -lcrypto" \
        ac_cv_func_setpgrp_void=yes \
        ac_cv_func_memcmp_working=yes \
        ac_cv_func_mmap_fixed_mapped=yes \
-       ac_cv_lib_netsnmp_init_snmp=yes \
        ./configure --prefix=/usr --sysconfdir=/etc/nut \
        --with-statepath=/var/run/nut \
        --with-drvpath=/usr/lib/nut \
        --with-user=nut --with-group=nut \
        CC=clang CXX=clang++ \
        --with-usb --with-snmp --with-modbus \
-       --with-snmp-includes="-I/usr/include" \
-       --with-snmp-libs="-lnetsnmp -lssl -lcrypto" \
        --disable-shared --enable-static \
        --without-cgi --without-doc --without-avahi \
        --without-ipmi --without-neon --without-powerman \
