@@ -11,12 +11,12 @@ a single file.
 point. It sources the helper modules and orchestrates startup; the
 helpers are libraries, not programs:
 
-| Script | Role |
-|--------|------|
-| `validate.sh` | Env-var validation functions + table-driven dispatch |
+| Script               | Role                                                              |
+| -------------------- | ----------------------------------------------------------------- |
+| `validate.sh`        | Env-var validation functions + table-driven dispatch              |
 | `generate-config.sh` | Generates `ups.conf` / `upsd.conf` / `upsd.users` / `upsmon.conf` |
-| `lifecycle.sh` | `stop_services`, `wait_for_pidfile` daemon helpers |
-| `password.sh` | `ADMIN_PASSWORD` generation/caching, weak-password warning |
+| `lifecycle.sh`       | `stop_services`, `wait_for_pidfile` daemon helpers                |
+| `password.sh`        | `ADMIN_PASSWORD` generation/caching, weak-password warning        |
 
 More scripts are invoked by NUT at runtime (not sourced):
 
