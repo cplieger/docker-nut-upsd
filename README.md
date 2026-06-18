@@ -61,38 +61,38 @@ services:
 
 ### Environment variables
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `TZ` | Container timezone | `Europe/Paris` |
-| `UPS_NAME` | NUT UPS identifier used in config files and queries | `ups` |
-| `UPS_DESC` | Human-readable UPS description shown in NUT clients | `My UPS` |
-| `UPS_DRIVER` | NUT driver for your UPS model (see [NUT HCL](https://networkupstools.org/stable-hcl.html)) | `usbhid-ups` |
-| `UPS_PORT` | UPS device port — use `auto` for USB auto-detection | `auto` |
-| `API_USER` | Username for NUT network clients to authenticate with | `monuser` |
-| `API_PASSWORD` | Password for the NUT API user (entrypoint warns on weak credentials) | `secret` |
-| `API_ADDRESS` | Listen address for upsd | `0.0.0.0` |
-| `API_PORT` | Listen port for upsd | `3493` |
-| `LOWBATT_PERCENT` | Low-battery threshold percentage (enables `ignorelb`) | Hardware default |
-| `LOWBATT_RUNTIME` | Low-battery threshold runtime in seconds (enables `ignorelb`) | Hardware default |
-| `CRITBATT_PERCENT` | Critical-battery threshold percentage (enables `ignorelb`) | Hardware default |
-| `CRITBATT_RUNTIME` | Critical-battery threshold runtime in seconds (enables `ignorelb`) | Hardware default |
-| `POLLFREQ` | Seconds between UPS status polls | `5` |
-| `POLLFREQALERT` | Seconds between polls when on battery | `5` |
-| `DEADTIME` | Seconds before declaring UPS stale | `15` |
-| `FINALDELAY` | Seconds between shutdown warning and actual shutdown | `5` |
-| `HOSTSYNC` | Seconds to wait for secondary hosts to disconnect | `15` |
-| `NOCOMMWARNTIME` | Seconds before warning about lost UPS communication | `300` |
-| `RBWARNTIME` | Seconds between "replace battery" warnings | `43200` |
-| `SHUTDOWN_ON_BATTERY_CRITICAL` | Power off host via D-Bus on battery critical | `false` |
-| `ADMIN_PASSWORD` | Password for the NUT admin user (set/FSD actions); auto-generated if unset | Random (cached) |
+| Variable                       | Description                                                                                | Default          |
+| ------------------------------ | ------------------------------------------------------------------------------------------ | ---------------- |
+| `TZ`                           | Container timezone                                                                         | `Europe/Paris`   |
+| `UPS_NAME`                     | NUT UPS identifier used in config files and queries                                        | `ups`            |
+| `UPS_DESC`                     | Human-readable UPS description shown in NUT clients                                        | `My UPS`         |
+| `UPS_DRIVER`                   | NUT driver for your UPS model (see [NUT HCL](https://networkupstools.org/stable-hcl.html)) | `usbhid-ups`     |
+| `UPS_PORT`                     | UPS device port — use `auto` for USB auto-detection                                        | `auto`           |
+| `API_USER`                     | Username for NUT network clients to authenticate with                                      | `monuser`        |
+| `API_PASSWORD`                 | Password for the NUT API user (entrypoint warns on weak credentials)                       | `secret`         |
+| `API_ADDRESS`                  | Listen address for upsd                                                                    | `0.0.0.0`        |
+| `API_PORT`                     | Listen port for upsd                                                                       | `3493`           |
+| `LOWBATT_PERCENT`              | Low-battery threshold percentage (enables `ignorelb`)                                      | Hardware default |
+| `LOWBATT_RUNTIME`              | Low-battery threshold runtime in seconds (enables `ignorelb`)                              | Hardware default |
+| `CRITBATT_PERCENT`             | Critical-battery threshold percentage (enables `ignorelb`)                                 | Hardware default |
+| `CRITBATT_RUNTIME`             | Critical-battery threshold runtime in seconds (enables `ignorelb`)                         | Hardware default |
+| `POLLFREQ`                     | Seconds between UPS status polls                                                           | `5`              |
+| `POLLFREQALERT`                | Seconds between polls when on battery                                                      | `5`              |
+| `DEADTIME`                     | Seconds before declaring UPS stale                                                         | `15`             |
+| `FINALDELAY`                   | Seconds between shutdown warning and actual shutdown                                       | `5`              |
+| `HOSTSYNC`                     | Seconds to wait for secondary hosts to disconnect                                          | `15`             |
+| `NOCOMMWARNTIME`               | Seconds before warning about lost UPS communication                                        | `300`            |
+| `RBWARNTIME`                   | Seconds between "replace battery" warnings                                                 | `43200`          |
+| `SHUTDOWN_ON_BATTERY_CRITICAL` | Power off host via D-Bus on battery critical                                               | `false`          |
+| `ADMIN_PASSWORD`               | Password for the NUT admin user (set/FSD actions); auto-generated if unset                 | Random (cached)  |
 
 ### Volumes
 
-| Mount | Description |
-|-------|-------------|
-| `/dev/bus/usb` | Full USB bus (device passthrough for UPS hardware) |
-| `/run/dbus/system_bus_socket` | Host D-Bus socket (required only if `SHUTDOWN_ON_BATTERY_CRITICAL=true`) |
-| `/etc/nut/*.user` | Custom NUT config overrides (e.g. `ups.conf.user`) — bypasses env-var generation |
+| Mount                         | Description                                                                      |
+| ----------------------------- | -------------------------------------------------------------------------------- |
+| `/dev/bus/usb`                | Full USB bus (device passthrough for UPS hardware)                               |
+| `/run/dbus/system_bus_socket` | Host D-Bus socket (required only if `SHUTDOWN_ON_BATTERY_CRITICAL=true`)         |
+| `/etc/nut/*.user`             | Custom NUT config overrides (e.g. `ups.conf.user`) — bypasses env-var generation |
 
 ## Healthcheck
 
@@ -104,14 +104,14 @@ The built-in healthcheck runs `upsc $UPS_NAME@127.0.0.1` to verify the NUT drive
 from patched upstream sources via native cross-compilation,
 eliminating all CVEs present in Alpine's older packages.
 
-| Tool | Result |
-|------|--------|
-| [shellcheck](https://www.shellcheck.net/) | Clean |
-| [hadolint](https://github.com/hadolint/hadolint) | DL3018 (unpinned apk, accepted) |
-| [gitleaks](https://github.com/gitleaks/gitleaks) | No secrets detected |
-| [trivy](https://trivy.dev/) | 0 dependency CVEs (Alpine base only) |
-| [grype](https://github.com/anchore/grype) | 0 dependency CVEs (Alpine base only) |
-| [semgrep](https://semgrep.dev/) | 1 info (missing USER, expected) |
+| Tool                                             | Result                               |
+| ------------------------------------------------ | ------------------------------------ |
+| [shellcheck](https://www.shellcheck.net/)        | Clean                                |
+| [hadolint](https://github.com/hadolint/hadolint) | DL3018 (unpinned apk, accepted)      |
+| [gitleaks](https://github.com/gitleaks/gitleaks) | No secrets detected                  |
+| [trivy](https://trivy.dev/)                      | 0 dependency CVEs (Alpine base only) |
+| [grype](https://github.com/anchore/grype)        | 0 dependency CVEs (Alpine base only) |
+| [semgrep](https://semgrep.dev/)                  | 1 info (missing USER, expected)      |
 
 All source versions are tracked by Renovate. The
 multi-stage build uses [xx](https://github.com/tonistiigi/xx)
@@ -133,13 +133,13 @@ are included (USB HID, Modbus, SNMP).
 
 All dependencies are updated automatically via [Renovate](https://github.com/renovatebot/renovate) and pinned by digest or version for reproducibility.
 
-| Dependency | Source |
-|------------|--------|
-| tonistiigi/xx | [Docker Hub](https://hub.docker.com/_/xx) |
-| alpine | [Alpine](https://hub.docker.com/_/alpine) |
-| libmodbus | [GitHub](https://github.com/stephane/libmodbus) |
-| netsnmp | [GitHub](https://github.com/net-snmp/net-snmp) |
-| nut | [GitHub](https://github.com/networkupstools/nut) |
+| Dependency    | Source                                           |
+| ------------- | ------------------------------------------------ |
+| tonistiigi/xx | [Docker Hub](https://hub.docker.com/_/xx)        |
+| alpine        | [Alpine](https://hub.docker.com/_/alpine)        |
+| libmodbus     | [GitHub](https://github.com/stephane/libmodbus)  |
+| netsnmp       | [GitHub](https://github.com/net-snmp/net-snmp)   |
+| nut           | [GitHub](https://github.com/networkupstools/nut) |
 
 ## Credits
 
