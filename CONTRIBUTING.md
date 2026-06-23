@@ -15,7 +15,7 @@ helpers are libraries, not programs:
 | -------------------- | ----------------------------------------------------------------- |
 | `validate.sh`        | Env-var validation functions + table-driven dispatch              |
 | `generate-config.sh` | Generates `ups.conf` / `upsd.conf` / `upsd.users` / `upsmon.conf` |
-| `lifecycle.sh`       | `stop_services`, `wait_for_pidfile` daemon helpers                |
+| `lifecycle.sh`       | `stop_services`, `wait_for_pidfile`, USB comms-recovery watchdog  |
 | `password.sh`        | `ADMIN_PASSWORD` generation/caching, weak-password warning        |
 
 More scripts are invoked by NUT at runtime (not sourced):
@@ -78,6 +78,15 @@ new generated file should respect that same override hook.
 - **Runs as root by design.** USB access (`upsdrvctl`) and config
   ownership need it; `upsd` drops to user `nut` internally via configure
   flags. The Trivy AVD-DS-0002 finding is suppressed in `.trivyignore`.
+- **USB re-enumeration is expected, not exceptional.** Many UPSes reset
+  their USB link periodically (the driver runs fine, then goes "Data
+  stale"). The `comms_watchdog` in `lifecycle.sh` recovers from this by
+  re-homing the driver, but it only works if the bus is passed as a
+  **live bind** (`volumes: /dev/bus/usb`) plus `device_cgroup_rules:
+  ["c 189:* rmw"]` — a static `devices:` mapping hides the re-enumerated
+  node from the container. The restart re-opens the device while still
+  root, which is why the driver must not be started already-dropped to
+  `nut`. Keep the watchdog's restart path root-capable.
 
 ## Local validation
 
