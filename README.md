@@ -18,6 +18,7 @@ The container runs the Network UPS Tools (NUT) upsd daemon in Alpine Linux. The 
 - Supports USB HID, Modbus, and SNMP UPS devices
 - Exposes the standard NUT protocol on port 3493 for network clients
 - Optional host shutdown via D-Bus when the UPS reaches critical battery (`SHUTDOWN_ON_BATTERY_CRITICAL=true`)
+- Survives UPS-initiated USB re-enumeration — a built-in comms watchdog re-homes the driver onto the re-enumerated device automatically (see [USB hotplug & comms recovery](#usb-hotplug--comms-recovery))
 - Custom config override: mount your own NUT config files as `*.user` (e.g. `ups.conf.user`) into `/etc/nut/` to bypass env-var generation
 - Configurable low-battery and critical-battery thresholds
 - Clean signal handling — SIGTERM gracefully stops all NUT services
@@ -39,7 +40,12 @@ services:
     image: ghcr.io/cplieger/docker-nut-upsd:latest
     container_name: nut-upsd
     restart: unless-stopped
-    user: "0:0"  # required for config file permissions
+    user: "0:0"  # required for config file permissions + USB access
+
+    # Block setuid privilege escalation. Safe for NUT: it only drops
+    # privileges (root -> nut after opening the device), never gains them.
+    security_opt:
+      - no-new-privileges:true
 
     environment:
       TZ: "Europe/Paris"
@@ -49,12 +55,21 @@ services:
       UPS_PORT: "auto"  # auto = USB auto-detection
       API_USER: "monuser"
       API_PASSWORD: "secret"  # rotate if your NUT client supports custom credentials
+      # Comms recovery watchdog (defaults shown; on by default). See "USB
+      # hotplug & comms recovery" below.
+      COMMS_WATCHDOG: "true"
+      COMMS_RECOVERY_TIMEOUT: "90"
 
     ports:
       - "3493:3493"
 
-    devices:
-      - /dev/bus/usb:/dev/bus/usb  # full bus — survives USB re-enumeration
+    # USB hotplug — see "USB hotplug & comms recovery" below. Allow the whole
+    # USB major at the cgroup AND bind the bus live so a UPS that re-enumerates
+    # stays reachable without recreating the container.
+    device_cgroup_rules:
+      - "c 189:* rmw"
+    volumes:
+      - /dev/bus/usb:/dev/bus/usb
 ```
 
 ## Configuration reference
@@ -85,18 +100,36 @@ services:
 | `RBWARNTIME`                   | Seconds between "replace battery" warnings                                                 | `43200`          |
 | `SHUTDOWN_ON_BATTERY_CRITICAL` | Power off host via D-Bus on battery critical                                               | `false`          |
 | `ADMIN_PASSWORD`               | Password for the NUT admin user (set/FSD actions); auto-generated if unset                 | Random (cached)  |
+| `COMMS_WATCHDOG`               | Enable the USB comms-recovery watchdog (re-homes the driver after a UPS re-enumeration)    | `true`           |
+| `COMMS_CHECK_INTERVAL`         | Seconds between watchdog comms probes                                                      | `15`             |
+| `COMMS_RECOVERY_TIMEOUT`       | Seconds of continuous stale comms before the watchdog re-homes the driver                  | `90`             |
 
 ### Volumes
 
 | Mount                         | Description                                                                      |
 | ----------------------------- | -------------------------------------------------------------------------------- |
-| `/dev/bus/usb`                | Full USB bus (device passthrough for UPS hardware)                               |
+| `/dev/bus/usb`                | USB bus, bound live (not `devices:`) so re-enumerated nodes stay reachable       |
 | `/run/dbus/system_bus_socket` | Host D-Bus socket (required only if `SHUTDOWN_ON_BATTERY_CRITICAL=true`)         |
 | `/etc/nut/*.user`             | Custom NUT config overrides (e.g. `ups.conf.user`) — bypasses env-var generation |
 
+> For a USB UPS, pair the live `/dev/bus/usb` bind with `device_cgroup_rules: ["c 189:* rmw"]` (USB major 189). A static `devices:` mapping is **not** sufficient — see [USB hotplug & comms recovery](#usb-hotplug--comms-recovery).
+
 ## Healthcheck
 
-The built-in healthcheck runs `upsc $UPS_NAME@127.0.0.1` to verify the NUT driver is communicating with the UPS hardware. It becomes unhealthy when the UPS device is disconnected, the driver failed to start, or upsd is not responding, and recovers once the device is reconnected and the driver re-establishes communication.
+The built-in healthcheck runs `upsc $UPS_NAME@127.0.0.1` to verify the NUT driver is communicating with the UPS hardware. It becomes unhealthy when the UPS device is disconnected, the driver failed to start, or upsd is not responding, and recovers once the device is reconnected and the driver re-establishes communication. The comms watchdog (below) actively drives that recovery after a UPS-initiated USB re-enumeration, so the unhealthy window is bounded by `COMMS_RECOVERY_TIMEOUT` rather than lasting until you recreate the container.
+
+## USB hotplug & comms recovery
+
+Many USB UPSes — the CyberPower Elite PFC line is a well-known example ([networkupstools/nut#1786](https://github.com/networkupstools/nut/issues/1786)) — drop and re-establish their USB link periodically on their own firmware resets. Each reset **re-enumerates** the UPS to a new `/dev/bus/usb` node (a fresh device number, hence a new device minor), owned `root:root` by the kernel.
+
+This breaks the naive passthrough in two ways:
+
+1. **Visibility.** Docker's `devices: - /dev/bus/usb:/dev/bus/usb` maps only the device nodes present at container start. A node created later by a re-enumeration never appears inside the container. Fix: bind the bus **live** with `volumes: - /dev/bus/usb:/dev/bus/usb` (a real bind mount reflects nodes the host creates afterwards).
+2. **Access.** The container's cgroup device allowlist only permits the device minors present at start, and the new node is created `root:root` while the driver runs as the unprivileged `nut` user. Fix: `device_cgroup_rules: - "c 189:* rmw"` permits any USB-major (189) minor.
+
+With both in place, the **comms watchdog** (on by default) closes the loop: it probes `upsd` every `COMMS_CHECK_INTERVAL` seconds and, after `COMMS_RECOVERY_TIMEOUT` seconds of continuous stale data, re-asserts the `nut` group on the bus and restarts the driver. The restart re-opens the device while still root (the driver only drops to `nut` after opening), so it binds the re-enumerated node cleanly. The default 90-second timeout recovers well inside a typical 5-minute "UPS data absent" alert window, so transient resets self-heal silently.
+
+Set `COMMS_WATCHDOG=false` to disable it (e.g. for a UPS that never re-enumerates, or when debugging). It is a no-op while comms are healthy.
 
 ## Security
 

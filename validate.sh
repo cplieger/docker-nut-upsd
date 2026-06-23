@@ -100,6 +100,9 @@ FINALDELAY:numeric
 HOSTSYNC:numeric
 NOCOMMWARNTIME:numeric
 RBWARNTIME:numeric
+COMMS_WATCHDOG:newlines
+COMMS_CHECK_INTERVAL:numeric
+COMMS_RECOVERY_TIMEOUT:numeric
 '
 
 # Optional vars: only validated when non-empty.
@@ -150,6 +153,9 @@ _resolve_var() {
 	HOSTSYNC) printf '%s' "${HOSTSYNC:-}" ;;
 	NOCOMMWARNTIME) printf '%s' "${NOCOMMWARNTIME:-}" ;;
 	RBWARNTIME) printf '%s' "${RBWARNTIME:-}" ;;
+	COMMS_WATCHDOG) printf '%s' "${COMMS_WATCHDOG:-}" ;;
+	COMMS_CHECK_INTERVAL) printf '%s' "${COMMS_CHECK_INTERVAL:-}" ;;
+	COMMS_RECOVERY_TIMEOUT) printf '%s' "${COMMS_RECOVERY_TIMEOUT:-}" ;;
 	LOWBATT_PERCENT) printf '%s' "${LOWBATT_PERCENT:-}" ;;
 	LOWBATT_RUNTIME) printf '%s' "${LOWBATT_RUNTIME:-}" ;;
 	CRITBATT_PERCENT) printf '%s' "${CRITBATT_PERCENT:-}" ;;

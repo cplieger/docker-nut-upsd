@@ -18,6 +18,8 @@ set -eu
 . /usr/local/bin/validate.sh
 # shellcheck source=/dev/null
 . /usr/local/bin/generate-config.sh
+# shellcheck source=/dev/null
+. /usr/local/bin/lifecycle.sh
 
 fail=0
 log() { printf '%s\n' "$*"; }
@@ -35,7 +37,8 @@ export UPS_NAME=ups UPS_DESC="Test UPS" UPS_DRIVER=usbhid-ups UPS_PORT=auto \
 	API_USER=monuser API_PASSWORD=secret API_ADDRESS=0.0.0.0 API_PORT=3493 \
 	ADMIN_PASSWORD=adminpass SHUTDOWN_CMD=/usr/local/bin/nut-shutdown-noop.sh \
 	POLLFREQ=5 POLLFREQALERT=5 DEADTIME=15 FINALDELAY=5 HOSTSYNC=15 \
-	NOCOMMWARNTIME=300 RBWARNTIME=43200
+	NOCOMMWARNTIME=300 RBWARNTIME=43200 \
+	COMMS_WATCHDOG=true COMMS_CHECK_INTERVAL=15 COMMS_RECOVERY_TIMEOUT=90
 
 if ! ( run_validations ) >/dev/null 2>&1; then
 	log "FAIL: run_validations rejected a valid environment"
@@ -68,6 +71,21 @@ if ( API_PORT='70000'; run_validations ) >/dev/null 2>&1; then
 	log "FAIL: out-of-range API_PORT was accepted"
 	fail=1
 fi
+if ( COMMS_CHECK_INTERVAL='notanumber'; run_validations ) >/dev/null 2>&1; then
+	log "FAIL: non-numeric COMMS_CHECK_INTERVAL was accepted"
+	fail=1
+fi
+
+# 4. Comms-recovery watchdog helpers are defined (sourced from lifecycle.sh).
+for fn in comms_fresh restart_ups_driver comms_watchdog stop_watchdog; do
+	# stop_watchdog lives in entrypoint.sh (not sourced here); only assert the
+	# lifecycle.sh helpers.
+	case "$fn" in stop_watchdog) continue ;; esac
+	if ! command -v "$fn" >/dev/null 2>&1; then
+		log "FAIL: comms watchdog function missing: $fn"
+		fail=1
+	fi
+done
 
 [ "$fail" -eq 0 ] && log "nut-upsd smoke: ok"
 exit "$fail"

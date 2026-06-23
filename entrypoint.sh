@@ -32,6 +32,16 @@ set -eu
 : "${NOCOMMWARNTIME:=300}"
 : "${RBWARNTIME:=43200}"
 
+# USB comms recovery watchdog. Devices like the CyberPower Elite PFC re-enumerate
+# their USB link on their own firmware resets, which leaves the driver "Data
+# stale" until the container is recreated. The watchdog (see lifecycle.sh)
+# re-homes the driver onto the re-enumerated node after COMMS_RECOVERY_TIMEOUT
+# seconds of stale comms. Requires the bus passed as a live bind + a cgroup rule
+# (c 189:* rmw) so the new node is visible/accessible — see the README.
+: "${COMMS_WATCHDOG:=true}"
+: "${COMMS_CHECK_INTERVAL:=15}"
+: "${COMMS_RECOVERY_TIMEOUT:=90}"
+
 # Host shutdown support via D-Bus (requires /run/dbus mount)
 : "${SHUTDOWN_ON_BATTERY_CRITICAL:=false}"
 
@@ -101,10 +111,19 @@ printf 'level=info msg="chgrp nut:/dev/bus/usb applied (host device nodes)"\n' >
 # Start NUT services with signal handling
 # ---------------------------------------------------------------------------
 
+# Background comms-watchdog PID (empty until started below). stop_watchdog is
+# safe to call before the watchdog starts and after it has exited.
+WATCHDOG_PID=""
+stop_watchdog() {
+	[ -n "${WATCHDOG_PID:-}" ] || return 0
+	kill "$WATCHDOG_PID" 2> /dev/null || true
+}
+
 # Signal handler: clean up, then exit 0 (signal-initiated stop).
 # shellcheck disable=SC2317,SC2329 # invoked via trap; shellcheck cannot see the call site
 graceful_shutdown() {
 	printf 'level=info msg="received shutdown signal"\n' >&2
+	stop_watchdog
 	stop_services
 	exit 0
 }
@@ -140,6 +159,17 @@ UPSMON_PID=$!
 
 printf 'level=info msg="NUT services started successfully"\n' >&2
 
+# Start the USB comms watchdog (recovers from UPS-initiated re-enumeration).
+# A sub-second interval would busy-loop, so treat <1s as "disabled".
+if [ "$COMMS_WATCHDOG" = "true" ] && [ "$COMMS_CHECK_INTERVAL" -ge 1 ]; then
+	printf 'level=info msg="starting comms watchdog" interval=%ss recovery_timeout=%ss\n' \
+		"$COMMS_CHECK_INTERVAL" "$COMMS_RECOVERY_TIMEOUT" >&2
+	comms_watchdog &
+	WATCHDOG_PID=$!
+else
+	printf 'level=info msg="comms watchdog disabled"\n' >&2
+fi
+
 # Wait for upsmon — propagate its exit code so Docker restart policies and
 # log-based alerting see the real failure. stop_services is idempotent and
 # does not dictate the exit code; the caller decides.
@@ -152,5 +182,6 @@ if [ "$rc" -eq 0 ]; then
 else
 	printf 'level=error msg="upsmon exited unexpectedly" rc=%d\n' "$rc" >&2
 fi
+stop_watchdog
 stop_services
 exit "$rc"
