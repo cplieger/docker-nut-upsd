@@ -9,7 +9,10 @@
 # (caller skips generation). Return 1 otherwise.
 use_user_override() {
 	[ -e "/etc/nut/$1.user" ] || return 1
-	cp "/etc/nut/$1.user" "/etc/nut/$1"
+	if ! cp "/etc/nut/$1.user" "/etc/nut/$1"; then
+		printf 'level=error msg="failed to apply mounted override; aborting" file=%s.user\n' "$1" >&2
+		exit 1
+	fi
 	printf 'level=info msg="using mounted %s.user"\n' "$1" >&2
 }
 
@@ -70,6 +73,14 @@ UPSEOF
 			printf '    override.%s = %s\n' "battery.charge.critical" "$CRITBATT_PERCENT" >>/etc/nut/ups.conf
 		[ -n "${CRITBATT_RUNTIME:-}" ] &&
 			printf '    override.%s = %s\n' "battery.runtime.critical" "$CRITBATT_RUNTIME" >>/etc/nut/ups.conf
+
+		if [ -n "${LOWBATT_PERCENT:-}${LOWBATT_RUNTIME:-}${CRITBATT_PERCENT:-}${CRITBATT_RUNTIME:-}" ]; then
+			printf 'level=info msg="battery thresholds overridden (ignorelb active)" low_pct=%s low_rt=%s crit_pct=%s crit_rt=%s\n' \
+				"${LOWBATT_PERCENT:-unset}" "${LOWBATT_RUNTIME:-unset}" \
+				"${CRITBATT_PERCENT:-unset}" "${CRITBATT_RUNTIME:-unset}" >&2
+		else
+			printf 'level=info msg="no battery threshold overrides; using UPS hardware defaults"\n' >&2
+		fi
 	fi
 
 	# --- upsd.conf — skip if user-mounted ---
@@ -97,7 +108,7 @@ USERSEOF
 	# --- upsmon.conf — skip if user-mounted ---
 	if ! use_user_override upsmon.conf; then
 		cat >/etc/nut/upsmon.conf <<MONEOF
-MONITOR $UPS_NAME@127.0.0.1 1 "$API_USER" "$API_PASSWORD" primary
+MONITOR $UPS_NAME@127.0.0.1:$API_PORT 1 "$API_USER" "$API_PASSWORD" primary
 SHUTDOWNCMD "$SHUTDOWN_CMD"
 POWERDOWNFLAG /var/run/nut/killpower
 NOTIFYCMD /usr/local/bin/nut-notify.sh

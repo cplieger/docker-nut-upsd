@@ -103,6 +103,8 @@ services:
 | `COMMS_WATCHDOG`               | Enable the USB comms-recovery watchdog (re-homes the driver after a UPS re-enumeration)    | `true`           |
 | `COMMS_CHECK_INTERVAL`         | Seconds between watchdog comms probes                                                      | `15`             |
 | `COMMS_RECOVERY_TIMEOUT`       | Seconds of continuous stale comms before the watchdog re-homes the driver                  | `90`             |
+| `COMMS_FAST_RETRIES`           | Fast (stage-1) restart attempts before backing off; see recovery notes below               | `3`              |
+| `COMMS_BACKOFF_FACTOR`         | Stage-2 cadence multiplier on COMMS_RECOVERY_TIMEOUT once fast retries spent               | `5`              |
 
 ### Volumes
 
@@ -127,7 +129,9 @@ This breaks the naive passthrough in two ways:
 1. **Visibility.** Docker's `devices: - /dev/bus/usb:/dev/bus/usb` maps only the device nodes present at container start. A node created later by a re-enumeration never appears inside the container. Fix: bind the bus **live** with `volumes: - /dev/bus/usb:/dev/bus/usb` (a real bind mount reflects nodes the host creates afterwards).
 2. **Access.** The container's cgroup device allowlist only permits the device minors present at start, and the new node is created `root:root` while the driver runs as the unprivileged `nut` user. Fix: `device_cgroup_rules: - "c 189:* rmw"` permits any USB-major (189) minor.
 
-With both in place, the **comms watchdog** (on by default) closes the loop: it probes `upsd` every `COMMS_CHECK_INTERVAL` seconds and, after `COMMS_RECOVERY_TIMEOUT` seconds of continuous stale data, re-asserts the `nut` group on the bus and restarts the driver. The restart re-opens the device while still root (the driver only drops to `nut` after opening), so it binds the re-enumerated node cleanly. The default 90-second timeout recovers well inside a typical 5-minute "UPS data absent" alert window, so transient resets self-heal silently.
+With both in place, the **comms watchdog** (on by default) closes the loop: it probes `upsd` every `COMMS_CHECK_INTERVAL` seconds and, after `COMMS_RECOVERY_TIMEOUT` seconds of continuous stale data, re-asserts the `nut` group on the bus and restarts the driver. The restart re-opens the device while still root (the driver only drops to `nut` after opening), so it binds the re-enumerated node cleanly.
+
+Recovery is **two-stage** so it stays fast for a transient reset without thrashing a genuinely-absent UPS. For the first `COMMS_FAST_RETRIES` attempts it retries every `COMMS_RECOVERY_TIMEOUT` (default 3 × 90 s = 4.5 min, inside a typical 5-minute "UPS data absent" alert window, so transient resets self-heal before the alert fires). If those fast retries do not restore comms — a UPS that is unplugged, dead, or whose driver cannot start — it backs off to `COMMS_RECOVERY_TIMEOUT × COMMS_BACKOFF_FACTOR` for subsequent attempts and escalates its log to `error` on the final fast retry (so the error lands within the alert window, where an operator wants confirmation of a sustained outage) — so a genuinely-absent UPS stops churning host USB permissions and flooding logs while staying visible (and still self-healing if the UPS returns). If you retune the alert window, keep `COMMS_FAST_RETRIES × COMMS_RECOVERY_TIMEOUT` at or under it so recovery never arrives late. During a real host poweroff (`SHUTDOWN_ON_BATTERY_CRITICAL=true`) the watchdog stands down when NUT sets its `killpower` flag, rather than bouncing the driver mid-poweroff.
 
 Set `COMMS_WATCHDOG=false` to disable it (e.g. for a UPS that never re-enumerates, or when debugging). It is a no-op while comms are healthy.
 

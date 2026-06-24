@@ -38,7 +38,8 @@ export UPS_NAME=ups UPS_DESC="Test UPS" UPS_DRIVER=usbhid-ups UPS_PORT=auto \
 	ADMIN_PASSWORD=adminpass SHUTDOWN_CMD=/usr/local/bin/nut-shutdown-noop.sh \
 	POLLFREQ=5 POLLFREQALERT=5 DEADTIME=15 FINALDELAY=5 HOSTSYNC=15 \
 	NOCOMMWARNTIME=300 RBWARNTIME=43200 \
-	COMMS_WATCHDOG=true COMMS_CHECK_INTERVAL=15 COMMS_RECOVERY_TIMEOUT=90
+	COMMS_WATCHDOG=true COMMS_CHECK_INTERVAL=15 COMMS_RECOVERY_TIMEOUT=90 \
+	COMMS_FAST_RETRIES=3 COMMS_BACKOFF_FACTOR=5
 
 if ! ( run_validations ) >/dev/null 2>&1; then
 	log "FAIL: run_validations rejected a valid environment"
@@ -73,6 +74,23 @@ if ( API_PORT='70000'; run_validations ) >/dev/null 2>&1; then
 fi
 if ( COMMS_CHECK_INTERVAL='notanumber'; run_validations ) >/dev/null 2>&1; then
 	log "FAIL: non-numeric COMMS_CHECK_INTERVAL was accepted"
+	fail=1
+fi
+if ( COMMS_BACKOFF_FACTOR='0'; run_validations ) >/dev/null 2>&1; then
+	log "FAIL: zero COMMS_BACKOFF_FACTOR was accepted (collapses stage-2 threshold; watchdog thrashes)"
+	fail=1
+fi
+# A bare CR (0x0D) must be rejected: the old wc -l guard counted only LF, so a
+# CR-only injection slipped through into a NUT config field unaltered.
+if ( UPS_DESC="$(printf 'desc\rinjected')"; run_validations ) >/dev/null 2>&1; then
+	log "FAIL: CR-injection UPS_DESC was accepted"
+	fail=1
+fi
+# A trailing backslash must be rejected: in a double-quoted NUT directive a
+# backslash escapes the next character, so a trailing one escapes the closing
+# quote and breaks out of the quoted context (config-quoting breakout).
+if ( API_PASSWORD="$(printf 'secret\134')"; run_validations ) >/dev/null 2>&1; then
+	log "FAIL: backslash-injection API_PASSWORD was accepted"
 	fail=1
 fi
 
