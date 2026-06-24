@@ -16,12 +16,14 @@ attempt=1
 while [ "$attempt" -le "$DBUS_MAX_RETRIES" ]; do
 	if dbus-send --system --print-reply --reply-timeout="$DBUS_REPLY_TIMEOUT_MS" \
 		--dest=org.freedesktop.login1 /org/freedesktop/login1 \
-		org.freedesktop.login1.Manager.PowerOff boolean:true >&2; then
+		org.freedesktop.login1.Manager.PowerOff boolean:false >&2; then
 		printf 'level=info msg="host poweroff dispatched via D-Bus" attempt=%d\n' "$attempt" >&2
 		exit 0
 	fi
-	printf 'level=warn msg="D-Bus poweroff failed, retrying" attempt=%d\n' "$attempt" >&2
-	sleep "$DBUS_RETRY_SLEEP"
+	if [ "$attempt" -lt "$DBUS_MAX_RETRIES" ]; then
+		printf 'level=warn msg="D-Bus poweroff failed, retrying" attempt=%d\n' "$attempt" >&2
+		sleep "$DBUS_RETRY_SLEEP"
+	fi
 	attempt=$((attempt + 1))
 done
 

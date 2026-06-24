@@ -6,10 +6,10 @@
 # Validation functions
 # ---------------------------------------------------------------------------
 validate_no_newlines() {
-	# Strip one trailing newline before counting embedded ones: a single
+	# Strip one trailing newline before scanning for control bytes: a single
 	# trailing newline is harmless (env files and $() pipelines often
-	# preserve one), but embedded newlines remain rejected because they
-	# inject new NUT config directives.
+	# preserve one), but embedded control characters (CR, LF, tab, etc.)
+	# remain rejected because they inject or alter NUT config directives.
 	_val=$(
 		printf '%s' "$2"
 		printf x
@@ -17,11 +17,12 @@ validate_no_newlines() {
 	_val=${_val%x}
 	_val=${_val%"
 "}
-	newlines=$(printf '%s' "$_val" | wc -l)
-	if [ "$newlines" -gt 0 ]; then
-		printf 'level=error msg="env var contains embedded newlines" var=%s\n' "$1" >&2
+	case "$_val" in
+	*[[:cntrl:]]*)
+		printf 'level=error msg="env var contains control characters" var=%s\n' "$1" >&2
 		return 1
-	fi
+		;;
+	esac
 }
 
 validate_numeric() {
@@ -31,6 +32,14 @@ validate_numeric() {
 		return 1
 		;;
 	esac
+}
+
+validate_positive() {
+	validate_numeric "$1" "$2" || return 1
+	if [ "$2" -lt 1 ]; then
+		printf 'level=error msg="env var must be a positive integer (>= 1)" var=%s value="%s"\n' "$1" "$2" >&2
+		return 1
+	fi
 }
 
 validate_port() {
@@ -67,6 +76,15 @@ validate_no_quotes() {
 	esac
 }
 
+validate_no_backslash() {
+	case "$2" in
+	*\\*)
+		printf 'level=error msg="env var contains backslash" var=%s\n' "$1" >&2
+		return 1
+		;;
+	esac
+}
+
 validate_identifier() {
 	case "$2" in
 	'' | *[!a-zA-Z0-9_-]*)
@@ -81,17 +99,17 @@ validate_identifier() {
 # ---------------------------------------------------------------------------
 
 # Each line: VAR_NAME:check1,check2,...
-# Supported checks: newlines, quotes, brackets, identifier, numeric, port, percent
+# Supported checks: newlines, quotes, brackets, identifier, numeric, positive, port, percent
 VALIDATION_TABLE='
 UPS_NAME:newlines,quotes,brackets,identifier
-UPS_DESC:newlines,quotes
+UPS_DESC:newlines,quotes,backslash
 UPS_DRIVER:newlines,identifier
 UPS_PORT:newlines
-API_USER:newlines,quotes,brackets
-API_PASSWORD:newlines,quotes
-API_ADDRESS:newlines
+API_USER:newlines,quotes,brackets,backslash
+API_PASSWORD:newlines,quotes,backslash
+API_ADDRESS:newlines,quotes,backslash
 API_PORT:newlines,numeric,port
-ADMIN_PASSWORD:newlines,quotes
+ADMIN_PASSWORD:newlines,quotes,backslash
 SHUTDOWN_ON_BATTERY_CRITICAL:newlines
 POLLFREQ:numeric
 POLLFREQALERT:numeric
@@ -102,7 +120,9 @@ NOCOMMWARNTIME:numeric
 RBWARNTIME:numeric
 COMMS_WATCHDOG:newlines
 COMMS_CHECK_INTERVAL:numeric
-COMMS_RECOVERY_TIMEOUT:numeric
+COMMS_RECOVERY_TIMEOUT:positive
+COMMS_FAST_RETRIES:positive
+COMMS_BACKOFF_FACTOR:positive
 '
 
 # Optional vars: only validated when non-empty.
@@ -121,9 +141,11 @@ _dispatch_check() {
 	case "$_check" in
 	newlines) validate_no_newlines "$_var" "$_val" ;;
 	quotes) validate_no_quotes "$_var" "$_val" ;;
+	backslash) validate_no_backslash "$_var" "$_val" ;;
 	brackets) validate_no_brackets "$_var" "$_val" ;;
 	identifier) validate_identifier "$_var" "$_val" ;;
 	numeric) validate_numeric "$_var" "$_val" ;;
+	positive) validate_positive "$_var" "$_val" ;;
 	port) validate_port "$_var" "$_val" ;;
 	percent) validate_percent "$_var" "$_val" ;;
 	*)
@@ -156,6 +178,8 @@ _resolve_var() {
 	COMMS_WATCHDOG) printf '%s' "${COMMS_WATCHDOG:-}" ;;
 	COMMS_CHECK_INTERVAL) printf '%s' "${COMMS_CHECK_INTERVAL:-}" ;;
 	COMMS_RECOVERY_TIMEOUT) printf '%s' "${COMMS_RECOVERY_TIMEOUT:-}" ;;
+	COMMS_FAST_RETRIES) printf '%s' "${COMMS_FAST_RETRIES:-}" ;;
+	COMMS_BACKOFF_FACTOR) printf '%s' "${COMMS_BACKOFF_FACTOR:-}" ;;
 	LOWBATT_PERCENT) printf '%s' "${LOWBATT_PERCENT:-}" ;;
 	LOWBATT_RUNTIME) printf '%s' "${LOWBATT_RUNTIME:-}" ;;
 	CRITBATT_PERCENT) printf '%s' "${CRITBATT_PERCENT:-}" ;;
@@ -216,4 +240,22 @@ run_validations() {
 		exit 1
 		;;
 	esac
+
+	# Reject whitespace in API_ADDRESS — it is written unquoted into upsd.conf's
+	# LISTEN directive, so a space would split it into extra tokens.
+	case "$API_ADDRESS" in
+	*[[:space:]]*)
+		printf 'level=error msg="API_ADDRESS must not contain whitespace"\n' >&2
+		exit 1
+		;;
+	esac
+
+	# API_USER must not be "admin": upsd.users already defines a hardcoded [admin]
+	# user (granted set/fsd/instcmds=all). A second [admin] section generated from
+	# API_USER=admin would merge into it and clobber the admin credential with
+	# API_PASSWORD, exposing the FSD/set-capable account under the weaker password.
+	if [ "$API_USER" = "admin" ]; then
+		printf 'level=error msg="API_USER must not be admin (reserved for the internal NUT admin user)"\n' >&2
+		exit 1
+	fi
 }

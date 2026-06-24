@@ -88,6 +88,7 @@ RUN apk upgrade --no-cache \
         dbus \
         libusb-compat \
         openssl \
+        tzdata \
         util-linux-misc \
     && addgroup -S nut \
     && adduser -S -G nut -h /var/run/nut -s /sbin/nologin nut \
@@ -140,5 +141,5 @@ COPY --from=test /tests-passed /tests-passed
 # (--with-user=nut --with-group=nut). AVD-DS-0002 is suppressed via
 # .trivyignore at the repo root; see the rationale there.
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=15s \
-    CMD timeout 3 upsc "$UPS_NAME@127.0.0.1" 2>/dev/null | grep -q 'ups.status' || exit 1
+    CMD timeout 3 upsc "${UPS_NAME:-ups}@127.0.0.1:${API_PORT:-3493}" 2>/dev/null | grep -q 'ups.status' || exit 1
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

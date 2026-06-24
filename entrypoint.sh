@@ -17,7 +17,7 @@ set -eu
 # Default configuration
 # ---------------------------------------------------------------------------
 : "${UPS_NAME:=ups}"
-: "${UPS_DESC:=UPS}"
+: "${UPS_DESC:=My UPS}"
 : "${UPS_DRIVER:=usbhid-ups}"
 : "${UPS_PORT:=auto}"
 : "${API_USER:=monuser}"
@@ -41,6 +41,13 @@ set -eu
 : "${COMMS_WATCHDOG:=true}"
 : "${COMMS_CHECK_INTERVAL:=15}"
 : "${COMMS_RECOVERY_TIMEOUT:=90}"
+# Two-stage recovery cadence: retry fast for COMMS_FAST_RETRIES attempts (keep
+# COMMS_FAST_RETRIES x COMMS_RECOVERY_TIMEOUT <= the UPSDataAbsent alert window so
+# a transient re-enumeration self-heals before it pages), then back off to
+# COMMS_RECOVERY_TIMEOUT x COMMS_BACKOFF_FACTOR for a UPS that stays absent. See
+# lifecycle.sh comms_watchdog.
+: "${COMMS_FAST_RETRIES:=3}"
+: "${COMMS_BACKOFF_FACTOR:=5}"
 
 # Host shutdown support via D-Bus (requires /run/dbus mount)
 : "${SHUTDOWN_ON_BATTERY_CRITICAL:=false}"
@@ -74,22 +81,45 @@ fi
 export SHUTDOWN_ON_BATTERY_CRITICAL
 SHUTDOWN_CMD="/usr/local/bin/nut-shutdown-noop.sh"
 
-case "$SHUTDOWN_ON_BATTERY_CRITICAL" in
-true)
+# Normalize the toggle case-insensitively and accept the common boolean
+# spellings, so an operator who sets `True`/`1`/`yes` actually ARMS host
+# shutdown instead of silently getting the disabled default. An unrecognized
+# value is a misconfiguration on a safety-critical knob, so fail loudly
+# (exit 1) rather than degrading quietly to off.
+_sob=$(printf '%s' "$SHUTDOWN_ON_BATTERY_CRITICAL" | tr '[:upper:]' '[:lower:]')
+case "$_sob" in
+true | 1 | yes | on)
 	if [ ! -S /run/dbus/system_bus_socket ]; then
-		printf 'level=error msg="SHUTDOWN_ON_BATTERY_CRITICAL=true but D-Bus socket not mounted"\n' >&2
+		printf 'level=error msg="SHUTDOWN_ON_BATTERY_CRITICAL enabled but D-Bus socket not mounted"\n' >&2
 		exit 1
 	fi
+	SHUTDOWN_ON_BATTERY_CRITICAL=true
 	# shellcheck disable=SC2034  # consumed by sourced generate-config.sh
 	SHUTDOWN_CMD="/usr/local/bin/nut-shutdown.sh"
 	printf 'level=info msg="host shutdown enabled via D-Bus on battery critical"\n' >&2
 	;;
-false)
+false | 0 | no | off)
+	SHUTDOWN_ON_BATTERY_CRITICAL=false
 	printf 'level=info msg="host shutdown disabled; FSD will only log to stderr"\n' >&2
 	;;
 *)
-	printf 'level=warn msg="unrecognized SHUTDOWN_ON_BATTERY_CRITICAL value, treating as false" value="%s"\n' \
+	printf 'level=error msg="SHUTDOWN_ON_BATTERY_CRITICAL must be a boolean (true/false/1/0/yes/no/on/off)" value="%s"\n' \
 		"$SHUTDOWN_ON_BATTERY_CRITICAL" >&2
+	exit 1
+	;;
+esac
+
+# Normalize COMMS_WATCHDOG case-insensitively, mirroring SHUTDOWN_ON_BATTERY_CRITICAL.
+# Truthy spellings (true/1/yes/on) enable USB comms recovery; fail loud on an
+# unrecognized value rather than silently disabling the watchdog.
+_cw=$(printf '%s' "$COMMS_WATCHDOG" | tr '[:upper:]' '[:lower:]')
+case "$_cw" in
+true | 1 | yes | on) COMMS_WATCHDOG=true ;;
+false | 0 | no | off) COMMS_WATCHDOG=false ;;
+*)
+	printf 'level=error msg="COMMS_WATCHDOG must be a boolean (true/false/1/0/yes/no/on/off)" value="%s"\n' \
+		"$COMMS_WATCHDOG" >&2
+	exit 1
 	;;
 esac
 
@@ -117,6 +147,13 @@ WATCHDOG_PID=""
 stop_watchdog() {
 	[ -n "${WATCHDOG_PID:-}" ] || return 0
 	kill "$WATCHDOG_PID" 2> /dev/null || true
+	# Reap the watchdog subshell before the caller runs stop_services. Note: a SIGTERM
+	# that lands while the subshell is mid-`upsdrvctl start` kills the subshell
+	# immediately and orphans that child, so `wait` reaps the subshell but the orphan
+	# may briefly race stop_services' `upsdrvctl stop`. Harmless at teardown —
+	# next boot clears stale pidfiles.
+	wait "$WATCHDOG_PID" 2> /dev/null || true
+	WATCHDOG_PID=""
 }
 
 # Signal handler: clean up, then exit 0 (signal-initiated stop).
@@ -143,18 +180,29 @@ if find /var/run/nut -maxdepth 1 -name '*.pid' -type f 2>/dev/null | grep -q .; 
 	find /var/run/nut -maxdepth 1 -name '*.pid' -type f -delete
 fi
 
+# Clear a stale POWERDOWNFLAG (killpower) from a previous lifecycle. upsmon
+# creates it on FSD; /var/run/nut is the writable layer so it survives a
+# `docker restart`, and nothing in this container consumes it (host poweroff is
+# via D-Bus, not the NUT kill-power path). A latched flag would otherwise make
+# the comms watchdog stand down indefinitely (see restart_ups_driver), so clear
+# it at a fresh start.
+if [ -e /var/run/nut/killpower ]; then
+	printf 'level=info msg="clearing stale killpower flag from previous lifecycle" path=/var/run/nut/killpower\n' >&2
+	rm -f /var/run/nut/killpower
+fi
+
 printf 'level=info msg="starting upsdrvctl"\n' >&2
 /usr/sbin/upsdrvctl start
 # NUT drivers write /var/run/nut/<driver>-<ups>.pid on successful start.
-wait_for_pidfile "UPS driver" "/var/run/nut/${UPS_DRIVER}-${UPS_NAME}.pid" || exit 1
+wait_for_pidfile "UPS driver" "$(driver_pidfile)" || { stop_services; exit 1; }
 
 printf 'level=info msg="starting upsd"\n' >&2
 /usr/sbin/upsd
-wait_for_pidfile "upsd" "/var/run/nut/upsd.pid" || exit 1
+wait_for_pidfile "upsd" "/var/run/nut/upsd.pid" || { stop_services; exit 1; }
 
 # Run upsmon in the background so the trap can fire
 printf 'level=info msg="starting upsmon"\n' >&2
-/usr/sbin/upsmon -D &
+/usr/sbin/upsmon -F &
 UPSMON_PID=$!
 
 printf 'level=info msg="NUT services started successfully"\n' >&2
