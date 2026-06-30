@@ -1,14 +1,9 @@
+# Example compose for docker-nut-upsd. See the README for all configuration options and hardening.
 services:
   nut-upsd:
     image: ghcr.io/cplieger/docker-nut-upsd:latest
     container_name: nut-upsd
     restart: unless-stopped
-    user: "0:0"  # required for config file permissions + USB access
-
-    # Block setuid privilege escalation. Safe for NUT: it only drops
-    # privileges (root -> nut after opening the device), never gains them.
-    security_opt:
-      - no-new-privileges:true
 
     environment:
       TZ: "Europe/Paris"
@@ -17,24 +12,14 @@ services:
       UPS_DRIVER: "usbhid-ups"  # see NUT hardware compatibility list
       UPS_PORT: "auto"  # auto = USB auto-detection
       API_USER: "monuser"
-      API_PASSWORD: "secret"  # rotate if your NUT client supports custom credentials
-      # Comms recovery watchdog (defaults shown; on by default). Many USB UPSes
-      # (e.g. the CyberPower Elite PFC) drop and re-add their USB link on their
-      # own firmware resets, re-enumerating to a new device node. The watchdog
-      # re-homes the driver onto the new node after COMMS_RECOVERY_TIMEOUT
-      # seconds of stale data. It REQUIRES the USB bind + cgroup rule below.
-      COMMS_WATCHDOG: "true"
-      COMMS_RECOVERY_TIMEOUT: "90"
+      API_PASSWORD: "secret"  # change this
 
     ports:
       - "3493:3493"
 
-    # USB hotplug. A UPS that re-enumerates gets a NEW /dev/bus/usb node. A
-    # static `devices:` mapping only exposes the node present at container
-    # start, so after a reset the driver loses the UPS until the container is
-    # recreated. Allow the whole USB major (189) at the cgroup AND bind the bus
-    # live (not via `devices:`) so re-enumerated nodes appear and are usable.
+    # USB hotplug: bind the bus LIVE (not via devices:) plus the USB-major cgroup rule, so a
+    # UPS that re-enumerates to a new node stays reachable without a recreate. See README.
     device_cgroup_rules:
       - "c 189:* rmw"
     volumes:
-      - /dev/bus/usb:/dev/bus/usb
+      - "/dev/bus/usb:/dev/bus/usb"
