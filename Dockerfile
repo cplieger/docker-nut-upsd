@@ -8,7 +8,7 @@ RUN apk add --no-cache automake build-base clang libtool lld perl pkgconf \
         gcc musl-dev libusb-compat-dev openssl-dev linux-headers
 
 # renovate: datasource=github-releases depName=stephane/libmodbus
-ARG LIBMODBUS_VERSION=v3.1.12
+ARG LIBMODBUS_VERSION=v3.2.0
 WORKDIR /build/libmodbus
 RUN wget -qO- \
       "https://github.com/stephane/libmodbus/releases/download/${LIBMODBUS_VERSION}/libmodbus-${LIBMODBUS_VERSION#v}.tar.gz" \
