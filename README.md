@@ -11,7 +11,7 @@ Monitor your UPS and let networked machines shut down gracefully during power ou
 
 ## What it does
 
-Monitors your UPS (uninterruptible power supply) and exposes its status over the network so other machines can shut down gracefully during a power outage. A UPS is a battery backup that keeps your equipment running when the power goes out — this container watches that battery and tells every machine on your network when it's time to shut down safely.
+Monitors your UPS (uninterruptible power supply) and exposes its status over the network so other machines can shut down gracefully during a power outage.
 
 The container runs the Network UPS Tools (NUT) upsd daemon in Alpine Linux. The entrypoint script generates all NUT configuration files (`ups.conf`, `upsd.conf`, `upsd.users`, `upsmon.conf`) from environment variables at startup.
 
@@ -28,7 +28,7 @@ The container runs the Network UPS Tools (NUT) upsd daemon in Alpine Linux. The 
 - **Environment-variable config** — no need to hand-edit `nut.conf` files; the entrypoint generates them declaratively from env vars
 - **Single container replaces three daemons** — bundles the NUT driver, `upsd`, and `upsmon` so you deploy one service instead of three
 - **Minimal Alpine base** — small image with only the packages NUT needs; no extras that increase attack surface
-- **Compiled from upstream sources** — NUT, libmodbus, and net-snmp built from latest upstream (not distro packages) for zero known CVEs
+- **Compiled from upstream sources** — NUT, libmodbus, and net-snmp built from latest upstream (not distro packages); see [Security](#security) for the resulting CVE posture
 
 ## Quick start
 
@@ -76,35 +76,35 @@ services:
 
 ### Environment variables
 
-| Variable                       | Description                                                                                | Default          |
-| ------------------------------ | ------------------------------------------------------------------------------------------ | ---------------- |
-| `TZ`                           | Container timezone                                                                         | `Europe/Paris`   |
-| `UPS_NAME`                     | NUT UPS identifier used in config files and queries                                        | `ups`            |
-| `UPS_DESC`                     | Human-readable UPS description shown in NUT clients                                        | `My UPS`         |
-| `UPS_DRIVER`                   | NUT driver for your UPS model (see [NUT HCL](https://networkupstools.org/stable-hcl.html)) | `usbhid-ups`     |
-| `UPS_PORT`                     | UPS device port — use `auto` for USB auto-detection                                        | `auto`           |
-| `API_USER`                     | Username for NUT network clients to authenticate with                                      | `monuser`        |
-| `API_PASSWORD`                 | Password for the NUT API user (entrypoint warns on weak credentials)                       | `secret`         |
-| `API_ADDRESS`                  | Listen address for upsd                                                                    | `0.0.0.0`        |
-| `API_PORT`                     | Listen port for upsd                                                                       | `3493`           |
-| `LOWBATT_PERCENT`              | Low-battery threshold percentage (enables `ignorelb`)                                      | Hardware default |
-| `LOWBATT_RUNTIME`              | Low-battery threshold runtime in seconds (enables `ignorelb`)                              | Hardware default |
-| `CRITBATT_PERCENT`             | Critical-battery threshold percentage (enables `ignorelb`)                                 | Hardware default |
-| `CRITBATT_RUNTIME`             | Critical-battery threshold runtime in seconds (enables `ignorelb`)                         | Hardware default |
-| `POLLFREQ`                     | Seconds between UPS status polls                                                           | `5`              |
-| `POLLFREQALERT`                | Seconds between polls when on battery                                                      | `5`              |
-| `DEADTIME`                     | Seconds before declaring UPS stale                                                         | `15`             |
-| `FINALDELAY`                   | Seconds between shutdown warning and actual shutdown                                       | `5`              |
-| `HOSTSYNC`                     | Seconds to wait for secondary hosts to disconnect                                          | `15`             |
-| `NOCOMMWARNTIME`               | Seconds before warning about lost UPS communication                                        | `300`            |
-| `RBWARNTIME`                   | Seconds between "replace battery" warnings                                                 | `43200`          |
-| `SHUTDOWN_ON_BATTERY_CRITICAL` | Power off host via D-Bus on battery critical                                               | `false`          |
-| `ADMIN_PASSWORD`               | Password for the NUT admin user (set/FSD actions); auto-generated if unset                 | Random (cached)  |
-| `COMMS_WATCHDOG`               | Enable the USB comms-recovery watchdog (re-homes the driver after a UPS re-enumeration)    | `true`           |
-| `COMMS_CHECK_INTERVAL`         | Seconds between watchdog comms probes                                                      | `15`             |
-| `COMMS_RECOVERY_TIMEOUT`       | Seconds of continuous stale comms before the watchdog re-homes the driver                  | `90`             |
-| `COMMS_FAST_RETRIES`           | Fast (stage-1) restart attempts before backing off; see recovery notes below               | `3`              |
-| `COMMS_BACKOFF_FACTOR`         | Stage-2 cadence multiplier on COMMS_RECOVERY_TIMEOUT once fast retries spent               | `5`              |
+| Variable                       | Description                                                                                               | Default          |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------- | ---------------- |
+| `TZ`                           | Container timezone                                                                                        | `Europe/Paris`   |
+| `UPS_NAME`                     | NUT UPS identifier used in config files and queries                                                       | `ups`            |
+| `UPS_DESC`                     | Human-readable UPS description shown in NUT clients                                                       | `My UPS`         |
+| `UPS_DRIVER`                   | NUT driver for your UPS model (see [NUT HCL](https://networkupstools.org/stable-hcl.html))                | `usbhid-ups`     |
+| `UPS_PORT`                     | UPS device port — use `auto` for USB auto-detection                                                       | `auto`           |
+| `API_USER`                     | Username for NUT network clients to authenticate with                                                     | `monuser`        |
+| `API_PASSWORD`                 | Password for the NUT API user (entrypoint warns on weak credentials)                                      | `secret`         |
+| `API_ADDRESS`                  | Listen address for upsd                                                                                   | `0.0.0.0`        |
+| `API_PORT`                     | Listen port for upsd                                                                                      | `3493`           |
+| `LOWBATT_PERCENT`              | Low-battery threshold percentage (enables `ignorelb`)                                                     | Hardware default |
+| `LOWBATT_RUNTIME`              | Low-battery threshold runtime in seconds (enables `ignorelb`)                                             | Hardware default |
+| `CRITBATT_PERCENT`             | Critical-battery threshold percentage (enables `ignorelb`)                                                | Hardware default |
+| `CRITBATT_RUNTIME`             | Critical-battery threshold runtime in seconds (enables `ignorelb`)                                        | Hardware default |
+| `POLLFREQ`                     | Seconds between UPS status polls                                                                          | `5`              |
+| `POLLFREQALERT`                | Seconds between polls when on battery                                                                     | `5`              |
+| `DEADTIME`                     | Seconds before declaring UPS stale                                                                        | `15`             |
+| `FINALDELAY`                   | Seconds between shutdown warning and actual shutdown                                                      | `5`              |
+| `HOSTSYNC`                     | Seconds to wait for secondary hosts to disconnect                                                         | `15`             |
+| `NOCOMMWARNTIME`               | Seconds before warning about lost UPS communication                                                       | `300`            |
+| `RBWARNTIME`                   | Seconds between "replace battery" warnings                                                                | `43200`          |
+| `SHUTDOWN_ON_BATTERY_CRITICAL` | Power off host via D-Bus on battery critical                                                              | `false`          |
+| `ADMIN_PASSWORD`               | Password for the NUT admin user (set/FSD actions); auto-generated if unset                                | Random (cached)  |
+| `COMMS_WATCHDOG`               | Enable the USB comms-recovery watchdog (see [USB hotplug & comms recovery](#usb-hotplug--comms-recovery)) | `true`           |
+| `COMMS_CHECK_INTERVAL`         | Seconds between watchdog comms probes                                                                     | `15`             |
+| `COMMS_RECOVERY_TIMEOUT`       | Seconds of continuous stale comms before the watchdog re-homes the driver                                 | `90`             |
+| `COMMS_FAST_RETRIES`           | Fast (stage-1) restart attempts before backing off; see recovery notes below                              | `3`              |
+| `COMMS_BACKOFF_FACTOR`         | Stage-2 cadence multiplier on COMMS_RECOVERY_TIMEOUT once fast retries spent                              | `5`              |
 
 ### Volumes
 
@@ -118,7 +118,7 @@ services:
 
 ## Healthcheck
 
-The built-in healthcheck runs `upsc $UPS_NAME@127.0.0.1` to verify the NUT driver is communicating with the UPS hardware. It becomes unhealthy when the UPS device is disconnected, the driver failed to start, or upsd is not responding, and recovers once the device is reconnected and the driver re-establishes communication. The comms watchdog (below) actively drives that recovery after a UPS-initiated USB re-enumeration, so the unhealthy window is bounded by `COMMS_RECOVERY_TIMEOUT` rather than lasting until you recreate the container.
+The built-in healthcheck runs `upsc $UPS_NAME@127.0.0.1` to verify the NUT driver is communicating with the UPS hardware. It becomes unhealthy when the UPS device is disconnected, the driver failed to start, or upsd is not responding, and recovers once the device is reconnected and the driver re-establishes communication. The [comms watchdog](#usb-hotplug--comms-recovery) actively drives that recovery after a USB re-enumeration, so the unhealthy window is bounded by `COMMS_RECOVERY_TIMEOUT` rather than lasting until you recreate the container.
 
 ## USB hotplug & comms recovery
 
@@ -197,7 +197,7 @@ larger changes so the approach can be discussed before implementation.
 
 ## Disclaimer
 
-These images are built with care and follow security best practices, but they are intended for **homelab use**. No guarantees of fitness for production environments. Use at your own risk.
+This project is built with care and follows security best practices, but it is intended for personal / self-hosted use. No guarantees of fitness for production environments. Use at your own risk.
 
 This project was built with AI-assisted tooling using [Claude Opus](https://www.anthropic.com/claude) and [Kiro](https://kiro.dev). The human maintainer defines architecture, supervises implementation, and makes all final decisions.
 
