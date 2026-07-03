@@ -8,12 +8,20 @@ RUN apk add --no-cache automake build-base clang libtool lld perl pkgconf \
         gcc musl-dev libusb-compat-dev openssl-dev linux-headers
 
 # renovate: datasource=github-releases depName=stephane/libmodbus
-ARG LIBMODBUS_VERSION=v3.1.12
+ARG LIBMODBUS_VERSION=v3.2.0
 WORKDIR /build/libmodbus
+# libmodbus 3.2.0 added termios2 custom-baud support whose configure check
+# mis-detects on Alpine/musl: `struct termios2` is present (via <asm/termbits.h>)
+# so HAVE_STRUCT_TERMIOS2 gets set, but TCGETS2/TCSETS2 are not usable from
+# <sys/ioctl.h> on musl, so modbus-rtu.c fails to compile. Force the type check
+# off to build the portable classic-termios path (as 3.1.x did); this image is
+# USB-HID/SNMP only, so custom-baud RTU is irrelevant. Remove once upstream
+# libmodbus builds cleanly on musl.
 RUN wget -qO- \
       "https://github.com/stephane/libmodbus/releases/download/${LIBMODBUS_VERSION}/libmodbus-${LIBMODBUS_VERSION#v}.tar.gz" \
       | tar xz --strip-components=1 \
-    && ./configure --prefix=/usr --disable-static \
+    && ac_cv_type_struct_termios2=no \
+       ./configure --prefix=/usr --disable-static \
        CC=clang \
     && make -j"$(nproc)" \
     && make install
