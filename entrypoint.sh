@@ -67,8 +67,8 @@ run_validations
 # USB device validation
 # ---------------------------------------------------------------------------
 if [ ! -d /dev/bus/usb ]; then
-	printf 'level=error msg="/dev/bus/usb not found — map a USB device to the container"\n' >&2
-	exit 1
+  printf 'level=error msg="/dev/bus/usb not found — map a USB device to the container"\n' >&2
+  exit 1
 fi
 
 # ---------------------------------------------------------------------------
@@ -88,25 +88,25 @@ SHUTDOWN_CMD="/usr/local/bin/nut-shutdown-noop.sh"
 # (exit 1) rather than degrading quietly to off.
 _sob=$(printf '%s' "$SHUTDOWN_ON_BATTERY_CRITICAL" | tr '[:upper:]' '[:lower:]')
 case "$_sob" in
-true | 1 | yes | on)
-	if [ ! -S /run/dbus/system_bus_socket ]; then
-		printf 'level=error msg="SHUTDOWN_ON_BATTERY_CRITICAL enabled but D-Bus socket not mounted"\n' >&2
-		exit 1
-	fi
-	SHUTDOWN_ON_BATTERY_CRITICAL=true
-	# shellcheck disable=SC2034  # consumed by sourced generate-config.sh
-	SHUTDOWN_CMD="/usr/local/bin/nut-shutdown.sh"
-	printf 'level=info msg="host shutdown enabled via D-Bus on battery critical"\n' >&2
-	;;
-false | 0 | no | off)
-	SHUTDOWN_ON_BATTERY_CRITICAL=false
-	printf 'level=info msg="host shutdown disabled; FSD will only log to stderr"\n' >&2
-	;;
-*)
-	printf 'level=error msg="SHUTDOWN_ON_BATTERY_CRITICAL must be a boolean (true/false/1/0/yes/no/on/off)" value="%s"\n' \
-		"$SHUTDOWN_ON_BATTERY_CRITICAL" >&2
-	exit 1
-	;;
+  true | 1 | yes | on)
+    if [ ! -S /run/dbus/system_bus_socket ]; then
+      printf 'level=error msg="SHUTDOWN_ON_BATTERY_CRITICAL enabled but D-Bus socket not mounted"\n' >&2
+      exit 1
+    fi
+    SHUTDOWN_ON_BATTERY_CRITICAL=true
+    # shellcheck disable=SC2034  # consumed by sourced generate-config.sh
+    SHUTDOWN_CMD="/usr/local/bin/nut-shutdown.sh"
+    printf 'level=info msg="host shutdown enabled via D-Bus on battery critical"\n' >&2
+    ;;
+  false | 0 | no | off)
+    SHUTDOWN_ON_BATTERY_CRITICAL=false
+    printf 'level=info msg="host shutdown disabled; FSD will only log to stderr"\n' >&2
+    ;;
+  *)
+    printf 'level=error msg="SHUTDOWN_ON_BATTERY_CRITICAL must be a boolean (true/false/1/0/yes/no/on/off)" value="%s"\n' \
+      "$SHUTDOWN_ON_BATTERY_CRITICAL" >&2
+    exit 1
+    ;;
 esac
 
 # Normalize COMMS_WATCHDOG case-insensitively, mirroring SHUTDOWN_ON_BATTERY_CRITICAL.
@@ -114,13 +114,13 @@ esac
 # unrecognized value rather than silently disabling the watchdog.
 _cw=$(printf '%s' "$COMMS_WATCHDOG" | tr '[:upper:]' '[:lower:]')
 case "$_cw" in
-true | 1 | yes | on) COMMS_WATCHDOG=true ;;
-false | 0 | no | off) COMMS_WATCHDOG=false ;;
-*)
-	printf 'level=error msg="COMMS_WATCHDOG must be a boolean (true/false/1/0/yes/no/on/off)" value="%s"\n' \
-		"$COMMS_WATCHDOG" >&2
-	exit 1
-	;;
+  true | 1 | yes | on) COMMS_WATCHDOG=true ;;
+  false | 0 | no | off) COMMS_WATCHDOG=false ;;
+  *)
+    printf 'level=error msg="COMMS_WATCHDOG must be a boolean (true/false/1/0/yes/no/on/off)" value="%s"\n' \
+      "$COMMS_WATCHDOG" >&2
+    exit 1
+    ;;
 esac
 
 # ---------------------------------------------------------------------------
@@ -145,29 +145,29 @@ printf 'level=info msg="chgrp nut:/dev/bus/usb applied (host device nodes)"\n' >
 # safe to call before the watchdog starts and after it has exited.
 WATCHDOG_PID=""
 stop_watchdog() {
-	[ -n "${WATCHDOG_PID:-}" ] || return 0
-	kill "$WATCHDOG_PID" 2> /dev/null || true
-	# Reap the watchdog subshell before the caller runs stop_services. Note: a SIGTERM
-	# that lands while the subshell is mid-`upsdrvctl start` kills the subshell
-	# immediately and orphans that child, so `wait` reaps the subshell but the orphan
-	# may briefly race stop_services' `upsdrvctl stop`. Harmless at teardown —
-	# next boot clears stale pidfiles.
-	wait "$WATCHDOG_PID" 2> /dev/null || true
-	WATCHDOG_PID=""
+  [ -n "${WATCHDOG_PID:-}" ] || return 0
+  kill "$WATCHDOG_PID" 2>/dev/null || true
+  # Reap the watchdog subshell before the caller runs stop_services. Note: a SIGTERM
+  # that lands while the subshell is mid-`upsdrvctl start` kills the subshell
+  # immediately and orphans that child, so `wait` reaps the subshell but the orphan
+  # may briefly race stop_services' `upsdrvctl stop`. Harmless at teardown —
+  # next boot clears stale pidfiles.
+  wait "$WATCHDOG_PID" 2>/dev/null || true
+  WATCHDOG_PID=""
 }
 
 # Signal handler: clean up, then exit 0 (signal-initiated stop).
 # shellcheck disable=SC2317,SC2329 # invoked via trap; shellcheck cannot see the call site
 graceful_shutdown() {
-	printf 'level=info msg="received shutdown signal"\n' >&2
-	stop_watchdog
-	stop_services
-	exit 0
+  printf 'level=info msg="received shutdown signal"\n' >&2
+  stop_watchdog
+  stop_services
+  exit 0
 }
 trap graceful_shutdown TERM INT QUIT HUP
 
 printf 'level=info msg="starting NUT services" ups=%s driver=%s port=%s listen=%s:%s\n' \
-	"$UPS_NAME" "$UPS_DRIVER" "$UPS_PORT" "$API_ADDRESS" "$API_PORT" >&2
+  "$UPS_NAME" "$UPS_DRIVER" "$UPS_PORT" "$API_ADDRESS" "$API_PORT" >&2
 
 # Clear stale driver/daemon PID files from a previous container lifecycle.
 # /var/run/nut lives in the container's writable layer, so PID files from a
@@ -176,8 +176,8 @@ printf 'level=info msg="starting NUT services" ups=%s driver=%s port=%s listen=%
 # kills the freshly started driver seconds after launch. We own this
 # directory and no other process can legitimately hold these PIDs at boot.
 if find /var/run/nut -maxdepth 1 -name '*.pid' -type f 2>/dev/null | grep -q .; then
-	printf 'level=info msg="clearing stale NUT PID files from previous lifecycle" path=/var/run/nut\n' >&2
-	find /var/run/nut -maxdepth 1 -name '*.pid' -type f -delete
+  printf 'level=info msg="clearing stale NUT PID files from previous lifecycle" path=/var/run/nut\n' >&2
+  find /var/run/nut -maxdepth 1 -name '*.pid' -type f -delete
 fi
 
 # Clear a stale POWERDOWNFLAG (killpower) from a previous lifecycle. upsmon
@@ -187,18 +187,24 @@ fi
 # the comms watchdog stand down indefinitely (see restart_ups_driver), so clear
 # it at a fresh start.
 if [ -e /var/run/nut/killpower ]; then
-	printf 'level=info msg="clearing stale killpower flag from previous lifecycle" path=/var/run/nut/killpower\n' >&2
-	rm -f /var/run/nut/killpower
+  printf 'level=info msg="clearing stale killpower flag from previous lifecycle" path=/var/run/nut/killpower\n' >&2
+  rm -f /var/run/nut/killpower
 fi
 
 printf 'level=info msg="starting upsdrvctl"\n' >&2
 /usr/sbin/upsdrvctl start
 # NUT drivers write /var/run/nut/<driver>-<ups>.pid on successful start.
-wait_for_pidfile "UPS driver" "$(driver_pidfile)" || { stop_services; exit 1; }
+wait_for_pidfile "UPS driver" "$(driver_pidfile)" || {
+  stop_services
+  exit 1
+}
 
 printf 'level=info msg="starting upsd"\n' >&2
 /usr/sbin/upsd
-wait_for_pidfile "upsd" "/var/run/nut/upsd.pid" || { stop_services; exit 1; }
+wait_for_pidfile "upsd" "/var/run/nut/upsd.pid" || {
+  stop_services
+  exit 1
+}
 
 # Run upsmon in the background so the trap can fire
 printf 'level=info msg="starting upsmon"\n' >&2
@@ -210,12 +216,12 @@ printf 'level=info msg="NUT services started successfully"\n' >&2
 # Start the USB comms watchdog (recovers from UPS-initiated re-enumeration).
 # A sub-second interval would busy-loop, so treat <1s as "disabled".
 if [ "$COMMS_WATCHDOG" = "true" ] && [ "$COMMS_CHECK_INTERVAL" -ge 1 ]; then
-	printf 'level=info msg="starting comms watchdog" interval=%ss recovery_timeout=%ss\n' \
-		"$COMMS_CHECK_INTERVAL" "$COMMS_RECOVERY_TIMEOUT" >&2
-	comms_watchdog &
-	WATCHDOG_PID=$!
+  printf 'level=info msg="starting comms watchdog" interval=%ss recovery_timeout=%ss\n' \
+    "$COMMS_CHECK_INTERVAL" "$COMMS_RECOVERY_TIMEOUT" >&2
+  comms_watchdog &
+  WATCHDOG_PID=$!
 else
-	printf 'level=info msg="comms watchdog disabled"\n' >&2
+  printf 'level=info msg="comms watchdog disabled"\n' >&2
 fi
 
 # Wait for upsmon — propagate its exit code so Docker restart policies and
@@ -226,9 +232,9 @@ wait "$UPSMON_PID"
 rc=$?
 set -e
 if [ "$rc" -eq 0 ]; then
-	printf 'level=info msg="upsmon exited cleanly" rc=0\n' >&2
+  printf 'level=info msg="upsmon exited cleanly" rc=0\n' >&2
 else
-	printf 'level=error msg="upsmon exited unexpectedly" rc=%d\n' "$rc" >&2
+  printf 'level=error msg="upsmon exited unexpectedly" rc=%d\n' "$rc" >&2
 fi
 stop_watchdog
 stop_services
