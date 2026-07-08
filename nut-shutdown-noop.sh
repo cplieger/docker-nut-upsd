@@ -6,5 +6,5 @@
 # terminates the quoted argument), which silently drops the FSD log line.
 
 printf 'level=error msg="UPS forced shutdown (FSD) triggered; SHUTDOWN_ON_BATTERY_CRITICAL=%s, host will NOT be powered off"\n' \
-	"${SHUTDOWN_ON_BATTERY_CRITICAL:-unset}" >&2
+  "${SHUTDOWN_ON_BATTERY_CRITICAL:-unset}" >&2
 exit 0
