@@ -51,8 +51,11 @@ places:
 Every value that lands in a NUT config file must reject embedded
 newlines (config injection), and identifiers/passwords additionally
 reject brackets (INI section injection) and double quotes (NUT quoting
-breakout). When in doubt, copy the check set of the most similar
-existing row.
+breakout). A value written **unquoted** into a config file (e.g.
+`UPS_PORT` as `port = $UPS_PORT`, or `API_ADDRESS` in `LISTEN`) must
+also reject whitespace, since a space would split it into extra config
+tokens. When in doubt, copy the check set of the most similar existing
+row.
 
 ## Config generation conventions
 
@@ -87,6 +90,26 @@ new generated file should respect that same override hook.
   node from the container. The restart re-opens the device while still
   root, which is why the driver must not be started already-dropped to
   `nut`. Keep the watchdog's restart path root-capable.
+- **Admin-password cache is root-only.** The generated `ADMIN_PASSWORD`
+  is cached at `/var/run/nut-secrets/admin_password`, in a `root:root`
+  mode-700 directory created in the Dockerfile, not in the
+  `nut`-writable `/var/run/nut` that holds PID files. The entrypoint
+  writes it as root via `mktemp` + atomic rename, so a compromised
+  `nut`-user process cannot pre-plant a symlink at the cache path. Don't
+  move it back to a `nut`-writable location or use a predictable `.$$`
+  temp name.
+- **`chgrp` on the USB bus is best-effort.** Both the startup and the
+  watchdog `chgrp -R nut /dev/bus/usb` are guarded (warn-only), so the
+  container still starts on a host where the chgrp EPERMs (user-namespace
+  remap, dropped `CAP_CHOWN`); the driver opens the device as root before
+  dropping to `nut` regardless. Don't let either `chgrp` abort startup
+  under `set -e`.
+- **Leading zeros are octal in `$(( ))`.** Numeric env vars consumed by
+  shell arithmetic (the `COMMS_*` timing knobs) are canonicalized to
+  base-10 with `strip_leading_zeros` before use, because POSIX `$(( ))`
+  reads a leading-zero value as octal: `08`/`09` error out and, under
+  `set -e`, would kill the watchdog subshell. Canonicalize any new
+  arithmetic-consumed numeric var the same way.
 
 ## Local validation
 

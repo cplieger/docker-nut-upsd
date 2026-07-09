@@ -86,42 +86,29 @@ SHUTDOWN_CMD="/usr/local/bin/nut-shutdown-noop.sh"
 # shutdown instead of silently getting the disabled default. An unrecognized
 # value is a misconfiguration on a safety-critical knob, so fail loudly
 # (exit 1) rather than degrading quietly to off.
-_sob=$(printf '%s' "$SHUTDOWN_ON_BATTERY_CRITICAL" | tr '[:upper:]' '[:lower:]')
-case "$_sob" in
-  true | 1 | yes | on)
-    if [ ! -S /run/dbus/system_bus_socket ]; then
-      printf 'level=error msg="SHUTDOWN_ON_BATTERY_CRITICAL enabled but D-Bus socket not mounted"\n' >&2
-      exit 1
-    fi
-    SHUTDOWN_ON_BATTERY_CRITICAL=true
-    # shellcheck disable=SC2034  # consumed by sourced generate-config.sh
-    SHUTDOWN_CMD="/usr/local/bin/nut-shutdown.sh"
-    printf 'level=info msg="host shutdown enabled via D-Bus on battery critical"\n' >&2
-    ;;
-  false | 0 | no | off)
-    SHUTDOWN_ON_BATTERY_CRITICAL=false
-    printf 'level=info msg="host shutdown disabled; FSD will only log to stderr"\n' >&2
-    ;;
-  *)
-    printf 'level=error msg="SHUTDOWN_ON_BATTERY_CRITICAL must be a boolean (true/false/1/0/yes/no/on/off)" value="%s"\n' \
-      "$SHUTDOWN_ON_BATTERY_CRITICAL" >&2
+SHUTDOWN_ON_BATTERY_CRITICAL=$(normalize_bool SHUTDOWN_ON_BATTERY_CRITICAL "$SHUTDOWN_ON_BATTERY_CRITICAL") || exit 1
+if [ "$SHUTDOWN_ON_BATTERY_CRITICAL" = "true" ]; then
+  if [ ! -S /run/dbus/system_bus_socket ]; then
+    printf 'level=error msg="SHUTDOWN_ON_BATTERY_CRITICAL enabled but D-Bus socket not mounted"\n' >&2
     exit 1
-    ;;
-esac
+  fi
+  # shellcheck disable=SC2034  # consumed by sourced generate-config.sh
+  SHUTDOWN_CMD="/usr/local/bin/nut-shutdown.sh"
+  printf 'level=info msg="host shutdown enabled via D-Bus on battery critical"\n' >&2
+else
+  printf 'level=info msg="host shutdown disabled; FSD will only log to stderr"\n' >&2
+fi
 
 # Normalize COMMS_WATCHDOG case-insensitively, mirroring SHUTDOWN_ON_BATTERY_CRITICAL.
 # Truthy spellings (true/1/yes/on) enable USB comms recovery; fail loud on an
 # unrecognized value rather than silently disabling the watchdog.
-_cw=$(printf '%s' "$COMMS_WATCHDOG" | tr '[:upper:]' '[:lower:]')
-case "$_cw" in
-  true | 1 | yes | on) COMMS_WATCHDOG=true ;;
-  false | 0 | no | off) COMMS_WATCHDOG=false ;;
-  *)
-    printf 'level=error msg="COMMS_WATCHDOG must be a boolean (true/false/1/0/yes/no/on/off)" value="%s"\n' \
-      "$COMMS_WATCHDOG" >&2
-    exit 1
-    ;;
-esac
+COMMS_WATCHDOG=$(normalize_bool COMMS_WATCHDOG "$COMMS_WATCHDOG") || exit 1
+
+# Canonicalize watchdog integers to base-10 before they reach $(( )) in lifecycle.sh
+# (leading zeros are otherwise parsed as octal — see strip_leading_zeros).
+COMMS_CHECK_INTERVAL=$(strip_leading_zeros "$COMMS_CHECK_INTERVAL")
+COMMS_RECOVERY_TIMEOUT=$(strip_leading_zeros "$COMMS_RECOVERY_TIMEOUT")
+COMMS_BACKOFF_FACTOR=$(strip_leading_zeros "$COMMS_BACKOFF_FACTOR")
 
 # ---------------------------------------------------------------------------
 # Generate NUT config files (from generate-config.sh)
@@ -134,8 +121,11 @@ generate_all_configs
 chown -R root:nut /etc/nut
 find /etc/nut -type d -exec chmod 750 {} +
 find /etc/nut -type f -exec chmod 640 {} +
-chgrp -R nut /dev/bus/usb
-printf 'level=info msg="chgrp nut:/dev/bus/usb applied (host device nodes)"\n' >&2
+if chgrp -R nut /dev/bus/usb 2>/dev/null; then
+  printf 'level=info msg="chgrp nut:/dev/bus/usb applied (host device nodes)"\n' >&2
+else
+  printf 'level=warn msg="could not chgrp nut on /dev/bus/usb; driver will still open the device as root before dropping to nut"\n' >&2
+fi
 
 # ---------------------------------------------------------------------------
 # Start NUT services with signal handling

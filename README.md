@@ -154,8 +154,10 @@ All source versions are tracked by Renovate. The
 multi-stage build uses [xx](https://github.com/tonistiigi/xx)
 for native cross-compilation (no QEMU). The entrypoint validates
 all env vars before generating NUT config: newline injection
-prevention, numeric validation, bracket injection checks, and
-double-quote injection prevention for config file quoting.
+prevention, numeric validation, bracket injection checks,
+double-quote injection prevention for config file quoting, and
+whitespace rejection for values written unquoted (e.g. `UPS_PORT`,
+`API_ADDRESS`), so a space cannot split into extra config tokens.
 Runs as root (required for NUT config ownership and USB device
 access). Host shutdown via D-Bus is gated behind an explicit
 opt-in env var.
@@ -163,8 +165,10 @@ opt-in env var.
 **Details for advanced users:** NUT is built with
 `--disable-shared --enable-static` so all binaries are
 self-contained. Config files are 640 root:nut. Admin password
-auto-generated from `/dev/urandom` if not set. All NUT drivers
-are included (USB HID, Modbus, SNMP).
+auto-generated from `/dev/urandom` if not set, then cached in a
+root-only directory (`/var/run/nut-secrets`, mode 700) so the
+lower-privileged `nut` user cannot pre-plant a symlink at the write
+path. All NUT drivers are included (USB HID, Modbus, SNMP).
 
 ## Dependencies
 
