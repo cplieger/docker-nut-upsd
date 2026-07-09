@@ -94,6 +94,31 @@ validate_identifier() {
   esac
 }
 
+# Normalize a validated numeric so arithmetic expansion treats it as base-10.
+# $(( )) reads a leading zero as octal: 08/09 error out (and under set -e kill the
+# comms-watchdog subshell, silently disabling USB recovery); 012 would mean 10.
+strip_leading_zeros() {
+  _n="$1"
+  while [ "${#_n}" -gt 1 ] && [ "${_n#0}" != "$_n" ]; do
+    _n="${_n#0}"
+  done
+  printf '%s' "$_n"
+}
+
+# normalize_bool NAME VALUE -> prints 'true'/'false'; returns 1 (with an error log)
+# on an unrecognized spelling so a misconfigured safety toggle fails loud.
+normalize_bool() {
+  _nb=$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')
+  case "$_nb" in
+    true | 1 | yes | on) printf 'true' ;;
+    false | 0 | no | off) printf 'false' ;;
+    *)
+      printf 'level=error msg="%s must be a boolean (true/false/1/0/yes/no/on/off)" value="%s"\n' "$1" "$2" >&2
+      return 1
+      ;;
+  esac
+}
+
 # ---------------------------------------------------------------------------
 # Table-driven validation dispatch
 # ---------------------------------------------------------------------------
@@ -228,6 +253,16 @@ run_validations() {
     auto | /dev/*) : ;;
     *)
       printf 'level=error msg="UPS_PORT must be auto or /dev/*" value="%s"\n' "$UPS_PORT" >&2
+      exit 1
+      ;;
+  esac
+
+  # UPS_PORT is written UNQUOTED into ups.conf (`port = $UPS_PORT`); a space would
+  # split it into extra tokens and a double-quote would open a quoted context.
+  # The `/dev/*` glob above matches whitespace/quotes, so guard them explicitly.
+  case "$UPS_PORT" in
+    *[[:space:]]* | *'"'*)
+      printf 'level=error msg="UPS_PORT must not contain whitespace or quotes" value="%s"\n' "$UPS_PORT" >&2
       exit 1
       ;;
   esac
