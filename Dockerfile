@@ -101,6 +101,7 @@ RUN apk upgrade --no-cache \
     && addgroup -S nut \
     && adduser -S -G nut -h /var/run/nut -s /sbin/nologin nut \
     && install -d -m 770 -o nut -g nut /var/run/nut \
+    && install -d -m 700 -o root -g root /var/run/nut-secrets \
     && install -d -m 770 -o nut -g nut /etc/nut
 
 COPY --from=builder /out/usr/lib/libmodbus* /usr/lib/
