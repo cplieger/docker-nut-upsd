@@ -135,6 +135,20 @@ Recovery is **two-stage** so it stays fast for a transient reset without thrashi
 
 Set `COMMS_WATCHDOG=false` to disable it (e.g. for a UPS that never re-enumerates, or when debugging). It is a no-op while comms are healthy.
 
+## Alerting
+
+nut-upsd has no metrics endpoint; its operational state is in its logs. Its `upsmon` notification handler logs a structured `event=<TYPE>` line to the container log for every UPS event (`LOWBATT`, `FSD`/`SHUTDOWN`, `NOCOMM`, and so on). Ship the container's logs to Loki (Grafana Alloy's Docker log discovery does this with no configuration) and evaluate the rules in [`alerts.yaml`](alerts.yaml) with [Loki's ruler](https://grafana.com/docs/loki/latest/alert/); firing alerts deliver through your Alertmanager exactly like Prometheus metric alerts. They cover:
+
+| Alert | Fires when | Severity |
+| --- | --- | --- |
+| `UPSLowBattery` | a `LOWBATT` event: the UPS is on battery and has reached its low-battery threshold, so shutdown is imminent | critical |
+| `UPSForcedShutdown` | an `FSD`/`SHUTDOWN` event: the battery is exhausted and the shutdown sequence has started | critical |
+| `UPSCommsLost` | a `NOCOMM` event: upsmon could not reach the UPS for `NOCOMMWARNTIME` seconds (default 300) | warning |
+
+These events are emitted out of the box: the generated `upsmon.conf` sets a `NOTIFYCMD` that writes each event to the log, with `EXEC` on the relevant `NOTIFYFLAG`s. If you supply your own config by mounting `upsmon.conf.user`, keep the `NOTIFYCMD` line and the `EXEC` notify flags or these log lines (and the alerts that key on them) will not appear.
+
+Thresholds, `for:` windows, and the `severity` labels are starting points; adjust the `container` selector to your deployment and route by whatever labels your Alertmanager uses.
+
 ## Security
 
 **No dependency CVEs.** NUT, libmodbus, and net-snmp are compiled
