@@ -1,0 +1,54 @@
+# Recommended alert rules for docker-nut-upsd. Loki ruler (LogQL) rule group:
+# ship the container's logs to Loki (e.g. Grafana Alloy's Docker log discovery)
+# and evaluate these with Loki's ruler; firing alerts deliver through your
+# Alertmanager like any Prometheus alert. The rules key on the structured
+# event=<TYPE> lines the image's upsmon NOTIFYCMD writes for each UPS event
+# (NOTIFYCMD is wired by the generated upsmon.conf out of the box). Thresholds,
+# the for: windows, and the severity labels are starting points; adjust the
+# container selector to your deployment.
+groups:
+  - name: nut-upsd
+    rules:
+      - alert: UPSLowBattery
+        expr: |
+          sum by (container) (count_over_time(
+            {container="nut-upsd"} |= `event=LOWBATT` [5m]
+          )) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "UPS low battery - shutdown imminent ({{ $labels.container }})"
+          description: >
+            nut-upsd logged a NUT LOWBATT event: the UPS is on battery and has
+            reached its low-battery threshold, so NUT will begin its shutdown
+            sequence. This event is logged even when periodic status polling is
+            degraded. Verify mains power and the connected-load runtime now.
+      - alert: UPSForcedShutdown
+        expr: |
+          sum by (container) (count_over_time(
+            {container="nut-upsd"} |~ `event=(FSD|SHUTDOWN)` [5m]
+          )) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "UPS forced-shutdown initiated ({{ $labels.container }})"
+          description: >
+            nut-upsd logged an FSD/SHUTDOWN event: the UPS battery is exhausted
+            and the shutdown sequence has started. Unprotected power loss is
+            imminent for all UPS-fed equipment.
+      - alert: UPSCommsLost
+        expr: |
+          sum by (container) (count_over_time(
+            {container="nut-upsd"} |= `event=NOCOMM` [5m]
+          )) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "UPS communication lost ({{ $labels.container }})"
+          description: >
+            nut-upsd logged a NOCOMM event: upsmon could not reach the UPS for
+            at least NOCOMMWARNTIME seconds (default 300). UPS state is unknown
+            until communication is restored.
