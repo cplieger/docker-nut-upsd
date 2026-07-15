@@ -152,7 +152,7 @@ Thresholds, `for:` windows, and the `severity` labels are starting points; adjus
 ## Security
 
 **No dependency CVEs.** NUT, libmodbus, and net-snmp are compiled
-from patched upstream sources via native cross-compilation,
+from patched upstream sources in native per-arch builds,
 eliminating all CVEs present in Alpine's older packages.
 
 | Tool                                             | Result                               |
@@ -165,8 +165,8 @@ eliminating all CVEs present in Alpine's older packages.
 | [semgrep](https://semgrep.dev/)                  | 1 info (missing USER, expected)      |
 
 All source versions are tracked by Renovate. The
-multi-stage build uses [xx](https://github.com/tonistiigi/xx)
-for native cross-compilation (no QEMU). The entrypoint validates
+multi-stage build compiles each platform natively on its own
+build runner (no QEMU, no cross-compilation). The entrypoint validates
 all env vars before generating NUT config: newline injection
 prevention, numeric validation, bracket injection checks,
 double-quote injection prevention for config file quoting, and
@@ -188,13 +188,12 @@ path. All NUT drivers are included (USB HID, Modbus, SNMP).
 
 All dependencies are updated automatically via [Renovate](https://github.com/renovatebot/renovate) and pinned by digest or version for reproducibility.
 
-| Dependency    | Source                                           |
-| ------------- | ------------------------------------------------ |
-| tonistiigi/xx | [Docker Hub](https://hub.docker.com/_/xx)        |
-| alpine        | [Alpine](https://hub.docker.com/_/alpine)        |
-| libmodbus     | [GitHub](https://github.com/stephane/libmodbus)  |
-| netsnmp       | [GitHub](https://github.com/net-snmp/net-snmp)   |
-| nut           | [GitHub](https://github.com/networkupstools/nut) |
+| Dependency | Source                                           |
+| ---------- | ------------------------------------------------ |
+| alpine     | [Alpine](https://hub.docker.com/_/alpine)        |
+| libmodbus  | [GitHub](https://github.com/stephane/libmodbus)  |
+| netsnmp    | [GitHub](https://github.com/net-snmp/net-snmp)   |
+| nut        | [GitHub](https://github.com/networkupstools/nut) |
 
 ## Credits
 
@@ -205,8 +204,6 @@ This project packages [Network UPS Tools (NUT)](https://github.com/networkupstoo
   library used by NUT's `apc_modbus` driver
 - [Net-SNMP](https://github.com/net-snmp/net-snmp) — the SNMP
   library used by NUT's `snmp-ups` driver
-- [xx](https://github.com/tonistiigi/xx) — Dockerfile
-  cross-compilation helper for native multi-platform builds
 
 ## Contributing
 
