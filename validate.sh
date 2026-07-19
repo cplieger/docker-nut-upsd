@@ -120,6 +120,50 @@ normalize_bool() {
 }
 
 # ---------------------------------------------------------------------------
+# Driver transport classification
+# ---------------------------------------------------------------------------
+
+# driver_transport: classify UPS_DRIVER for validation and device-access
+# scoping. Prints one of:
+#   usb   — libusb drivers that always talk through /dev/bus/usb
+#   net   — network drivers whose port is a host[:port] endpoint (no local device)
+#   other — serial or dual-mode drivers; the UPS_PORT shape decides what device
+#           access is needed (see usb_bus_required)
+driver_transport() {
+  case "${UPS_DRIVER:-}" in
+    snmp-ups)
+      printf 'net'
+      ;;
+    usbhid-ups | blazer_usb | tripplite_usb | bcmxcp_usb | richcomm_usb | riello_usb | nutdrv_atcl_usb)
+      printf 'usb'
+      ;;
+    *)
+      printf 'other'
+      ;;
+  esac
+}
+
+# usb_bus_required: return 0 when this configuration needs /dev/bus/usb (the
+# live bus bind + cgroup rule from the README). True for the USB driver
+# family, and for dual-mode drivers when UPS_PORT requests USB auto-detection
+# or names a node under the USB bus. Network drivers and serial /dev/tty*
+# nodes run without the bus, so the entrypoint and watchdog skip the bus
+# existence check and nut-group setup for them.
+usb_bus_required() {
+  case "$(driver_transport)" in
+    usb) return 0 ;;
+    net) return 1 ;;
+  esac
+  if [ "${UPS_PORT:-auto}" = "auto" ]; then
+    return 0
+  fi
+  case "${UPS_PORT:-}" in
+    /dev/bus/usb/*) return 0 ;;
+  esac
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # Table-driven validation dispatch
 # ---------------------------------------------------------------------------
 
@@ -129,13 +173,14 @@ VALIDATION_TABLE='
 UPS_NAME:newlines,quotes,brackets,identifier
 UPS_DESC:newlines,quotes,backslash
 UPS_DRIVER:newlines,identifier
-UPS_PORT:newlines
-API_USER:newlines,quotes,brackets,backslash
+UPS_PORT:newlines,backslash
+API_USER:newlines,identifier
 API_PASSWORD:newlines,quotes,backslash
 API_ADDRESS:newlines,quotes,backslash
 API_PORT:newlines,numeric,port
 ADMIN_PASSWORD:newlines,quotes,backslash
 SHUTDOWN_ON_BATTERY_CRITICAL:newlines
+DBUS_PROBE_INTERVAL:numeric
 POLLFREQ:numeric
 POLLFREQALERT:numeric
 DEADTIME:numeric
@@ -193,6 +238,7 @@ _resolve_var() {
     API_PORT) printf '%s' "${API_PORT:-}" ;;
     ADMIN_PASSWORD) printf '%s' "${ADMIN_PASSWORD:-}" ;;
     SHUTDOWN_ON_BATTERY_CRITICAL) printf '%s' "${SHUTDOWN_ON_BATTERY_CRITICAL:-}" ;;
+    DBUS_PROBE_INTERVAL) printf '%s' "${DBUS_PROBE_INTERVAL:-}" ;;
     POLLFREQ) printf '%s' "${POLLFREQ:-}" ;;
     POLLFREQALERT) printf '%s' "${POLLFREQALERT:-}" ;;
     DEADTIME) printf '%s' "${DEADTIME:-}" ;;
@@ -248,12 +294,29 @@ run_validations() {
   _run_table "$VALIDATION_TABLE" 0
   _run_table "$VALIDATION_TABLE_OPTIONAL" 1
 
-  # UPS_PORT must be "auto" or a /dev/* path (NUT's documented conventions).
-  case "$UPS_PORT" in
-    auto | /dev/*) : ;;
-    *)
-      printf 'level=error msg="UPS_PORT must be auto or /dev/*" value="%s"\n' "$UPS_PORT" >&2
-      exit 1
+  # UPS_PORT shape depends on the driver's transport (see driver_transport):
+  #   usb   — "auto" (USB auto-detection) or an explicit /dev/* node
+  #   net   — a host or host:port endpoint; "auto" and /dev/* are USB/serial
+  #           conventions that snmp-ups cannot use
+  #   other — "auto", /dev/* (serial), or a network endpoint; the driver decides
+  # The unquoted-write guards below apply to every shape.
+  case "$(driver_transport)" in
+    usb)
+      case "$UPS_PORT" in
+        auto | /dev/*) : ;;
+        *)
+          printf 'level=error msg="UPS_PORT must be auto or /dev/* for a USB driver" driver=%s value="%s"\n' "$UPS_DRIVER" "$UPS_PORT" >&2
+          exit 1
+          ;;
+      esac
+      ;;
+    net)
+      case "$UPS_PORT" in
+        auto | /dev/*)
+          printf 'level=error msg="UPS_PORT must be a host or host:port endpoint for a network driver" driver=%s value="%s"\n' "$UPS_DRIVER" "$UPS_PORT" >&2
+          exit 1
+          ;;
+      esac
       ;;
   esac
 

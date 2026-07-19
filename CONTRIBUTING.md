@@ -15,7 +15,7 @@ helpers are libraries, not programs:
 | -------------------- | ----------------------------------------------------------------- |
 | `validate.sh`        | Env-var validation functions + table-driven dispatch              |
 | `generate-config.sh` | Generates `ups.conf` / `upsd.conf` / `upsd.users` / `upsmon.conf` |
-| `lifecycle.sh`       | `stop_services`, `wait_for_pidfile`, USB comms-recovery watchdog  |
+| `lifecycle.sh`       | `stop_services`, `wait_for_pidfile`, USB comms-recovery watchdog, D-Bus poweroff-path probe |
 | `password.sh`        | `ADMIN_PASSWORD` generation/caching, weak-password warning        |
 
 More scripts are invoked by NUT at runtime (not sourced):
@@ -39,8 +39,8 @@ places:
 
 1. Add a row to `VALIDATION_TABLE` (or `VALIDATION_TABLE_OPTIONAL` for
    vars only checked when non-empty), e.g. `MY_VAR:newlines,quotes`.
-   Supported checks: `newlines`, `quotes`, `brackets`, `identifier`,
-   `numeric`, `port`, `percent`.
+   Supported checks: `newlines`, `quotes`, `backslash`, `brackets`,
+   `identifier`, `numeric`, `positive`, `port`, `percent`.
 2. Add a `case` arm to `_resolve_var` returning `"${MY_VAR:-}"`. The
    resolver is an explicit lookup table on purpose — there is no
    indirect expansion, so an unlisted var fails the run instead of
@@ -125,6 +125,9 @@ docker build -t nut-upsd-test .
 ShellCheck must be clean. `hadolint` reports only DL3018 (unpinned apk),
 which is accepted. Note the in-script `# shellcheck source-path=SCRIPTDIR`
 and targeted `disable` directives — keep them accurate when you move code.
+The `docker build` runs `tests/smoke.sh` in the image's test stage
+(validation matrix, config generation, and fake-clock behavioral tests of
+the comms watchdog), so a failing test fails the build.
 
 ## Commits & PRs
 

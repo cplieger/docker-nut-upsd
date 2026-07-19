@@ -40,7 +40,6 @@ services:
     image: ghcr.io/cplieger/docker-nut-upsd:latest
     container_name: nut-upsd
     restart: unless-stopped
-    user: "0:0"  # required for config file permissions + USB access
 
     # Block setuid privilege escalation. Safe for NUT: it only drops
     # privileges (root -> nut after opening the device), never gains them.
@@ -82,7 +81,7 @@ services:
 | `UPS_NAME`                     | NUT UPS identifier used in config files and queries                                                       | `ups`            |
 | `UPS_DESC`                     | Human-readable UPS description shown in NUT clients                                                       | `My UPS`         |
 | `UPS_DRIVER`                   | NUT driver for your UPS model (see [NUT HCL](https://networkupstools.org/stable-hcl.html))                | `usbhid-ups`     |
-| `UPS_PORT`                     | UPS device port — use `auto` for USB auto-detection                                                       | `auto`           |
+| `UPS_PORT`                     | UPS port — `auto` (USB), `/dev/*` (serial), `host[:port]` for network drivers (`snmp-ups`)                | `auto`           |
 | `API_USER`                     | Username for NUT network clients to authenticate with                                                     | `monuser`        |
 | `API_PASSWORD`                 | Password for the NUT API user (entrypoint warns on weak credentials)                                      | `secret`         |
 | `API_ADDRESS`                  | Listen address for upsd                                                                                   | `0.0.0.0`        |
@@ -99,6 +98,7 @@ services:
 | `NOCOMMWARNTIME`               | Seconds before warning about lost UPS communication                                                       | `300`            |
 | `RBWARNTIME`                   | Seconds between "replace battery" warnings                                                                | `43200`          |
 | `SHUTDOWN_ON_BATTERY_CRITICAL` | Power off host via D-Bus on battery critical                                                              | `false`          |
+| `DBUS_PROBE_INTERVAL`          | Seconds between D-Bus poweroff-path liveness probes when host shutdown is enabled (`0` disables)          | `300`            |
 | `ADMIN_PASSWORD`               | Password for the NUT admin user (set/FSD actions); auto-generated if unset                                | Random (cached)  |
 | `COMMS_WATCHDOG`               | Enable the USB comms-recovery watchdog (see [USB hotplug & comms recovery](#usb-hotplug--comms-recovery)) | `true`           |
 | `COMMS_CHECK_INTERVAL`         | Seconds between watchdog comms probes                                                                     | `15`             |
@@ -110,7 +110,7 @@ services:
 
 | Mount                         | Description                                                                      |
 | ----------------------------- | -------------------------------------------------------------------------------- |
-| `/dev/bus/usb`                | USB bus, bound live (not `devices:`) so re-enumerated nodes stay reachable       |
+| `/dev/bus/usb`                | USB bus, bound live (not `devices:`) — USB drivers only; see hotplug notes       |
 | `/run/dbus/system_bus_socket` | Host D-Bus socket (required only if `SHUTDOWN_ON_BATTERY_CRITICAL=true`)         |
 | `/etc/nut/*.user`             | Custom NUT config overrides (e.g. `ups.conf.user`) — bypasses env-var generation |
 
@@ -144,8 +144,9 @@ nut-upsd has no metrics endpoint; its operational state is in its logs. Its `ups
 | `UPSLowBattery` | a `LOWBATT` event: the UPS is on battery and has reached its low-battery threshold, so shutdown is imminent | critical |
 | `UPSForcedShutdown` | an `FSD`/`SHUTDOWN` event: the battery is exhausted and the shutdown sequence has started | critical |
 | `UPSCommsLost` | a `NOCOMM` event: upsmon could not reach the UPS for `NOCOMMWARNTIME` seconds (default 300) | warning |
+| `UPSPowerOffPathBroken` | the D-Bus poweroff-path probe logs `unreachable`: host shutdown is enabled but a forced shutdown could not power off the host right now | warning |
 
-These events are emitted out of the box: the generated `upsmon.conf` sets a `NOTIFYCMD` that writes each event to the log, with `EXEC` on the relevant `NOTIFYFLAG`s. If you supply your own config by mounting `upsmon.conf.user`, keep the `NOTIFYCMD` line and the `EXEC` notify flags or these log lines (and the alerts that key on them) will not appear.
+These events are emitted out of the box: the generated `upsmon.conf` sets a `NOTIFYCMD` that writes each event to the log, with `EXEC` on the relevant `NOTIFYFLAG`s. If you supply your own config by mounting `upsmon.conf.user`, keep the `NOTIFYCMD` line and the `EXEC` notify flags or these log lines (and the alerts that key on them) will not appear. With `SHUTDOWN_ON_BATTERY_CRITICAL=true`, a background probe additionally re-checks the D-Bus poweroff path every `DBUS_PROBE_INTERVAL` seconds (default 300) and logs `level=error` while it is unreachable, so a broken mount alerts before an outage instead of failing during the forced shutdown itself.
 
 Thresholds, `for:` windows, and the `severity` labels are starting points; adjust the `container` selector to your deployment and route by whatever labels your Alertmanager uses.
 
@@ -171,10 +172,20 @@ all env vars before generating NUT config: newline injection
 prevention, numeric validation, bracket injection checks,
 double-quote injection prevention for config file quoting, and
 whitespace rejection for values written unquoted (e.g. `UPS_PORT`,
-`API_ADDRESS`), so a space cannot split into extra config tokens.
+`API_ADDRESS`), and identifier validation for values used as NUT
+section names (`UPS_NAME`, `API_USER`), so a space cannot split
+into extra config tokens.
 Runs as root (required for NUT config ownership and USB device
 access). Host shutdown via D-Bus is gated behind an explicit
 opt-in env var.
+
+One boundary is inherent to NUT itself: commanding shutdowns is the
+protocol's function. `upsmon` and every networked NUT client decide
+to shut down based on the status `upsd` serves, so no container
+topology or mount removal can quarantine that capability away from
+the daemon. The meaningful hardening surface is the listener itself —
+strong `API_PASSWORD`/`ADMIN_PASSWORD` credentials and limiting who
+can reach port 3493.
 
 **Details for advanced users:** NUT is built with
 `--disable-shared --enable-static` so all binaries are
