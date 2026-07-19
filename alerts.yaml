@@ -1,11 +1,12 @@
 # Recommended alert rules for docker-nut-upsd. Loki ruler (LogQL) rule group:
 # ship the container's logs to Loki (e.g. Grafana Alloy's Docker log discovery)
 # and evaluate these with Loki's ruler; firing alerts deliver through your
-# Alertmanager like any Prometheus alert. The rules key on the structured
-# event=<TYPE> lines the image's upsmon NOTIFYCMD writes for each UPS event
-# (NOTIFYCMD is wired by the generated upsmon.conf out of the box). Thresholds,
-# the for: windows, and the severity labels are starting points; adjust the
-# container selector to your deployment.
+# Alertmanager like any Prometheus alert. The rules key on structured lines
+# the image writes: the event=<TYPE> lines from upsmon's NOTIFYCMD (wired by
+# the generated upsmon.conf out of the box) and, when host shutdown is
+# enabled, the D-Bus poweroff-path probe's error line. Thresholds, the for:
+# windows, and the severity labels are starting points; adjust the container
+# selector to your deployment.
 groups:
   - name: nut-upsd
     rules:
@@ -52,3 +53,19 @@ groups:
             nut-upsd logged a NOCOMM event: upsmon could not reach the UPS for
             at least NOCOMMWARNTIME seconds (default 300). UPS state is unknown
             until communication is restored.
+      - alert: UPSPowerOffPathBroken
+        expr: |
+          sum by (container) (count_over_time(
+            {container="nut-upsd"} |= `D-Bus poweroff path unreachable` [15m]
+          )) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "UPS host-poweroff path broken ({{ $labels.container }})"
+          description: >
+            nut-upsd has SHUTDOWN_ON_BATTERY_CRITICAL enabled but its periodic
+            D-Bus liveness probe (every DBUS_PROBE_INTERVAL seconds, default
+            300) cannot reach logind through the mounted system bus socket. A
+            forced shutdown right now would NOT power off the host. Check the
+            /run/dbus/system_bus_socket mount and the host D-Bus daemon.

@@ -14,9 +14,10 @@ WORKDIR /build/libmodbus
 # mis-detects on Alpine/musl: `struct termios2` is present (via <asm/termbits.h>)
 # so HAVE_STRUCT_TERMIOS2 gets set, but TCGETS2/TCSETS2 are not usable from
 # <sys/ioctl.h> on musl, so modbus-rtu.c fails to compile. Force the type check
-# off to build the portable classic-termios path (as 3.1.x did); this image is
-# USB-HID/SNMP only, so custom-baud RTU is irrelevant. Remove once upstream
-# libmodbus builds cleanly on musl.
+# off to build the portable classic-termios path (as 3.1.x did). Modbus support
+# is unaffected: NUT's modbus drivers run at standard baud rates, so only the
+# termios2 custom-baud RTU path is lost. Remove once upstream libmodbus builds
+# cleanly on musl.
 RUN wget -qO- \
       "https://github.com/stephane/libmodbus/releases/download/${LIBMODBUS_VERSION}/libmodbus-${LIBMODBUS_VERSION#v}.tar.gz" \
       | tar xz --strip-components=1 \

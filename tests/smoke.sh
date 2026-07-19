@@ -40,7 +40,7 @@ export UPS_NAME=ups UPS_DESC="Test UPS" UPS_DRIVER=usbhid-ups UPS_PORT=auto \
   POLLFREQ=5 POLLFREQALERT=5 DEADTIME=15 FINALDELAY=5 HOSTSYNC=15 \
   NOCOMMWARNTIME=300 RBWARNTIME=43200 \
   COMMS_WATCHDOG=true COMMS_CHECK_INTERVAL=15 COMMS_RECOVERY_TIMEOUT=90 \
-  COMMS_FAST_RETRIES=3 COMMS_BACKOFF_FACTOR=5
+  COMMS_FAST_RETRIES=3 COMMS_BACKOFF_FACTOR=5 DBUS_PROBE_INTERVAL=300
 
 if ! out=$( (run_validations) 2>&1); then
   err "FAIL: run_validations rejected a valid environment"
@@ -128,17 +128,194 @@ if (
   err "FAIL: backslash-injection API_PASSWORD was accepted"
   fail=1
 fi
+# API_USER is written unquoted as a `[$API_USER]` section header in upsd.users,
+# so it gets the same identifier discipline as UPS_NAME.
+if (
+  API_USER='mon user'
+  run_validations
+) >/dev/null 2>&1; then
+  err "FAIL: whitespace API_USER was accepted"
+  fail=1
+fi
+# snmp-ups takes a network endpoint: a host must pass, USB auto-detection must not.
+if ! (
+  UPS_DRIVER='snmp-ups'
+  UPS_PORT='192.168.1.50'
+  run_validations
+) >/dev/null 2>&1; then
+  err "FAIL: snmp-ups with a host endpoint was rejected"
+  fail=1
+fi
+if (
+  UPS_DRIVER='snmp-ups'
+  UPS_PORT='auto'
+  run_validations
+) >/dev/null 2>&1; then
+  err "FAIL: snmp-ups with UPS_PORT=auto was accepted (auto is USB-only)"
+  fail=1
+fi
 
-# 4. Comms-recovery watchdog helpers are defined (sourced from lifecycle.sh).
-for fn in comms_fresh restart_ups_driver comms_watchdog stop_watchdog; do
-  # stop_watchdog lives in entrypoint.sh (not sourced here); only assert the
-  # lifecycle.sh helpers.
-  case "$fn" in stop_watchdog) continue ;; esac
+# 4. Watchdog / transport helpers are defined (sourced from validate.sh and
+#    lifecycle.sh). stop_watchdog and stop_dbus_probe live in entrypoint.sh
+#    and are not asserted here.
+for fn in comms_fresh restart_ups_driver comms_watchdog watchdog_epoch \
+  driver_transport usb_bus_required dbus_poweroff_path_ok dbus_liveness_probe; do
   if ! command -v "$fn" >/dev/null 2>&1; then
-    err "FAIL: comms watchdog function missing: $fn"
+    err "FAIL: helper function missing: $fn"
     fail=1
   fi
 done
+
+# 5. Watchdog behavior, driven through the injectable seams (comms_fresh,
+#    sleep, watchdog_epoch) with a fake clock — no real waiting.
+#
+#    Cadence and budget with the defaults (check=15, recovery=90,
+#    fast_retries=3, backoff=5): stale from t=15 on, fast attempts fire at
+#    t=105/210/315, then the stage-2 threshold (450s) delays attempts 4 and 5
+#    to t=780/1245.
+WATCHDOG_ERR=$(mktemp)
+RESTART_LOG=$(mktemp)
+# shellcheck disable=SC2329  # the stubs are invoked indirectly by comms_watchdog
+(
+  _FAKE_NOW=0
+  watchdog_epoch() { printf '%s' "$_FAKE_NOW"; }
+  # Advance fake time by the check interval (15, matching the exported env)
+  # instead of waiting; end the scenario past t=1300.
+  sleep() {
+    _FAKE_NOW=$((_FAKE_NOW + 15))
+    [ "$_FAKE_NOW" -le 1300 ] || exit 0
+  }
+  comms_fresh() { return 1; }
+  restart_ups_driver() {
+    printf '%s %s\n' "$1" "$_FAKE_NOW" >>"$RESTART_LOG"
+    return 0
+  }
+  comms_watchdog
+) 2>"$WATCHDOG_ERR"
+attempts=$(($(wc -l <"$RESTART_LOG")))
+if [ "$attempts" -ne 5 ]; then
+  err "FAIL: watchdog cadence: expected 5 restart attempts by t=1300, got $attempts"
+  fail=1
+else
+  t1=$(awk 'NR==1{print $2}' "$RESTART_LOG")
+  t2=$(awk 'NR==2{print $2}' "$RESTART_LOG")
+  t3=$(awk 'NR==3{print $2}' "$RESTART_LOG")
+  t4=$(awk 'NR==4{print $2}' "$RESTART_LOG")
+  if [ $((t2 - t1)) -gt 120 ]; then
+    err "FAIL: fast-stage attempts not on the fast cadence (t1=$t1 t2=$t2)"
+    fail=1
+  fi
+  if [ $((t4 - t3)) -lt 450 ]; then
+    err "FAIL: stage-2 attempt did not back off (t3=$t3 t4=$t4, want >=450s gap)"
+    fail=1
+  fi
+fi
+rm -f "$WATCHDOG_ERR" "$RESTART_LOG"
+
+#    Recovery resets both the stale window and the restart budget: stale from
+#    t=15 (attempt 1 at t=105), fresh during t=150-299 (recovery logged),
+#    stale again from t=300 — the next attempt must be numbered 1 again.
+WATCHDOG_ERR=$(mktemp)
+RESTART_LOG=$(mktemp)
+# shellcheck disable=SC2329  # the stubs are invoked indirectly by comms_watchdog
+(
+  _FAKE_NOW=0
+  watchdog_epoch() { printf '%s' "$_FAKE_NOW"; }
+  sleep() {
+    _FAKE_NOW=$((_FAKE_NOW + 15))
+    [ "$_FAKE_NOW" -le 400 ] || exit 0
+  }
+  comms_fresh() { [ "$_FAKE_NOW" -ge 150 ] && [ "$_FAKE_NOW" -lt 300 ]; }
+  restart_ups_driver() {
+    printf '%s %s\n' "$1" "$_FAKE_NOW" >>"$RESTART_LOG"
+    return 0
+  }
+  comms_watchdog
+) 2>"$WATCHDOG_ERR"
+if ! grep -q 'comms watchdog UPS comms recovered.*restarts=1' "$WATCHDOG_ERR"; then
+  err "FAIL: watchdog recovery not logged after comms returned"
+  fail=1
+fi
+second_attempt_no=$(awk 'NR==2{print $1}' "$RESTART_LOG")
+if [ "${second_attempt_no:-}" != "1" ]; then
+  err "FAIL: restart budget not reset after recovery (second attempt numbered ${second_attempt_no:-none})"
+  fail=1
+fi
+rm -f "$WATCHDOG_ERR" "$RESTART_LOG"
+
+#    Killpower stand-down: with host shutdown armed and NUT's POWERDOWNFLAG
+#    present, the real restart_ups_driver must stand down (rc!=0, no driver
+#    bounce) so a recovery can't fight a poweroff in progress.
+KILLPOWER_ERR=$(mktemp)
+if (
+  # shellcheck disable=SC2034  # consumed by restart_ups_driver (sourced lifecycle.sh)
+  SHUTDOWN_ON_BATTERY_CRITICAL=true
+  touch /var/run/nut/killpower
+  restart_ups_driver 1
+) 2>"$KILLPOWER_ERR"; then
+  err "FAIL: restart_ups_driver did not stand down with killpower set"
+  fail=1
+fi
+rm -f /var/run/nut/killpower
+if ! grep -q 'standing down' "$KILLPOWER_ERR"; then
+  err "FAIL: killpower stand-down not logged"
+  fail=1
+fi
+rm -f "$KILLPOWER_ERR"
+
+# 6. Transport classification and device/D-Bus gates.
+if ! (
+  UPS_DRIVER='snmp-ups'
+  [ "$(driver_transport)" = "net" ]
+); then
+  err "FAIL: snmp-ups not classified as a network transport"
+  fail=1
+fi
+if ! (
+  UPS_DRIVER='usbhid-ups'
+  [ "$(driver_transport)" = "usb" ]
+); then
+  err "FAIL: usbhid-ups not classified as a USB transport"
+  fail=1
+fi
+if (
+  UPS_DRIVER='snmp-ups'
+  UPS_PORT='192.168.1.50'
+  usb_bus_required
+); then
+  err "FAIL: usb_bus_required claims snmp-ups needs the USB bus"
+  fail=1
+fi
+if ! (
+  UPS_DRIVER='usbhid-ups'
+  UPS_PORT='auto'
+  usb_bus_required
+); then
+  err "FAIL: usb_bus_required denies the bus to usbhid-ups"
+  fail=1
+fi
+if (
+  UPS_DRIVER='apc_modbus'
+  UPS_PORT='/dev/ttyUSB0'
+  usb_bus_required
+); then
+  err "FAIL: usb_bus_required claims a serial node needs the USB bus"
+  fail=1
+fi
+if ! (
+  UPS_DRIVER='apc_modbus'
+  UPS_PORT='auto'
+  usb_bus_required
+); then
+  err "FAIL: usb_bus_required denies the bus to a dual-mode driver on auto"
+  fail=1
+fi
+# No D-Bus socket is mounted in the test stage, so the poweroff-path gate
+# must report broken.
+if dbus_poweroff_path_ok; then
+  err "FAIL: dbus_poweroff_path_ok returned success without a mounted D-Bus socket"
+  fail=1
+fi
 
 [ "$fail" -eq 0 ] && log "nut-upsd smoke: ok"
 exit "$fail"

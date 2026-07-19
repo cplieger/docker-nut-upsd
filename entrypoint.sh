@@ -51,6 +51,9 @@ set -eu
 
 # Host shutdown support via D-Bus (requires /run/dbus mount)
 : "${SHUTDOWN_ON_BATTERY_CRITICAL:=false}"
+# Poweroff-path liveness probe cadence in seconds (0 disables). Only runs when
+# SHUTDOWN_ON_BATTERY_CRITICAL=true — see lifecycle.sh dbus_liveness_probe.
+: "${DBUS_PROBE_INTERVAL:=300}"
 
 # ---------------------------------------------------------------------------
 # Password resolution (from password.sh)
@@ -64,9 +67,9 @@ warn_weak_api_password
 run_validations
 
 # ---------------------------------------------------------------------------
-# USB device validation
+# USB device validation (USB transports only — see usb_bus_required)
 # ---------------------------------------------------------------------------
-if [ ! -d /dev/bus/usb ]; then
+if usb_bus_required && [ ! -d /dev/bus/usb ]; then
   printf 'level=error msg="/dev/bus/usb not found — map a USB device to the container"\n' >&2
   exit 1
 fi
@@ -109,6 +112,7 @@ COMMS_WATCHDOG=$(normalize_bool COMMS_WATCHDOG "$COMMS_WATCHDOG") || exit 1
 COMMS_CHECK_INTERVAL=$(strip_leading_zeros "$COMMS_CHECK_INTERVAL")
 COMMS_RECOVERY_TIMEOUT=$(strip_leading_zeros "$COMMS_RECOVERY_TIMEOUT")
 COMMS_BACKOFF_FACTOR=$(strip_leading_zeros "$COMMS_BACKOFF_FACTOR")
+DBUS_PROBE_INTERVAL=$(strip_leading_zeros "$DBUS_PROBE_INTERVAL")
 
 # ---------------------------------------------------------------------------
 # Generate NUT config files (from generate-config.sh)
@@ -121,10 +125,14 @@ generate_all_configs
 chown -R root:nut /etc/nut
 find /etc/nut -type d -exec chmod 750 {} +
 find /etc/nut -type f -exec chmod 640 {} +
-if chgrp -R nut /dev/bus/usb 2>/dev/null; then
-  printf 'level=info msg="chgrp nut:/dev/bus/usb applied (host device nodes)"\n' >&2
+if usb_bus_required; then
+  if chgrp -R nut /dev/bus/usb 2>/dev/null; then
+    printf 'level=info msg="chgrp nut:/dev/bus/usb applied (host device nodes)"\n' >&2
+  else
+    printf 'level=warn msg="could not chgrp nut on /dev/bus/usb; driver will still open the device as root before dropping to nut"\n' >&2
+  fi
 else
-  printf 'level=warn msg="could not chgrp nut on /dev/bus/usb; driver will still open the device as root before dropping to nut"\n' >&2
+  printf 'level=info msg="non-USB transport; skipping USB bus group setup" driver=%s port=%s\n' "$UPS_DRIVER" "$UPS_PORT" >&2
 fi
 
 # ---------------------------------------------------------------------------
@@ -146,11 +154,22 @@ stop_watchdog() {
   WATCHDOG_PID=""
 }
 
+# Background D-Bus poweroff-path probe PID (empty unless host shutdown is
+# enabled). Same lifecycle contract as stop_watchdog above.
+DBUS_PROBE_PID=""
+stop_dbus_probe() {
+  [ -n "${DBUS_PROBE_PID:-}" ] || return 0
+  kill "$DBUS_PROBE_PID" 2>/dev/null || true
+  wait "$DBUS_PROBE_PID" 2>/dev/null || true
+  DBUS_PROBE_PID=""
+}
+
 # Signal handler: clean up, then exit 0 (signal-initiated stop).
 # shellcheck disable=SC2317,SC2329 # invoked via trap; shellcheck cannot see the call site
 graceful_shutdown() {
   printf 'level=info msg="received shutdown signal"\n' >&2
   stop_watchdog
+  stop_dbus_probe
   stop_services
   exit 0
 }
@@ -214,6 +233,19 @@ else
   printf 'level=info msg="comms watchdog disabled"\n' >&2
 fi
 
+# Start the D-Bus poweroff-path probe (host shutdown enabled only) so a D-Bus
+# mount that breaks after boot alerts in advance instead of failing during the
+# forced shutdown itself.
+if [ "$SHUTDOWN_ON_BATTERY_CRITICAL" = "true" ]; then
+  if [ "$DBUS_PROBE_INTERVAL" -ge 1 ]; then
+    printf 'level=info msg="starting D-Bus poweroff-path probe" interval=%ss\n' "$DBUS_PROBE_INTERVAL" >&2
+    dbus_liveness_probe &
+    DBUS_PROBE_PID=$!
+  else
+    printf 'level=info msg="D-Bus poweroff-path probe disabled"\n' >&2
+  fi
+fi
+
 # Wait for upsmon — propagate its exit code so Docker restart policies and
 # log-based alerting see the real failure. stop_services is idempotent and
 # does not dictate the exit code; the caller decides.
@@ -227,5 +259,6 @@ else
   printf 'level=error msg="upsmon exited unexpectedly" rc=%d\n' "$rc" >&2
 fi
 stop_watchdog
+stop_dbus_probe
 stop_services
 exit "$rc"

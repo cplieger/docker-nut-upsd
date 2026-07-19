@@ -4,6 +4,7 @@
 
 readonly PIDFILE_POLL_INTERVAL="0.1"
 readonly PIDFILE_POLL_MAX=50 # total wait = POLL_MAX × POLL_INTERVAL = 5s
+readonly DBUS_PROBE_REPLY_TIMEOUT_MS=3000
 
 # ---------------------------------------------------------------------------
 # Service lifecycle functions
@@ -72,6 +73,13 @@ comms_fresh() {
   timeout 3 upsc "${UPS_NAME}@127.0.0.1:${API_PORT:-3493}" ups.status >/dev/null 2>&1
 }
 
+# watchdog_epoch: current epoch seconds. A function (not an inline date call)
+# so the smoke test can stub the clock and drive threshold crossings
+# deterministically.
+watchdog_epoch() {
+  date +%s
+}
+
 # driver_pidfile: NUT writes the driver PID file as <driver>-<ups>.pid under
 # /var/run/nut. Centralized so the path convention lives in one place.
 driver_pidfile() {
@@ -87,6 +95,8 @@ driver_pidfile() {
 # AFTER opening), so it succeeds regardless of the new node's group. A wedged
 # driver is hard-killed by pidfile because `upsdrvctl stop` alone has been
 # observed to fail to reap it ("Stopping ...pid failed: Permission denied").
+# For non-USB transports (see usb_bus_required) the group re-assert is
+# skipped and the restart is a plain driver bounce.
 restart_ups_driver() {
   _attempt=${1:-1}
   # h-f8 guard: stand down ONLY when a REAL host poweroff is in progress. upsmon
@@ -108,8 +118,10 @@ restart_ups_driver() {
   else
     printf 'level=warn msg="comms watchdog re-homing UPS driver after stale comms" ups=%s attempt=%d\n' "$UPS_NAME" "$_attempt" >&2
   fi
-  if ! chgrp -R nut /dev/bus/usb 2>/dev/null; then
-    printf 'level=warn msg="comms watchdog could not re-assert nut group on USB nodes" ups=%s\n' "$UPS_NAME" >&2
+  if usb_bus_required; then
+    if ! chgrp -R nut /dev/bus/usb 2>/dev/null; then
+      printf 'level=warn msg="comms watchdog could not re-assert nut group on USB nodes" ups=%s\n' "$UPS_NAME" >&2
+    fi
   fi
   /usr/sbin/upsdrvctl stop "$UPS_NAME" >/dev/null 2>&1 || true
   _pf="$(driver_pidfile)"
@@ -139,6 +151,10 @@ restart_ups_driver() {
 # off to COMMS_RECOVERY_TIMEOUT x COMMS_BACKOFF_FACTOR and escalates to error, so a
 # genuinely-absent UPS stops thrashing host USB perms / flooding logs while a
 # sustained outage stays visible and still self-heals if the UPS returns.
+# Staleness is wall-clock elapsed since the FIRST stale probe of the current
+# window (via watchdog_epoch), not a sum of check intervals — each stale probe
+# can spend up to 3s inside upsc's timeout, and interval-summing let that
+# stretch the real recovery window ~20% past the configured budget.
 comms_watchdog() {
   : "${UPS_NAME:?comms_watchdog requires UPS_NAME}"
   : "${UPS_DRIVER:?comms_watchdog requires UPS_DRIVER}"
@@ -147,6 +163,7 @@ comms_watchdog() {
   : "${COMMS_FAST_RETRIES:?comms_watchdog requires COMMS_FAST_RETRIES}"
   : "${COMMS_BACKOFF_FACTOR:?comms_watchdog requires COMMS_BACKOFF_FACTOR}"
   _stale=0
+  _stale_since=""
   _restarts=0
   # `while true; do sleep` (not `while sleep`): a signal-interrupted sleep must
   # not silently terminate the loop and disable USB recovery for the container's life.
@@ -158,9 +175,19 @@ comms_watchdog() {
           "$UPS_NAME" "$_stale" "$_restarts" >&2
       fi
       _stale=0
+      _stale_since=""
       _restarts=0
     else
-      _stale=$((_stale + COMMS_CHECK_INTERVAL))
+      # Skip the tick rather than die under set -e if the clock read fails —
+      # a dead watchdog silently disables USB recovery.
+      _now=$(watchdog_epoch) || {
+        printf 'level=warn msg="comms watchdog clock read failed; skipping tick" ups=%s\n' "$UPS_NAME" >&2
+        continue
+      }
+      if [ -z "$_stale_since" ]; then
+        _stale_since="$_now"
+      fi
+      _stale=$((_now - _stale_since))
       if [ "$_restarts" -lt "$COMMS_FAST_RETRIES" ]; then
         _threshold="$COMMS_RECOVERY_TIMEOUT"
       else
@@ -174,7 +201,51 @@ comms_watchdog() {
           _restarts=$((_restarts + 1))
         fi
         _stale=0
+        _stale_since=""
       fi
+    fi
+  done
+}
+
+# ---------------------------------------------------------------------------
+# D-Bus poweroff-path liveness probe
+# ---------------------------------------------------------------------------
+# With SHUTDOWN_ON_BATTERY_CRITICAL=true the poweroff path (upsmon SHUTDOWNCMD
+# -> nut-shutdown.sh -> D-Bus PowerOff) is otherwise checked once at startup
+# and first exercised during a real forced shutdown — a D-Bus mount that broke
+# after boot would surface exactly when it can no longer be fixed. This probe
+# re-checks reachability every DBUS_PROBE_INTERVAL seconds (0 disables) and
+# logs level=error while the path is broken, so the UPSPowerOffPathBroken
+# alert (alerts.yaml) can fire before an outage; level=info once on recovery.
+
+# dbus_poweroff_path_ok: return 0 when the host D-Bus socket is mounted and
+# logind answers a side-effect-free Peer.Ping on the exact destination
+# nut-shutdown.sh will call during a forced shutdown.
+dbus_poweroff_path_ok() {
+  [ -S /run/dbus/system_bus_socket ] || return 1
+  dbus-send --system --print-reply --reply-timeout="$DBUS_PROBE_REPLY_TIMEOUT_MS" \
+    --dest=org.freedesktop.login1 /org/freedesktop/login1 \
+    org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1
+}
+
+# dbus_liveness_probe: background loop started by the entrypoint when host
+# shutdown is enabled. Same loop shape as comms_watchdog (`sleep || true` so a
+# signal-interrupted sleep cannot silently end the loop). Logs error on every
+# failed probe while broken (recurring lines keep the Loki alert firing) and
+# info once on recovery.
+dbus_liveness_probe() {
+  : "${DBUS_PROBE_INTERVAL:?dbus_liveness_probe requires DBUS_PROBE_INTERVAL}"
+  _dbus_broken=0
+  while true; do
+    sleep "$DBUS_PROBE_INTERVAL" || true
+    if dbus_poweroff_path_ok; then
+      if [ "$_dbus_broken" -eq 1 ]; then
+        printf 'level=info msg="D-Bus poweroff path recovered"\n' >&2
+      fi
+      _dbus_broken=0
+    else
+      printf 'level=error msg="D-Bus poweroff path unreachable; host poweroff on battery critical would fail" socket=/run/dbus/system_bus_socket\n' >&2
+      _dbus_broken=1
     fi
   done
 }
