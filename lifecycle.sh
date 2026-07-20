@@ -53,7 +53,11 @@ wait_for_pidfile() {
   # Required variables — fail fast if caller forgot to set them.
   : "${PIDFILE_POLL_INTERVAL:?wait_for_pidfile requires PIDFILE_POLL_INTERVAL}"
   : "${PIDFILE_POLL_MAX:?wait_for_pidfile requires PIDFILE_POLL_MAX}"
-  # $1 = label, $2 = absolute PID file path
+  # $1 = label, $2 = absolute PID file path, $3 = expected daemon binary.
+  # Resolve the expected side once so driver symlinks compare canonically
+  # against /proc/<pid>/exe (which the kernel resolves).
+  : "${3:?wait_for_pidfile requires an expected binary path}"
+  _wf_exe=$(readlink -f "$3" 2>/dev/null) || _wf_exe="$3"
   i=0
   while [ $i -lt "$PIDFILE_POLL_MAX" ]; do
     # Pidfiles live in the nut-writable /var/run/nut; only trust strictly
@@ -61,11 +65,16 @@ wait_for_pidfile() {
     _wf_pid=$(cat "$2" 2>/dev/null || true)
     case "$_wf_pid" in
       '' | *[!0-9]*) ;; # empty, partial write, or untrusted content: keep polling
-      *)
-        if kill -0 "$_wf_pid" 2>/dev/null; then
+      *[!0]*)
+        # Live PID whose /proc/<pid>/exe resolves to the expected daemon —
+        # a planted PID of some unrelated live process must not satisfy the
+        # startup gate (completes restart_ups_driver's trust boundary).
+        if kill -0 "$_wf_pid" 2>/dev/null \
+          && [ "$(readlink -f "/proc/$_wf_pid/exe" 2>/dev/null)" = "$_wf_exe" ]; then
           return 0
         fi
         ;;
+      *) ;; # all-zero PID: `kill -0 0` signals the caller's own process group — refuse
     esac
     sleep "$PIDFILE_POLL_INTERVAL"
     i=$((i + 1))
@@ -94,11 +103,15 @@ wait_for_pidfile() {
 # LISTEN address generated from API_ADDRESS (upsd.conf), so a specific bind
 # address must be probed at that address — probing 127.0.0.1 would fail
 # permanently (driver bounced forever by the watchdog, container fatally
-# exited by the supervision loop). Wildcard binds map to loopback.
+# exited by the supervision loop). Only the wildcard binds (and the localhost
+# alias) map to loopback; every specific bind — including 127.0.0.2-style
+# loopback addresses, which a 127.0.0.1 probe cannot reach — passes through
+# and is probed exactly where upsd listens. The IPv6 wildcard maps to the
+# bracketed [::1] form NUT documents for IPv6 host:port syntax.
 upsd_probe_host() {
   case "${API_ADDRESS:-0.0.0.0}" in
-    0.0.0.0 | 127.* | localhost) printf '127.0.0.1' ;;
-    ::) printf '::1' ;;
+    0.0.0.0 | localhost) printf '127.0.0.1' ;;
+    ::) printf '[::1]' ;;
     *) printf '%s' "${API_ADDRESS}" ;;
   esac
 }

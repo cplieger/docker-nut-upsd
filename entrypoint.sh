@@ -212,26 +212,38 @@ fi
 
 printf 'level=info msg="starting upsdrvctl"\n' >&2
 # timeout 90 > NUT's 75s default maxstartdelay (matches the watchdog's restart
-# path), so it only fires on a genuine wedge — which would otherwise hang PID 1
-# in "starting" forever with the SIGTERM trap deferred.
-timeout 90 /usr/sbin/upsdrvctl start || {
-  printf 'level=error msg="upsdrvctl start failed or timed out at boot" rc=%d\n' "$?" >&2
+# path), so it only fires on a genuine wedge; -k 5 hard-kills a child that
+# ignores the TERM at expiry so the bound is genuinely hard. Background + wait
+# (mirroring the supervision loop's sleep) so a SIGTERM during boot interrupts
+# `wait` and runs graceful_shutdown at once instead of being deferred for up
+# to the full timeout — past Docker's 10s stop budget.
+timeout -k 5 90 /usr/sbin/upsdrvctl start &
+if wait $!; then
+  :
+else
+  _start_rc=$?
+  printf 'level=error msg="upsdrvctl start failed or timed out at boot" rc=%d\n' "$_start_rc" >&2
   stop_services
   exit 1
-}
+fi
 # NUT drivers write /var/run/nut/<driver>-<ups>.pid on successful start.
-wait_for_pidfile "UPS driver" "$(driver_pidfile)" || {
+wait_for_pidfile "UPS driver" "$(driver_pidfile)" "/usr/lib/nut/$UPS_DRIVER" || {
   stop_services
   exit 1
 }
 
 printf 'level=info msg="starting upsd"\n' >&2
-timeout 30 /usr/sbin/upsd || {
-  printf 'level=error msg="upsd start failed or timed out at boot" rc=%d\n' "$?" >&2
+# Background + wait for the same trap-interruptibility as upsdrvctl above.
+timeout -k 5 30 /usr/sbin/upsd &
+if wait $!; then
+  :
+else
+  _start_rc=$?
+  printf 'level=error msg="upsd start failed or timed out at boot" rc=%d\n' "$_start_rc" >&2
   stop_services
   exit 1
-}
-wait_for_pidfile "upsd" "/var/run/nut/upsd.pid" || {
+fi
+wait_for_pidfile "upsd" "/var/run/nut/upsd.pid" /usr/sbin/upsd || {
   stop_services
   exit 1
 }

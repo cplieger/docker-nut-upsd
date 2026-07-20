@@ -213,6 +213,23 @@ for fn in upsd_probe_host comms_fresh upsd_responsive restart_ups_driver comms_w
   fi
 done
 
+#    upsd_probe_host maps ONLY the wildcard binds (and localhost) to loopback;
+#    every specific bind — including 127.0.0.2-style loopback addresses that a
+#    127.0.0.1 probe cannot reach — must pass through unchanged, and :: must
+#    map to NUT's documented bracketed [::1]. Guards the shared helper against
+#    regressing to address-family-wide rewriting (the Dockerfile HEALTHCHECK
+#    inlines the same mapping; keep both in sync).
+for spec in '0.0.0.0=127.0.0.1' 'localhost=127.0.0.1' '::=[::1]' \
+  '127.0.0.2=127.0.0.2' '192.168.1.5=192.168.1.5'; do
+  addr=${spec%%=*}
+  want=${spec#*=}
+  got=$(API_ADDRESS="$addr" upsd_probe_host)
+  if [ "$got" != "$want" ]; then
+    err "FAIL: upsd_probe_host mapped API_ADDRESS=$addr to '$got' (want '$want')"
+    fail=1
+  fi
+done
+
 # 5. Watchdog behavior, driven through the injectable seams (comms_fresh,
 #    sleep, watchdog_epoch) with a fake clock — no real waiting.
 #
