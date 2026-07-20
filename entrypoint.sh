@@ -286,8 +286,13 @@ upsd_responsive() {
 # the full stack.
 upsd_failures=0
 while kill -0 "$UPSMON_PID" 2>/dev/null; do
-  # `|| true`: a trap-interrupted sleep must not kill PID 1 under set -e.
-  sleep "$UPSD_PROBE_INTERVAL" || true
+  # Sleep in the background and `wait` on it: `wait` is the one place POSIX
+  # guarantees a trapped signal interrupts immediately, so `docker stop`'s
+  # SIGTERM runs graceful_shutdown at once instead of after up to 15s of
+  # foreground sleep (past Docker's default 10s stop budget). `|| true`: the
+  # signal-interrupted wait must not kill PID 1 under set -e.
+  sleep "$UPSD_PROBE_INTERVAL" &
+  wait $! || true
   kill -0 "$UPSMON_PID" 2>/dev/null || break
   if upsd_responsive; then
     upsd_failures=0
