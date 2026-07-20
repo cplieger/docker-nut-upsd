@@ -140,7 +140,7 @@ restart_ups_driver() {
     printf 'level=info msg="comms watchdog driver restart issued" ups=%s\n' "$UPS_NAME" >&2
   else
     printf 'level=error msg="comms watchdog driver restart failed" ups=%s detail="%s"\n' \
-      "$UPS_NAME" "$(printf '%s' "$_out" | tr -d '"' | tr '\n' ' ')" >&2
+      "$UPS_NAME" "$(printf '%s' "$_out" | tr -d '\\"' | tr '\n' ' ')" >&2
   fi
   # Signal that a real restart was attempted (distinct from the killpower
   # stand-down's non-zero return) so comms_watchdog counts it against the budget.
@@ -156,7 +156,7 @@ restart_ups_driver() {
 # off to COMMS_RECOVERY_TIMEOUT x COMMS_BACKOFF_FACTOR and escalates to error, so a
 # genuinely-absent UPS stops thrashing host USB perms / flooding logs while a
 # sustained outage stays visible and still self-heals if the UPS returns.
-# Staleness is wall-clock elapsed since the FIRST stale probe of the current
+# Staleness is monotonic elapsed time since the FIRST stale probe of the current
 # window (via watchdog_epoch), not a sum of check intervals — each stale probe
 # can spend up to 3s inside upsc's timeout, and interval-summing let that
 # stretch the real recovery window ~20% past the configured budget.

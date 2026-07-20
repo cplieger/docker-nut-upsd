@@ -299,6 +299,47 @@ _run_table() {
   done || exit 1
 }
 
+# canonicalize_validated_values: strip a single trailing newline (env-file
+# artifact) from every env var the validation tables cover, by assigning each
+# through $() (which strips trailing LFs). MUST run BEFORE run_validations and
+# before any raw-value interpretation: the table resolver's own $() already
+# strips trailing LFs, so validation would otherwise pass a value whose raw
+# form still carries the LF — breaking mid-line config writes (upsmon.conf's
+# MONITOR host:$API_PORT) and raw-value cross-field checks (driver_transport
+# matches ${UPS_DRIVER} literally, so "snmp-ups<LF>" would classify as
+# "other" and dodge the network-transport UPS_PORT restrictions). Covers every
+# _resolve_var entry so the validated, classified, and written bytes are
+# identical. A no-op for every value with no trailing LF.
+canonicalize_validated_values() {
+  UPS_NAME=$(printf '%s' "${UPS_NAME:-}")
+  UPS_DESC=$(printf '%s' "${UPS_DESC:-}")
+  UPS_DRIVER=$(printf '%s' "${UPS_DRIVER:-}")
+  UPS_PORT=$(printf '%s' "${UPS_PORT:-}")
+  API_USER=$(printf '%s' "${API_USER:-}")
+  API_PASSWORD=$(printf '%s' "${API_PASSWORD:-}")
+  API_ADDRESS=$(printf '%s' "${API_ADDRESS:-}")
+  API_PORT=$(printf '%s' "${API_PORT:-}")
+  ADMIN_PASSWORD=$(printf '%s' "${ADMIN_PASSWORD:-}")
+  SHUTDOWN_ON_BATTERY_CRITICAL=$(printf '%s' "${SHUTDOWN_ON_BATTERY_CRITICAL:-}")
+  DBUS_PROBE_INTERVAL=$(printf '%s' "${DBUS_PROBE_INTERVAL:-}")
+  POLLFREQ=$(printf '%s' "${POLLFREQ:-}")
+  POLLFREQALERT=$(printf '%s' "${POLLFREQALERT:-}")
+  DEADTIME=$(printf '%s' "${DEADTIME:-}")
+  FINALDELAY=$(printf '%s' "${FINALDELAY:-}")
+  HOSTSYNC=$(printf '%s' "${HOSTSYNC:-}")
+  NOCOMMWARNTIME=$(printf '%s' "${NOCOMMWARNTIME:-}")
+  RBWARNTIME=$(printf '%s' "${RBWARNTIME:-}")
+  COMMS_WATCHDOG=$(printf '%s' "${COMMS_WATCHDOG:-}")
+  COMMS_CHECK_INTERVAL=$(printf '%s' "${COMMS_CHECK_INTERVAL:-}")
+  COMMS_RECOVERY_TIMEOUT=$(printf '%s' "${COMMS_RECOVERY_TIMEOUT:-}")
+  COMMS_FAST_RETRIES=$(printf '%s' "${COMMS_FAST_RETRIES:-}")
+  COMMS_BACKOFF_FACTOR=$(printf '%s' "${COMMS_BACKOFF_FACTOR:-}")
+  LOWBATT_PERCENT=$(printf '%s' "${LOWBATT_PERCENT:-}")
+  LOWBATT_RUNTIME=$(printf '%s' "${LOWBATT_RUNTIME:-}")
+  CRITBATT_PERCENT=$(printf '%s' "${CRITBATT_PERCENT:-}")
+  CRITBATT_RUNTIME=$(printf '%s' "${CRITBATT_RUNTIME:-}")
+}
+
 run_validations() {
   _run_table "$VALIDATION_TABLE" 0
   _run_table "$VALIDATION_TABLE_OPTIONAL" 1

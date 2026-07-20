@@ -72,20 +72,34 @@ grep -q 'LISTEN 0.0.0.0 3493' /etc/nut/upsd.conf || {
   fail=1
 }
 
-# A single trailing LF (env-file artifact) passes validation because the table
-# resolver's $() strips it before any check runs; the entrypoint canonicalizes
-# every config-bound var the same way after run_validations so the written
-# value equals the validated one. Mirror that canonicalization here and assert
-# the desc directive stays a single well-formed line.
+# A single trailing LF (env-file artifact) is harmless only because the
+# entrypoint strips it from every validated var BEFORE validation and config
+# generation (validate.sh canonicalize_validated_values). Exercise the real
+# production helper — not a hand-rolled copy of the strip — and assert the
+# desc directive stays a single well-formed line.
 if ! (
   UPS_DESC="$(printf 'desc\nx')"
   UPS_DESC=${UPS_DESC%x}
+  canonicalize_validated_values
   run_validations >/dev/null 2>&1 || exit 1
-  UPS_DESC=$(printf '%s' "$UPS_DESC")
   generate_all_configs >/dev/null 2>&1
   grep -q '^    desc = "desc"$' /etc/nut/ups.conf
 ); then
   err "FAIL: trailing-LF UPS_DESC did not canonicalize to a one-line desc directive"
+  fail=1
+fi
+# API_PORT is the one var written MID-LINE into a generated config (upsmon.conf's
+# MONITOR directive); a surviving trailing LF would split the directive across
+# two lines. Assert canonicalization keeps it one well-formed line.
+if ! (
+  API_PORT="$(printf '3493\nx')"
+  API_PORT=${API_PORT%x}
+  canonicalize_validated_values
+  run_validations >/dev/null 2>&1 || exit 1
+  generate_all_configs >/dev/null 2>&1
+  grep -q '^MONITOR ups@127.0.0.1:3493 1 "monuser" "secret" primary$' /etc/nut/upsmon.conf
+); then
+  err "FAIL: trailing-LF API_PORT did not canonicalize to a one-line MONITOR directive"
   fail=1
 fi
 # Regenerate with the baseline env so later steps see the section-2 configs.
@@ -171,6 +185,20 @@ if (
   run_validations
 ) >/dev/null 2>&1; then
   err "FAIL: snmp-ups with UPS_PORT=auto was accepted (auto is USB-only)"
+  fail=1
+fi
+# A trailing LF on UPS_DRIVER must not dodge the transport check: raw
+# "snmp-ups<LF>" fails driver_transport's literal case match and classifies
+# as "other" (where auto is allowed), so canonicalization must strip it
+# BEFORE run_validations for the network-transport rejection to fire.
+if (
+  UPS_DRIVER="$(printf 'snmp-ups\nx')"
+  UPS_DRIVER=${UPS_DRIVER%x}
+  UPS_PORT='auto'
+  canonicalize_validated_values
+  run_validations
+) >/dev/null 2>&1; then
+  err "FAIL: trailing-LF snmp-ups with UPS_PORT=auto was accepted (canonicalization bypassed the transport check)"
   fail=1
 fi
 

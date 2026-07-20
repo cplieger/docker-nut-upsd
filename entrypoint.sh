@@ -59,24 +59,20 @@ set -eu
 # Password resolution (from password.sh)
 # ---------------------------------------------------------------------------
 resolve_admin_password
+
+# Canonicalize every validated env var BEFORE validation and any raw-value
+# interpretation: $() strips trailing newlines, so a value with a trailing LF
+# (env-file artifact) is checked, classified (driver_transport reads the raw
+# value), and written as the same byte sequence. See validate.sh
+# canonicalize_validated_values.
+canonicalize_validated_values
+
 warn_weak_api_password
 
 # ---------------------------------------------------------------------------
 # Input validation (table-driven, from validate.sh)
 # ---------------------------------------------------------------------------
 run_validations
-
-# Canonicalize config-bound values to what validation actually checked: $() strips
-# trailing newlines, so a value with a trailing LF (env-file artifact) is written
-# exactly as validated instead of breaking a quoted directive or section header.
-UPS_NAME=$(printf '%s' "$UPS_NAME")
-UPS_DESC=$(printf '%s' "$UPS_DESC")
-UPS_DRIVER=$(printf '%s' "$UPS_DRIVER")
-UPS_PORT=$(printf '%s' "$UPS_PORT")
-API_USER=$(printf '%s' "$API_USER")
-API_PASSWORD=$(printf '%s' "$API_PASSWORD")
-API_ADDRESS=$(printf '%s' "$API_ADDRESS")
-ADMIN_PASSWORD=$(printf '%s' "$ADMIN_PASSWORD")
 
 # ---------------------------------------------------------------------------
 # USB device validation (USB transports only — see usb_bus_required)
