@@ -77,7 +77,7 @@ services:
 
 | Variable                       | Description                                                                                               | Default          |
 | ------------------------------ | --------------------------------------------------------------------------------------------------------- | ---------------- |
-| `TZ`                           | Container timezone                                                                                        | `Europe/Paris`   |
+| `TZ`                           | Container timezone                                                                                        | Unset (UTC)      |
 | `UPS_NAME`                     | NUT UPS identifier used in config files and queries                                                       | `ups`            |
 | `UPS_DESC`                     | Human-readable UPS description shown in NUT clients                                                       | `My UPS`         |
 | `UPS_DRIVER`                   | NUT driver for your UPS model (see [NUT HCL](https://networkupstools.org/stable-hcl.html))                | `usbhid-ups`     |

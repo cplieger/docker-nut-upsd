@@ -28,4 +28,10 @@ while [ "$attempt" -le "$DBUS_MAX_RETRIES" ]; do
 done
 
 printf 'level=error msg="D-Bus poweroff failed after %d attempts; host will NOT shut down cleanly"\n' "$DBUS_MAX_RETRIES" >&2
+# The poweroff conclusively failed, so no shutdown is in progress anymore.
+# Clear NUT's POWERDOWNFLAG so the comms watchdog's killpower stand-down
+# (lifecycle.sh restart_ups_driver) does not stay latched for the rest of
+# the container's life; nothing else in this container consumes the flag.
+rm -f /var/run/nut/killpower
+printf 'level=warn msg="cleared killpower flag after failed poweroff so USB comms recovery stays armed"\n' >&2
 exit 1

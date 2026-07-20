@@ -73,11 +73,12 @@ comms_fresh() {
   timeout 3 upsc "${UPS_NAME}@127.0.0.1:${API_PORT:-3493}" ups.status >/dev/null 2>&1
 }
 
-# watchdog_epoch: current epoch seconds. A function (not an inline date call)
-# so the smoke test can stub the clock and drive threshold crossings
-# deterministically.
+# watchdog_epoch: monotonic seconds since boot (/proc/uptime), so an NTP clock
+# step cannot stretch or shrink the stale window -- only differences are ever
+# computed. A function so the smoke test can stub the clock and drive
+# threshold crossings deterministically.
 watchdog_epoch() {
-  date +%s
+  cut -d. -f1 /proc/uptime
 }
 
 # driver_pidfile: NUT writes the driver PID file as <driver>-<ups>.pid under
@@ -111,8 +112,10 @@ restart_ups_driver() {
     printf 'level=warn msg="comms watchdog standing down; forced shutdown (killpower) in progress" ups=%s\n' "$UPS_NAME" >&2
     return 1
   fi
-  # Past the fast-retry budget the UPS is likely genuinely absent or the driver
-  # unstartable, so escalate to error (a sustained outage an operator should see).
+  # From the FINAL fast retry onward (attempt >= COMMS_FAST_RETRIES) the UPS is
+  # likely genuinely absent or the driver unstartable, so escalate to error --
+  # deliberately ON the last fast attempt so the error still lands inside the
+  # UPSDataAbsent alert window (see README 'USB hotplug & comms recovery').
   if [ "$_attempt" -ge "$COMMS_FAST_RETRIES" ]; then
     printf 'level=error msg="comms watchdog still restarting driver; UPS likely absent or driver unstartable" ups=%s attempt=%d\n' "$UPS_NAME" "$_attempt" >&2
   else
@@ -123,7 +126,7 @@ restart_ups_driver() {
       printf 'level=warn msg="comms watchdog could not re-assert nut group on USB nodes" ups=%s\n' "$UPS_NAME" >&2
     fi
   fi
-  /usr/sbin/upsdrvctl stop "$UPS_NAME" >/dev/null 2>&1 || true
+  timeout 30 /usr/sbin/upsdrvctl stop "$UPS_NAME" >/dev/null 2>&1 || true
   _pf="$(driver_pidfile)"
   # Read the PID once: re-cat'ing after `upsdrvctl stop` risks acting on a
   # pidfile whose process already exited (and whose PID may have been reused).
@@ -132,10 +135,12 @@ restart_ups_driver() {
     kill -9 "$_pid" 2>/dev/null || true
   fi
   rm -f "$_pf"
-  if /usr/sbin/upsdrvctl start "$UPS_NAME" >/dev/null 2>&1; then
+  # 90s > NUT's 75s default maxstartdelay, so timeout only fires on a genuine wedge.
+  if _out=$(timeout 90 /usr/sbin/upsdrvctl start "$UPS_NAME" 2>&1); then
     printf 'level=info msg="comms watchdog driver restart issued" ups=%s\n' "$UPS_NAME" >&2
   else
-    printf 'level=error msg="comms watchdog driver restart failed" ups=%s\n' "$UPS_NAME" >&2
+    printf 'level=error msg="comms watchdog driver restart failed" ups=%s detail="%s"\n' \
+      "$UPS_NAME" "$(printf '%s' "$_out" | tr -d '"' | tr '\n' ' ')" >&2
   fi
   # Signal that a real restart was attempted (distinct from the killpower
   # stand-down's non-zero return) so comms_watchdog counts it against the budget.
@@ -237,7 +242,6 @@ dbus_liveness_probe() {
   : "${DBUS_PROBE_INTERVAL:?dbus_liveness_probe requires DBUS_PROBE_INTERVAL}"
   _dbus_broken=0
   while true; do
-    sleep "$DBUS_PROBE_INTERVAL" || true
     if dbus_poweroff_path_ok; then
       if [ "$_dbus_broken" -eq 1 ]; then
         printf 'level=info msg="D-Bus poweroff path recovered"\n' >&2
@@ -247,5 +251,6 @@ dbus_liveness_probe() {
       printf 'level=error msg="D-Bus poweroff path unreachable; host poweroff on battery critical would fail" socket=/run/dbus/system_bus_socket\n' >&2
       _dbus_broken=1
     fi
+    sleep "$DBUS_PROBE_INTERVAL" || true
   done
 }

@@ -5,6 +5,15 @@
 # ---------------------------------------------------------------------------
 # Validation functions
 # ---------------------------------------------------------------------------
+
+# log_value: sanitize a rejected raw value before interpolating it into a
+# logfmt value="..." field — strip double quotes/backslashes and flatten
+# control characters so a malformed value cannot also corrupt or split the
+# error line that reports it.
+log_value() {
+  printf '%s' "$1" | tr -d '\\"' | tr -c '[:print:]' ' '
+}
+
 validate_no_newlines() {
   # Strip one trailing newline before scanning for control bytes: a single
   # trailing newline is harmless (env files and $() pipelines often
@@ -28,7 +37,7 @@ validate_no_newlines() {
 validate_numeric() {
   case "$2" in
     '' | *[!0-9]*)
-      printf 'level=error msg="env var must be a non-negative integer" var=%s value="%s"\n' "$1" "$2" >&2
+      printf 'level=error msg="env var must be a non-negative integer" var=%s value="%s"\n' "$1" "$(log_value "$2")" >&2
       return 1
       ;;
   esac
@@ -37,7 +46,7 @@ validate_numeric() {
 validate_positive() {
   validate_numeric "$1" "$2" || return 1
   if [ "$2" -lt 1 ]; then
-    printf 'level=error msg="env var must be a positive integer (>= 1)" var=%s value="%s"\n' "$1" "$2" >&2
+    printf 'level=error msg="env var must be a positive integer (>= 1)" var=%s value="%s"\n' "$1" "$(log_value "$2")" >&2
     return 1
   fi
 }
@@ -45,7 +54,7 @@ validate_positive() {
 validate_port() {
   validate_numeric "$1" "$2" || return 1
   if [ "$2" -lt 1 ] || [ "$2" -gt 65535 ]; then
-    printf 'level=error msg="env var must be 1-65535" var=%s value="%s"\n' "$1" "$2" >&2
+    printf 'level=error msg="env var must be 1-65535" var=%s value="%s"\n' "$1" "$(log_value "$2")" >&2
     return 1
   fi
 }
@@ -53,7 +62,7 @@ validate_port() {
 validate_percent() {
   validate_numeric "$1" "$2" || return 1
   if [ "$2" -gt 100 ]; then
-    printf 'level=error msg="env var must be 0-100" var=%s value="%s"\n' "$1" "$2" >&2
+    printf 'level=error msg="env var must be 0-100" var=%s value="%s"\n' "$1" "$(log_value "$2")" >&2
     return 1
   fi
 }
@@ -88,7 +97,7 @@ validate_no_backslash() {
 validate_identifier() {
   case "$2" in
     '' | *[!a-zA-Z0-9_-]*)
-      printf 'level=error msg="env var is not a valid identifier" var=%s value="%s"\n' "$1" "$2" >&2
+      printf 'level=error msg="env var is not a valid identifier" var=%s value="%s"\n' "$1" "$(log_value "$2")" >&2
       return 1
       ;;
   esac
@@ -113,7 +122,7 @@ normalize_bool() {
     true | 1 | yes | on) printf 'true' ;;
     false | 0 | no | off) printf 'false' ;;
     *)
-      printf 'level=error msg="%s must be a boolean (true/false/1/0/yes/no/on/off)" value="%s"\n' "$1" "$2" >&2
+      printf 'level=error msg="%s must be a boolean (true/false/1/0/yes/no/on/off)" value="%s"\n' "$1" "$(log_value "$2")" >&2
       return 1
       ;;
   esac
@@ -305,7 +314,7 @@ run_validations() {
       case "$UPS_PORT" in
         auto | /dev/*) : ;;
         *)
-          printf 'level=error msg="UPS_PORT must be auto or /dev/* for a USB driver" driver=%s value="%s"\n' "$UPS_DRIVER" "$UPS_PORT" >&2
+          printf 'level=error msg="UPS_PORT must be auto or /dev/* for a USB driver" driver=%s value="%s"\n' "$UPS_DRIVER" "$(log_value "$UPS_PORT")" >&2
           exit 1
           ;;
       esac
@@ -313,7 +322,7 @@ run_validations() {
     net)
       case "$UPS_PORT" in
         auto | /dev/*)
-          printf 'level=error msg="UPS_PORT must be a host or host:port endpoint for a network driver" driver=%s value="%s"\n' "$UPS_DRIVER" "$UPS_PORT" >&2
+          printf 'level=error msg="UPS_PORT must be a host or host:port endpoint for a network driver" driver=%s value="%s"\n' "$UPS_DRIVER" "$(log_value "$UPS_PORT")" >&2
           exit 1
           ;;
       esac
@@ -325,7 +334,7 @@ run_validations() {
   # The `/dev/*` glob above matches whitespace/quotes, so guard them explicitly.
   case "$UPS_PORT" in
     *[[:space:]]* | *'"'*)
-      printf 'level=error msg="UPS_PORT must not contain whitespace or quotes" value="%s"\n' "$UPS_PORT" >&2
+      printf 'level=error msg="UPS_PORT must not contain whitespace or quotes" value="%s"\n' "$(log_value "$UPS_PORT")" >&2
       exit 1
       ;;
   esac

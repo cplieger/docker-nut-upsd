@@ -66,6 +66,18 @@ warn_weak_api_password
 # ---------------------------------------------------------------------------
 run_validations
 
+# Canonicalize config-bound values to what validation actually checked: $() strips
+# trailing newlines, so a value with a trailing LF (env-file artifact) is written
+# exactly as validated instead of breaking a quoted directive or section header.
+UPS_NAME=$(printf '%s' "$UPS_NAME")
+UPS_DESC=$(printf '%s' "$UPS_DESC")
+UPS_DRIVER=$(printf '%s' "$UPS_DRIVER")
+UPS_PORT=$(printf '%s' "$UPS_PORT")
+API_USER=$(printf '%s' "$API_USER")
+API_PASSWORD=$(printf '%s' "$API_PASSWORD")
+API_ADDRESS=$(printf '%s' "$API_ADDRESS")
+ADMIN_PASSWORD=$(printf '%s' "$ADMIN_PASSWORD")
+
 # ---------------------------------------------------------------------------
 # USB device validation (USB transports only — see usb_bus_required)
 # ---------------------------------------------------------------------------
@@ -111,6 +123,7 @@ COMMS_WATCHDOG=$(normalize_bool COMMS_WATCHDOG "$COMMS_WATCHDOG") || exit 1
 # (leading zeros are otherwise parsed as octal — see strip_leading_zeros).
 COMMS_CHECK_INTERVAL=$(strip_leading_zeros "$COMMS_CHECK_INTERVAL")
 COMMS_RECOVERY_TIMEOUT=$(strip_leading_zeros "$COMMS_RECOVERY_TIMEOUT")
+COMMS_FAST_RETRIES=$(strip_leading_zeros "$COMMS_FAST_RETRIES")
 COMMS_BACKOFF_FACTOR=$(strip_leading_zeros "$COMMS_BACKOFF_FACTOR")
 DBUS_PROBE_INTERVAL=$(strip_leading_zeros "$DBUS_PROBE_INTERVAL")
 

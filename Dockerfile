@@ -9,6 +9,9 @@ RUN apk add --no-cache automake build-base clang libtool lld perl pkgconf \
 
 # renovate: datasource=github-releases depName=stephane/libmodbus
 ARG LIBMODBUS_VERSION=v3.2.0
+# Recompute on bump:
+# curl -sL https://github.com/stephane/libmodbus/releases/download/<vX.Y.Z>/libmodbus-<X.Y.Z>.tar.gz | sha256sum
+ARG LIBMODBUS_SHA256=72239f319b9b8483e3d393c5a60865d734fcff18a8abbb2486e389834a2f6ef1
 WORKDIR /build/libmodbus
 # libmodbus 3.2.0 added termios2 custom-baud support whose configure check
 # mis-detects on Alpine/musl: `struct termios2` is present (via <asm/termbits.h>)
@@ -18,9 +21,11 @@ WORKDIR /build/libmodbus
 # is unaffected: NUT's modbus drivers run at standard baud rates, so only the
 # termios2 custom-baud RTU path is lost. Remove once upstream libmodbus builds
 # cleanly on musl.
-RUN wget -qO- \
+RUN wget -qO libmodbus.tar.gz \
       "https://github.com/stephane/libmodbus/releases/download/${LIBMODBUS_VERSION}/libmodbus-${LIBMODBUS_VERSION#v}.tar.gz" \
-      | tar xz --strip-components=1 \
+    && echo "${LIBMODBUS_SHA256}  libmodbus.tar.gz" | sha256sum -c - \
+    && tar xz --strip-components=1 -f libmodbus.tar.gz \
+    && rm libmodbus.tar.gz \
     && ac_cv_type_struct_termios2=no \
        ./configure --prefix=/usr --disable-static \
        CC=clang \
@@ -29,14 +34,20 @@ RUN wget -qO- \
 
 # renovate: datasource=github-tags depName=net-snmp/net-snmp
 ARG NETSNMP_VERSION=v5.9.5.2
+# Recompute on bump (GitHub-generated tag archive, same class the fleet
+# already gates for darkhttpd):
+# curl -sL https://github.com/net-snmp/net-snmp/archive/refs/tags/<vX.Y.Z.N>.tar.gz | sha256sum
+ARG NETSNMP_SHA256=dc67748f382f7c0d2c17b62aabb1445724d80bb20a09081b7f010c9c86b84d45
 WORKDIR /build/netsnmp
 # The conditional netsnmp.pc fallback below writes literal ${prefix}/${libdir}
 # for pkg-config to expand at consume time, NOT the shell — hence the
 # single-quoted printf format string. SC2016 is a false positive here.
 # hadolint ignore=SC2016
-RUN wget -qO- \
+RUN wget -qO netsnmp.tar.gz \
       "https://github.com/net-snmp/net-snmp/archive/refs/tags/${NETSNMP_VERSION}.tar.gz" \
-      | tar xz --strip-components=1 \
+    && echo "${NETSNMP_SHA256}  netsnmp.tar.gz" | sha256sum -c - \
+    && tar xz --strip-components=1 -f netsnmp.tar.gz \
+    && rm netsnmp.tar.gz \
     && ./configure --prefix=/usr --disable-static \
        --build="$(uname -m)-linux-musl" \
        CC=clang \
@@ -56,10 +67,16 @@ RUN wget -qO- \
 
 # renovate: datasource=github-releases depName=networkupstools/nut
 ARG NUT_VERSION=v2.8.5
+# Recompute on bump (cross-check against the upstream
+# nut-<X.Y.Z>.tar.gz.sha256 release asset):
+# curl -sL https://github.com/networkupstools/nut/releases/download/<vX.Y.Z>/nut-<X.Y.Z>.tar.gz | sha256sum
+ARG NUT_SHA256=18bf32e59eb764b13da3c4fa70384926d7fa584cb31d2fe7f137a570633eeec1
 WORKDIR /build/nut
-RUN wget -qO- \
+RUN wget -qO nut.tar.gz \
       "https://github.com/networkupstools/nut/releases/download/${NUT_VERSION}/nut-${NUT_VERSION#v}.tar.gz" \
-      | tar xz --strip-components=1 \
+    && echo "${NUT_SHA256}  nut.tar.gz" | sha256sum -c - \
+    && tar xz --strip-components=1 -f nut.tar.gz \
+    && rm nut.tar.gz \
     && PKG_CONFIG_LIBDIR="/usr/lib/pkgconfig" \
        LIBS="-lssl -lcrypto" \
        ac_cv_func_setpgrp_void=yes \

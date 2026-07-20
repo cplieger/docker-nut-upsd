@@ -45,7 +45,7 @@ resolve_admin_password() {
 # Warn (don't block) on the well-known default credentials.
 warn_weak_api_password() {
   if [ "$API_PASSWORD" = "secret" ] || [ "${#API_PASSWORD}" -lt "$PASSWORD_MIN_LENGTH" ]; then
-    printf 'level=warn msg="API_PASSWORD is weak (literal \"secret\" or <%d chars). Acceptable on a trusted LAN; rotate it if your NUT client supports custom credentials."\n' \
+    printf 'level=warn msg="API_PASSWORD is weak (default value or <%d chars). Acceptable on a trusted LAN; rotate it if your NUT client supports custom credentials."\n' \
       "$PASSWORD_MIN_LENGTH" >&2
   fi
 }

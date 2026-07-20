@@ -72,6 +72,25 @@ grep -q 'LISTEN 0.0.0.0 3493' /etc/nut/upsd.conf || {
   fail=1
 }
 
+# A single trailing LF (env-file artifact) passes validation because the table
+# resolver's $() strips it before any check runs; the entrypoint canonicalizes
+# every config-bound var the same way after run_validations so the written
+# value equals the validated one. Mirror that canonicalization here and assert
+# the desc directive stays a single well-formed line.
+if ! (
+  UPS_DESC="$(printf 'desc\nx')"
+  UPS_DESC=${UPS_DESC%x}
+  run_validations >/dev/null 2>&1 || exit 1
+  UPS_DESC=$(printf '%s' "$UPS_DESC")
+  generate_all_configs >/dev/null 2>&1
+  grep -q '^    desc = "desc"$' /etc/nut/ups.conf
+); then
+  err "FAIL: trailing-LF UPS_DESC did not canonicalize to a one-line desc directive"
+  fail=1
+fi
+# Regenerate with the baseline env so later steps see the section-2 configs.
+generate_all_configs >/dev/null 2>&1
+
 # 3. Validation rejects config-injection attempts (run_validations exits non-
 #    zero on failure, so each negative case runs in a subshell).
 if (
