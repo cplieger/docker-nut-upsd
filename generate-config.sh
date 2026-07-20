@@ -85,12 +85,19 @@ USERSEOF
 }
 
 # --- upsmon.conf — skipped if user-mounted ---
+# POWERDOWNFLAG lives in the root-only /var/run/nut-secrets (mode 700
+# root:root, created unconditionally by the Dockerfile) rather than the
+# nut-writable /var/run/nut, so a compromised nut-user process cannot plant
+# the flag and latch the comms watchdog's stand-down (lifecycle.sh
+# restart_ups_driver). Every legitimate actor is root: upsmon's privileged
+# parent writes the flag on FSD, the entrypoint clears it at boot, the
+# watchdog tests it, and nut-shutdown.sh clears it on a failed poweroff.
 generate_upsmon_conf() {
   use_user_override upsmon.conf && return 0
   cat >/etc/nut/upsmon.conf <<MONEOF
 MONITOR $UPS_NAME@127.0.0.1:$API_PORT 1 "$API_USER" "$API_PASSWORD" primary
 SHUTDOWNCMD "$SHUTDOWN_CMD"
-POWERDOWNFLAG /var/run/nut/killpower
+POWERDOWNFLAG /var/run/nut-secrets/killpower
 NOTIFYCMD /usr/local/bin/nut-notify.sh
 POLLFREQ $POLLFREQ
 POLLFREQALERT $POLLFREQALERT

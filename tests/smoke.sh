@@ -297,13 +297,13 @@ KILLPOWER_ERR=$(mktemp)
 if (
   # shellcheck disable=SC2034  # consumed by restart_ups_driver (sourced lifecycle.sh)
   SHUTDOWN_ON_BATTERY_CRITICAL=true
-  touch /var/run/nut/killpower
+  touch /var/run/nut-secrets/killpower
   restart_ups_driver 1
 ) 2>"$KILLPOWER_ERR"; then
   err "FAIL: restart_ups_driver did not stand down with killpower set"
   fail=1
 fi
-rm -f /var/run/nut/killpower
+rm -f /var/run/nut-secrets/killpower
 if ! grep -q 'standing down' "$KILLPOWER_ERR"; then
   err "FAIL: killpower stand-down not logged"
   fail=1

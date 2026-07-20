@@ -199,14 +199,15 @@ if find /var/run/nut -maxdepth 1 -name '*.pid' -type f 2>/dev/null | grep -q .; 
 fi
 
 # Clear a stale POWERDOWNFLAG (killpower) from a previous lifecycle. upsmon
-# creates it on FSD; /var/run/nut is the writable layer so it survives a
-# `docker restart`, and nothing in this container consumes it (host poweroff is
-# via D-Bus, not the NUT kill-power path). A latched flag would otherwise make
-# the comms watchdog stand down indefinitely (see restart_ups_driver), so clear
-# it at a fresh start.
-if [ -e /var/run/nut/killpower ]; then
-  printf 'level=info msg="clearing stale killpower flag from previous lifecycle" path=/var/run/nut/killpower\n' >&2
-  rm -f /var/run/nut/killpower
+# creates it on FSD; /var/run/nut-secrets is the writable layer so it survives
+# a `docker restart`, and nothing in this container consumes it (host poweroff
+# is via D-Bus, not the NUT kill-power path). A latched flag would otherwise
+# make the comms watchdog stand down indefinitely (see restart_ups_driver), so
+# clear it at a fresh start. The flag lives in the root-only nut-secrets dir
+# so the nut user cannot plant it (see generate-config.sh).
+if [ -e /var/run/nut-secrets/killpower ]; then
+  printf 'level=info msg="clearing stale killpower flag from previous lifecycle" path=/var/run/nut-secrets/killpower\n' >&2
+  rm -f /var/run/nut-secrets/killpower
 fi
 
 printf 'level=info msg="starting upsdrvctl"\n' >&2
@@ -255,7 +256,57 @@ if [ "$SHUTDOWN_ON_BATTERY_CRITICAL" = "true" ]; then
   fi
 fi
 
-# Wait for upsmon — propagate its exit code so Docker restart policies and
+# ---------------------------------------------------------------------------
+# Supervise upsmon and upsd
+# ---------------------------------------------------------------------------
+# upsd responsiveness probe cadence and consecutive-failure threshold. The
+# probe (`upsc -l`) only asks upsd to list its configured UPSes, so it
+# succeeds even while driver data is stale — it isolates upsd protocol
+# failure from the data-freshness signal the comms watchdog acts on.
+# 4 x 15s ~= 60s of sustained failure exits BEFORE the comms watchdog's first
+# driver bounce (COMMS_RECOVERY_TIMEOUT, default 90s), so a dead upsd cannot
+# strand the container in endless driver-restart churn that never repairs
+# the actual failed dependency.
+readonly UPSD_PROBE_INTERVAL=15
+readonly UPSD_PROBE_MAX_FAILURES=4
+
+# upsd_responsive: return 0 when upsd answers the NUT protocol (LIST UPS),
+# regardless of driver data freshness. Distinct from comms_fresh
+# (lifecycle.sh), which fails on "Data stale" and drives driver-only recovery.
+upsd_responsive() {
+  timeout 5 upsc -l "127.0.0.1:${API_PORT}" >/dev/null 2>&1
+}
+
+# Wait for upsmon while probing upsd. upsmon exiting remains the fatal-child
+# signal (loop breaks, exit code propagated below). A sustained upsd failure
+# is ALSO fatal: upsmon survives it (reporting NOCOMM) and the comms watchdog
+# can only bounce the driver, which cannot repair upsd — without this exit
+# the container would stay running-but-unhealthy indefinitely. Exiting
+# non-zero hands recovery to the container restart policy, which rebuilds
+# the full stack.
+upsd_failures=0
+while kill -0 "$UPSMON_PID" 2>/dev/null; do
+  # `|| true`: a trap-interrupted sleep must not kill PID 1 under set -e.
+  sleep "$UPSD_PROBE_INTERVAL" || true
+  kill -0 "$UPSMON_PID" 2>/dev/null || break
+  if upsd_responsive; then
+    upsd_failures=0
+  else
+    upsd_failures=$((upsd_failures + 1))
+    if [ "$upsd_failures" -ge "$UPSD_PROBE_MAX_FAILURES" ]; then
+      printf 'level=error msg="upsd unresponsive; stopping services and exiting so the restart policy rebuilds the stack" consecutive_failures=%d probe_interval=%ss\n' \
+        "$upsd_failures" "$UPSD_PROBE_INTERVAL" >&2
+      stop_watchdog
+      stop_dbus_probe
+      stop_services
+      exit 1
+    fi
+    printf 'level=warn msg="upsd not responding to protocol probe" consecutive_failures=%d threshold=%d\n' \
+      "$upsd_failures" "$UPSD_PROBE_MAX_FAILURES" >&2
+  fi
+done
+
+# Reap upsmon and propagate its exit code so Docker restart policies and
 # log-based alerting see the real failure. stop_services is idempotent and
 # does not dictate the exit code; the caller decides.
 set +e

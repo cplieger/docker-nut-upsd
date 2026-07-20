@@ -5,24 +5,40 @@
 readonly PIDFILE_POLL_INTERVAL="0.1"
 readonly PIDFILE_POLL_MAX=50 # total wait = POLL_MAX × POLL_INTERVAL = 5s
 readonly DBUS_PROBE_REPLY_TIMEOUT_MS=3000
+# Per-command bound for the stop_services control calls: 3 commands x 3s = 9s
+# worst case, inside Docker's default 10s stop budget before SIGKILL.
+readonly STOP_CMD_TIMEOUT=3
 
 # ---------------------------------------------------------------------------
 # Service lifecycle functions
 # ---------------------------------------------------------------------------
 
+# stop_nut_cmd: run one NUT stop control bounded by STOP_CMD_TIMEOUT so a
+# wedged daemon or control client cannot hold PID 1 inside the signal trap
+# until Docker SIGKILLs the container. Best-effort: on timeout or non-zero
+# exit, emit a structured warn (label, rc, sanitized detail) and return 0 so
+# the caller continues to the next daemon. $1 = label, rest = command.
+stop_nut_cmd() {
+  _stop_label="$1"
+  shift
+  if _stop_out=$(timeout "$STOP_CMD_TIMEOUT" "$@" 2>&1); then
+    return 0
+  else
+    _stop_rc=$?
+    printf 'level=warn msg="%s stop failed (may already be stopped)" rc=%d detail="%s"\n' \
+      "$_stop_label" "$_stop_rc" "$(log_value "$_stop_out")" >&2
+  fi
+  return 0
+}
+
 # Stop all NUT daemons. Logs warnings on failure but does not exit — callers
-# decide the final exit status.
+# decide the final exit status. Each control call is time-bounded (see
+# stop_nut_cmd) so the combined worst case fits the container stop budget.
 stop_services() {
   printf 'level=info msg="stopping NUT services"\n' >&2
-  if ! /usr/sbin/upsmon -c stop 2>&1; then
-    printf 'level=warn msg="upsmon stop failed (may already be stopped)"\n' >&2
-  fi
-  if ! /usr/sbin/upsd -c stop 2>&1; then
-    printf 'level=warn msg="upsd stop failed (may already be stopped)"\n' >&2
-  fi
-  if ! /usr/sbin/upsdrvctl stop 2>&1; then
-    printf 'level=warn msg="upsdrvctl stop failed (driver may already be stopped)"\n' >&2
-  fi
+  stop_nut_cmd "upsmon" /usr/sbin/upsmon -c stop
+  stop_nut_cmd "upsd" /usr/sbin/upsd -c stop
+  stop_nut_cmd "upsdrvctl" /usr/sbin/upsdrvctl stop
   printf 'level=info msg="NUT services stopped"\n' >&2
 }
 
@@ -101,14 +117,16 @@ driver_pidfile() {
 restart_ups_driver() {
   _attempt=${1:-1}
   # h-f8 guard: stand down ONLY when a REAL host poweroff is in progress. upsmon
-  # (primary) writes POWERDOWNFLAG (/var/run/nut/killpower) on every FSD, including
-  # the log-only noop path (SHUTDOWN_ON_BATTERY_CRITICAL=false) where the host stays
-  # up and the container keeps running — gating on killpower alone would latch USB
-  # recovery OFF for the container's life. Requiring SHUTDOWN_ON_BATTERY_CRITICAL=true
-  # scopes the stand-down to the only case with a poweroff to protect (the flag is
-  # also cleared at entrypoint startup). Return non-zero so a stand-down is not
-  # counted as a restart attempt by comms_watchdog.
-  if [ "${SHUTDOWN_ON_BATTERY_CRITICAL:-false}" = "true" ] && [ -e /var/run/nut/killpower ]; then
+  # (primary) writes POWERDOWNFLAG (/var/run/nut-secrets/killpower) on every FSD,
+  # including the log-only noop path (SHUTDOWN_ON_BATTERY_CRITICAL=false) where the
+  # host stays up and the container keeps running — gating on killpower alone would
+  # latch USB recovery OFF for the container's life. Requiring
+  # SHUTDOWN_ON_BATTERY_CRITICAL=true scopes the stand-down to the only case with a
+  # poweroff to protect (the flag is also cleared at entrypoint startup). The flag
+  # lives in the root-only nut-secrets dir so a compromised nut process cannot plant
+  # it and suppress recovery (h-f2). Return non-zero so a stand-down is not counted
+  # as a restart attempt by comms_watchdog.
+  if [ "${SHUTDOWN_ON_BATTERY_CRITICAL:-false}" = "true" ] && [ -e /var/run/nut-secrets/killpower ]; then
     printf 'level=warn msg="comms watchdog standing down; forced shutdown (killpower) in progress" ups=%s\n' "$UPS_NAME" >&2
     return 1
   fi
@@ -131,16 +149,43 @@ restart_ups_driver() {
   # Read the PID once: re-cat'ing after `upsdrvctl stop` risks acting on a
   # pidfile whose process already exited (and whose PID may have been reused).
   _pid=$(cat "$_pf" 2>/dev/null || true)
+  # Confused-deputy guard: the pidfile lives in the nut-writable /var/run/nut,
+  # so a compromised nut process can plant an arbitrary PID (1, upsmon, or
+  # "-1" = every process) and turn this root SIGKILL into a kill of any
+  # container process. Only signal a strictly numeric PID whose
+  # /proc/<pid>/exe resolves to the expected driver binary
+  # (--with-drvpath=/usr/lib/nut in the Dockerfile); otherwise log, refuse to
+  # signal, and let the unconditional rm below drop the untrusted pidfile.
+  case "$_pid" in
+    '') ;; # no pidfile: nothing to hard-kill
+    *[!0-9]*)
+      printf 'level=error msg="comms watchdog refusing non-numeric PID from pidfile" ups=%s pidfile=%s pid="%s"\n' \
+        "$UPS_NAME" "$_pf" "$(log_value "$_pid")" >&2
+      _pid=""
+      ;;
+  esac
   if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null; then
-    kill -9 "$_pid" 2>/dev/null || true
+    # Verify identity, then re-check existence immediately before signaling
+    # to narrow the PID-reuse window as far as plain sh allows.
+    if [ "$(readlink -f "/proc/$_pid/exe" 2>/dev/null)" = "/usr/lib/nut/$UPS_DRIVER" ] \
+      && kill -0 "$_pid" 2>/dev/null; then
+      kill -9 "$_pid" 2>/dev/null || true
+    else
+      printf 'level=error msg="comms watchdog refusing to kill PID not verified as the UPS driver" ups=%s pid=%s expected=/usr/lib/nut/%s\n' \
+        "$UPS_NAME" "$_pid" "$UPS_DRIVER" >&2
+    fi
   fi
   rm -f "$_pf"
   # 90s > NUT's 75s default maxstartdelay, so timeout only fires on a genuine wedge.
   if _out=$(timeout 90 /usr/sbin/upsdrvctl start "$UPS_NAME" 2>&1); then
     printf 'level=info msg="comms watchdog driver restart issued" ups=%s\n' "$UPS_NAME" >&2
   else
-    printf 'level=error msg="comms watchdog driver restart failed" ups=%s detail="%s"\n' \
-      "$UPS_NAME" "$(printf '%s' "$_out" | tr -d '\\"' | tr '\n' ' ')" >&2
+    # Capture the exit status (124 = timeout) so a silent failure still names
+    # its class; log_value flattens CR/tab/control bytes that the previous
+    # LF-only sanitizer let split or corrupt the logfmt record.
+    _rc=$?
+    printf 'level=error msg="comms watchdog driver restart failed" ups=%s rc=%d detail="%s"\n' \
+      "$UPS_NAME" "$_rc" "$(log_value "$_out")" >&2
   fi
   # Signal that a real restart was attempted (distinct from the killpower
   # stand-down's non-zero return) so comms_watchdog counts it against the budget.

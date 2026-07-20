@@ -32,6 +32,11 @@ printf 'level=error msg="D-Bus poweroff failed after %d attempts; host will NOT 
 # Clear NUT's POWERDOWNFLAG so the comms watchdog's killpower stand-down
 # (lifecycle.sh restart_ups_driver) does not stay latched for the rest of
 # the container's life; nothing else in this container consumes the flag.
-rm -f /var/run/nut/killpower
-printf 'level=warn msg="cleared killpower flag after failed poweroff so USB comms recovery stays armed"\n' >&2
+# The flag lives in the root-only /var/run/nut-secrets (this script runs as
+# root via upsmon's privileged parent, so it can clear it).
+if rm -f /var/run/nut-secrets/killpower; then
+  printf 'level=warn msg="cleared killpower flag after failed poweroff so USB comms recovery stays armed"\n' >&2
+else
+  printf 'level=error msg="failed to clear killpower flag after failed poweroff; USB comms recovery may stay disarmed"\n' >&2
+fi
 exit 1
