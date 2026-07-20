@@ -34,7 +34,7 @@ point or adding new top-level executables.
 ## Adding or validating an environment variable
 
 Validation is table-driven and deliberately avoids `eval`. Adding a new
-env var that reaches a config file means touching `validate.sh` in three
+env var that reaches a config file means touching `validate.sh` in four
 places:
 
 1. Add a row to `VALIDATION_TABLE` (or `VALIDATION_TABLE_OPTIONAL` for
@@ -45,7 +45,12 @@ places:
    resolver is an explicit lookup table on purpose — there is no
    indirect expansion, so an unlisted var fails the run instead of
    silently resolving to empty.
-3. If you need a check that doesn't exist yet, add a `validate_*`
+3. Add an assignment to `canonicalize_validated_values`
+   (`MY_VAR=$(printf '%s' "${MY_VAR:-}")`) so a trailing newline is
+   stripped BEFORE validation and config writes. The resolver's own `$()`
+   strips it during validation, so an uncanonicalized var would validate
+   clean while writing the raw trailing LF into the config file.
+4. If you need a check that doesn't exist yet, add a `validate_*`
    function and wire it into `_dispatch_check`.
 
 Every value that lands in a NUT config file must reject embedded

@@ -205,7 +205,7 @@ fi
 # 4. Watchdog / transport helpers are defined (sourced from validate.sh and
 #    lifecycle.sh). stop_watchdog and stop_dbus_probe live in entrypoint.sh
 #    and are not asserted here.
-for fn in comms_fresh restart_ups_driver comms_watchdog watchdog_epoch \
+for fn in upsd_probe_host comms_fresh upsd_responsive restart_ups_driver comms_watchdog watchdog_epoch \
   driver_transport usb_bus_required dbus_poweroff_path_ok dbus_liveness_probe; do
   if ! command -v "$fn" >/dev/null 2>&1; then
     err "FAIL: helper function missing: $fn"

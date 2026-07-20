@@ -211,7 +211,14 @@ if [ -e /var/run/nut-secrets/killpower ]; then
 fi
 
 printf 'level=info msg="starting upsdrvctl"\n' >&2
-/usr/sbin/upsdrvctl start
+# timeout 90 > NUT's 75s default maxstartdelay (matches the watchdog's restart
+# path), so it only fires on a genuine wedge — which would otherwise hang PID 1
+# in "starting" forever with the SIGTERM trap deferred.
+timeout 90 /usr/sbin/upsdrvctl start || {
+  printf 'level=error msg="upsdrvctl start failed or timed out at boot" rc=%d\n' "$?" >&2
+  stop_services
+  exit 1
+}
 # NUT drivers write /var/run/nut/<driver>-<ups>.pid on successful start.
 wait_for_pidfile "UPS driver" "$(driver_pidfile)" || {
   stop_services
@@ -219,7 +226,11 @@ wait_for_pidfile "UPS driver" "$(driver_pidfile)" || {
 }
 
 printf 'level=info msg="starting upsd"\n' >&2
-/usr/sbin/upsd
+timeout 30 /usr/sbin/upsd || {
+  printf 'level=error msg="upsd start failed or timed out at boot" rc=%d\n' "$?" >&2
+  stop_services
+  exit 1
+}
 wait_for_pidfile "upsd" "/var/run/nut/upsd.pid" || {
   stop_services
   exit 1
@@ -269,13 +280,6 @@ fi
 # the actual failed dependency.
 readonly UPSD_PROBE_INTERVAL=15
 readonly UPSD_PROBE_MAX_FAILURES=4
-
-# upsd_responsive: return 0 when upsd answers the NUT protocol (LIST UPS),
-# regardless of driver data freshness. Distinct from comms_fresh
-# (lifecycle.sh), which fails on "Data stale" and drives driver-only recovery.
-upsd_responsive() {
-  timeout 5 upsc -l "127.0.0.1:${API_PORT}" >/dev/null 2>&1
-}
 
 # Wait for upsmon while probing upsd. upsmon exiting remains the fatal-child
 # signal (loop breaks, exit code propagated below). A sustained upsd failure

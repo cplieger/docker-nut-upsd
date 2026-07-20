@@ -56,9 +56,17 @@ wait_for_pidfile() {
   # $1 = label, $2 = absolute PID file path
   i=0
   while [ $i -lt "$PIDFILE_POLL_MAX" ]; do
-    if [ -s "$2" ] && kill -0 "$(cat "$2")" 2>/dev/null; then
-      return 0
-    fi
+    # Pidfiles live in the nut-writable /var/run/nut; only trust strictly
+    # numeric content (mirrors restart_ups_driver's confused-deputy guard).
+    _wf_pid=$(cat "$2" 2>/dev/null || true)
+    case "$_wf_pid" in
+      '' | *[!0-9]*) ;; # empty, partial write, or untrusted content: keep polling
+      *)
+        if kill -0 "$_wf_pid" 2>/dev/null; then
+          return 0
+        fi
+        ;;
+    esac
     sleep "$PIDFILE_POLL_INTERVAL"
     i=$((i + 1))
   done
@@ -82,11 +90,36 @@ wait_for_pidfile() {
 # It REQUIRES the bus to be passed as a live bind mount plus a cgroup rule for
 # the USB major (c 189:* rmw) — see the README ("USB hotplug").
 
+# upsd_probe_host: host for the loopback protocol probes. upsd binds ONLY the
+# LISTEN address generated from API_ADDRESS (upsd.conf), so a specific bind
+# address must be probed at that address — probing 127.0.0.1 would fail
+# permanently (driver bounced forever by the watchdog, container fatally
+# exited by the supervision loop). Wildcard binds map to loopback.
+upsd_probe_host() {
+  case "${API_ADDRESS:-0.0.0.0}" in
+    0.0.0.0 | 127.* | localhost) printf '127.0.0.1' ;;
+    ::) printf '::1' ;;
+    *) printf '%s' "${API_ADDRESS}" ;;
+  esac
+}
+
 # comms_fresh: return 0 when upsd is serving fresh data, non-zero on
 # stale/unreachable. upsc prints the requested variable on fresh data and an
 # error ("Data stale" / connection refused) otherwise.
 comms_fresh() {
-  timeout 3 upsc "${UPS_NAME}@127.0.0.1:${API_PORT:-3493}" ups.status >/dev/null 2>&1
+  timeout 3 upsc "${UPS_NAME}@$(upsd_probe_host):${API_PORT:-3493}" ups.status >/dev/null 2>&1
+}
+
+# upsd_responsive: return 0 when upsd answers the NUT protocol (LIST UPS),
+# regardless of driver data freshness. Distinct from comms_fresh
+# (lifecycle.sh), which fails on "Data stale" and drives driver-only recovery.
+upsd_responsive() {
+  # Background + wait so a trapped SIGTERM interrupts immediately instead of
+  # after up to 5s of foreground upsc — that 5s would push worst-case teardown
+  # to 14s, past Docker's 10s stop budget (see STOP_CMD_TIMEOUT above).
+  # The orphaned upsc self-terminates within its own 5s timeout.
+  timeout 5 upsc -l "$(upsd_probe_host):${API_PORT}" >/dev/null 2>&1 &
+  wait $!
 }
 
 # watchdog_epoch: monotonic seconds since boot (/proc/uptime), so an NTP clock
@@ -214,6 +247,7 @@ comms_watchdog() {
   : "${COMMS_BACKOFF_FACTOR:?comms_watchdog requires COMMS_BACKOFF_FACTOR}"
   _stale=0
   _stale_since=""
+  _outage_since=""
   _restarts=0
   # `while true; do sleep` (not `while sleep`): a signal-interrupted sleep must
   # not silently terminate the loop and disable USB recovery for the container's life.
@@ -221,11 +255,18 @@ comms_watchdog() {
     sleep "$COMMS_CHECK_INTERVAL" || true
     if comms_fresh; then
       if [ "$_restarts" -gt 0 ]; then
+        # Total outage = elapsed since the FIRST stale probe of the outage,
+        # not the last post-restart window (_stale resets on every bounce).
+        _total="$_stale"
+        if [ -n "$_outage_since" ] && _now=$(watchdog_epoch); then
+          _total=$((_now - _outage_since))
+        fi
         printf 'level=info msg="comms watchdog UPS comms recovered" ups=%s stale_secs=%d restarts=%d\n' \
-          "$UPS_NAME" "$_stale" "$_restarts" >&2
+          "$UPS_NAME" "$_total" "$_restarts" >&2
       fi
       _stale=0
       _stale_since=""
+      _outage_since=""
       _restarts=0
     else
       # Skip the tick rather than die under set -e if the clock read fails —
@@ -236,6 +277,7 @@ comms_watchdog() {
       }
       if [ -z "$_stale_since" ]; then
         _stale_since="$_now"
+        [ -n "$_outage_since" ] || _outage_since="$_now"
       fi
       _stale=$((_now - _stale_since))
       if [ "$_restarts" -lt "$COMMS_FAST_RETRIES" ]; then

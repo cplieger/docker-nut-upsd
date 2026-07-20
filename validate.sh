@@ -15,18 +15,12 @@ log_value() {
 }
 
 validate_no_newlines() {
-  # Strip one trailing newline before scanning for control bytes: a single
-  # trailing newline is harmless (env files and $() pipelines often
-  # preserve one), but embedded control characters (CR, LF, tab, etc.)
-  # remain rejected because they inject or alter NUT config directives.
-  _val=$(
-    printf '%s' "$2"
-    printf x
-  )
-  _val=${_val%x}
-  _val=${_val%"
-"}
-  case "$_val" in
+  # Control characters (CR, LF, tab, ...) inject or alter NUT config
+  # directives. Trailing-newline tolerance is owned by
+  # canonicalize_validated_values, which the entrypoint runs BEFORE
+  # validation — so a trailing LF that reaches this check un-stripped is
+  # rejected fail-closed rather than silently tolerated.
+  case "$2" in
     *[[:cntrl:]]*)
       printf 'level=error msg="env var contains control characters" var=%s\n' "$1" >&2
       return 1
