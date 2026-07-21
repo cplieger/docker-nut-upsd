@@ -205,7 +205,7 @@ driver_pidfile() {
 # skipped and the restart is a plain driver bounce.
 restart_ups_driver() {
   _attempt=${1:-1}
-  # h-f8 guard: stand down ONLY when a REAL host poweroff is in progress. upsmon
+  # Stand down only when a real host poweroff is in progress. upsmon
   # (primary) writes POWERDOWNFLAG (/var/run/nut-secrets/killpower) on every FSD,
   # including the log-only noop path (SHUTDOWN_ON_BATTERY_CRITICAL=false) where the
   # host stays up and the container keeps running — gating on killpower alone would
@@ -213,7 +213,7 @@ restart_ups_driver() {
   # SHUTDOWN_ON_BATTERY_CRITICAL=true scopes the stand-down to the only case with a
   # poweroff to protect (the flag is also cleared at entrypoint startup). The flag
   # lives in the root-only nut-secrets dir so a compromised nut process cannot plant
-  # it and suppress recovery (h-f2). Return non-zero so a stand-down is not counted
+  # it and suppress recovery. Return non-zero so a stand-down is not counted
   # as a restart attempt by comms_watchdog.
   if [ "${SHUTDOWN_ON_BATTERY_CRITICAL:-false}" = "true" ] && [ -e /var/run/nut-secrets/killpower ]; then
     printf 'level=warn msg="comms watchdog standing down; forced shutdown (killpower) in progress" ups=%s\n' "$UPS_NAME" >&2
