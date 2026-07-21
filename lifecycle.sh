@@ -200,6 +200,82 @@ driver_binary() {
   printf '/usr/lib/nut/%s' "$UPS_DRIVER"
 }
 
+# kill_stale_driver_from_pidfile: hard-kill the wedged driver named by the
+# pidfile ($1), then drop the pidfile. A wedged driver is hard-killed by
+# pidfile because `upsdrvctl stop` alone has been observed to fail to reap it
+# ("Stopping ...pid failed: Permission denied").
+kill_stale_driver_from_pidfile() {
+  _ksd_pf=$1
+  # Read the PID once: re-cat'ing after `upsdrvctl stop` risks acting on a
+  # pidfile whose process already exited (and whose PID may have been reused).
+  # The pidfile lives in the nut-writable /var/run/nut: read_pidfile caps the
+  # bytes root will ingest/log, refuses symlinks/special files, and drops to
+  # nut before opening so a raced symlink cannot leak root-only content.
+  _ksd_pid=$(read_pidfile "$_ksd_pf")
+  # Confused-deputy guard: the pidfile lives in the nut-writable /var/run/nut,
+  # so a compromised nut process can plant an arbitrary PID (1, upsmon, or
+  # "-1" = every process) and turn this root SIGKILL into a kill of any
+  # container process. Only signal a strictly numeric PID whose
+  # /proc/<pid>/exe resolves to the expected driver binary
+  # (--with-drvpath=/usr/lib/nut in the Dockerfile); otherwise log, refuse to
+  # signal, and let the unconditional rm below drop the untrusted pidfile.
+  case "$_ksd_pid" in
+    '') ;; # no pidfile: nothing to hard-kill
+    *[!0-9]*)
+      printf 'level=error msg="comms watchdog refusing non-numeric PID from pidfile" ups=%s pidfile=%s pid="%s"\n' \
+        "$UPS_NAME" "$_ksd_pf" "$(log_value "$_ksd_pid")" >&2
+      _ksd_pid=""
+      ;;
+    *[!0]*) ;; # numeric with a nonzero digit: candidate for the verified hard-kill below
+    *)
+      # All-zero PID: `kill -0 0` probes the caller's own process group instead
+      # of a specific PID, so refuse it outright (mirrors wait_for_pidfile's
+      # zero-PID guard) rather than relying on the /proc/<pid>/exe check.
+      printf 'level=error msg="comms watchdog refusing all-zero PID from pidfile" ups=%s pidfile=%s\n' \
+        "$UPS_NAME" "$_ksd_pf" >&2
+      _ksd_pid=""
+      ;;
+  esac
+  if [ -n "$_ksd_pid" ] && kill -0 "$_ksd_pid" 2>/dev/null; then
+    # Verify identity, then re-check existence immediately before signaling
+    # to narrow the PID-reuse window as far as plain sh allows.
+    if [ "$(readlink -f "/proc/$_ksd_pid/exe" 2>/dev/null)" = "$(driver_binary)" ] \
+      && kill -0 "$_ksd_pid" 2>/dev/null; then
+      kill -9 "$_ksd_pid" 2>/dev/null || true
+    else
+      printf 'level=error msg="comms watchdog refusing to kill PID not verified as the UPS driver" ups=%s pid=%s expected=%s\n' \
+        "$UPS_NAME" "$_ksd_pid" "$(driver_binary)" >&2
+    fi
+  fi
+  rm -f "$_ksd_pf"
+}
+
+# start_recovered_driver: bounded restart of the UPS driver with captured,
+# size-bounded output.
+start_recovered_driver() {
+  # 90s > NUT's 75s default maxstartdelay, so timeout only fires on a genuine wedge.
+  # Capture via temp file, not $(): command substitution reads the pipe until
+  # EOF, and a wedged pre-daemonize driver grandchild keeps the write end open
+  # past timeout's TERM of upsdrvctl — blocking the watchdog subshell forever
+  # (exactly the wedge this timeout exists for). A regular-file read never
+  # blocks. -k 5 hard-kills a TERM-ignoring upsdrvctl like the boot path does.
+  # The temp file lives in the root-only /var/run/nut-secrets, consistent with
+  # the existing symlink-hardening rationale.
+  _srd_out_file=$(capture_tmpfile wd-restart)
+  if timeout -k 5 90 /usr/sbin/upsdrvctl start "$UPS_NAME" >"$_srd_out_file" 2>&1; then
+    printf 'level=info msg="comms watchdog driver restart issued" ups=%s\n' "$UPS_NAME" >&2
+  else
+    # Capture the exit status (124 = timeout) so a silent failure still names
+    # its class; log_value flattens CR/tab/control bytes that the previous
+    # LF-only sanitizer let split or corrupt the logfmt record.
+    _srd_rc=$?
+    _srd_out=$(capture_head "$_srd_out_file")
+    printf 'level=error msg="comms watchdog driver restart failed" ups=%s rc=%d detail="%s"\n' \
+      "$UPS_NAME" "$_srd_rc" "$(log_value "$_srd_out")" >&2
+  fi
+  capture_cleanup "$_srd_out_file"
+}
+
 # restart_ups_driver: re-home the driver onto the (possibly re-enumerated) USB
 # node. Runs as root (PID 1 lineage). Re-asserts the nut group on the bus so
 # the driver's own reconnect attempts can also open a freshly created
@@ -242,70 +318,8 @@ restart_ups_driver() {
     fi
   fi
   timeout -k 5 30 /usr/sbin/upsdrvctl stop "$UPS_NAME" >/dev/null 2>&1 || true
-  _pf="$(driver_pidfile)"
-  # Read the PID once: re-cat'ing after `upsdrvctl stop` risks acting on a
-  # pidfile whose process already exited (and whose PID may have been reused).
-  # The pidfile lives in the nut-writable /var/run/nut: read_pidfile caps the
-  # bytes root will ingest/log, refuses symlinks/special files, and drops to
-  # nut before opening so a raced symlink cannot leak root-only content.
-  _pid=$(read_pidfile "$_pf")
-  # Confused-deputy guard: the pidfile lives in the nut-writable /var/run/nut,
-  # so a compromised nut process can plant an arbitrary PID (1, upsmon, or
-  # "-1" = every process) and turn this root SIGKILL into a kill of any
-  # container process. Only signal a strictly numeric PID whose
-  # /proc/<pid>/exe resolves to the expected driver binary
-  # (--with-drvpath=/usr/lib/nut in the Dockerfile); otherwise log, refuse to
-  # signal, and let the unconditional rm below drop the untrusted pidfile.
-  case "$_pid" in
-    '') ;; # no pidfile: nothing to hard-kill
-    *[!0-9]*)
-      printf 'level=error msg="comms watchdog refusing non-numeric PID from pidfile" ups=%s pidfile=%s pid="%s"\n' \
-        "$UPS_NAME" "$_pf" "$(log_value "$_pid")" >&2
-      _pid=""
-      ;;
-    *[!0]*) ;; # numeric with a nonzero digit: candidate for the verified hard-kill below
-    *)
-      # All-zero PID: `kill -0 0` probes the caller's own process group instead
-      # of a specific PID, so refuse it outright (mirrors wait_for_pidfile's
-      # zero-PID guard) rather than relying on the /proc/<pid>/exe check.
-      printf 'level=error msg="comms watchdog refusing all-zero PID from pidfile" ups=%s pidfile=%s\n' \
-        "$UPS_NAME" "$_pf" >&2
-      _pid=""
-      ;;
-  esac
-  if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null; then
-    # Verify identity, then re-check existence immediately before signaling
-    # to narrow the PID-reuse window as far as plain sh allows.
-    if [ "$(readlink -f "/proc/$_pid/exe" 2>/dev/null)" = "$(driver_binary)" ] \
-      && kill -0 "$_pid" 2>/dev/null; then
-      kill -9 "$_pid" 2>/dev/null || true
-    else
-      printf 'level=error msg="comms watchdog refusing to kill PID not verified as the UPS driver" ups=%s pid=%s expected=%s\n' \
-        "$UPS_NAME" "$_pid" "$(driver_binary)" >&2
-    fi
-  fi
-  rm -f "$_pf"
-  # 90s > NUT's 75s default maxstartdelay, so timeout only fires on a genuine wedge.
-  # Capture via temp file, not $(): command substitution reads the pipe until
-  # EOF, and a wedged pre-daemonize driver grandchild keeps the write end open
-  # past timeout's TERM of upsdrvctl — blocking the watchdog subshell forever
-  # (exactly the wedge this timeout exists for). A regular-file read never
-  # blocks. -k 5 hard-kills a TERM-ignoring upsdrvctl like the boot path does.
-  # The temp file lives in the root-only /var/run/nut-secrets, consistent with
-  # the existing symlink-hardening rationale.
-  _out_file=$(capture_tmpfile wd-restart)
-  if timeout -k 5 90 /usr/sbin/upsdrvctl start "$UPS_NAME" >"$_out_file" 2>&1; then
-    printf 'level=info msg="comms watchdog driver restart issued" ups=%s\n' "$UPS_NAME" >&2
-  else
-    # Capture the exit status (124 = timeout) so a silent failure still names
-    # its class; log_value flattens CR/tab/control bytes that the previous
-    # LF-only sanitizer let split or corrupt the logfmt record.
-    _rc=$?
-    _out=$(capture_head "$_out_file")
-    printf 'level=error msg="comms watchdog driver restart failed" ups=%s rc=%d detail="%s"\n' \
-      "$UPS_NAME" "$_rc" "$(log_value "$_out")" >&2
-  fi
-  capture_cleanup "$_out_file"
+  kill_stale_driver_from_pidfile "$(driver_pidfile)"
+  start_recovered_driver
   # Signal that a real restart was attempted (distinct from the killpower
   # stand-down's non-zero return) so comms_watchdog counts it against the budget.
   return 0
