@@ -210,7 +210,7 @@ if find /var/run/nut -maxdepth 1 -name '*.pid' -type f 2>/dev/null | grep -q .; 
 fi
 
 # Clear temp files leaked by a kill that landed between mktemp and rm -f/mv
-# in restart_ups_driver / stop_nut_cmd (lifecycle.sh) or
+# in lifecycle.sh's capture helpers (start_recovered_driver, stop_nut_cmd) or
 # resolve_admin_password (password.sh); they live in the writable layer and
 # would otherwise accumulate across container restarts. Safe here: this run's
 # own admin-password temp was already renamed or removed by

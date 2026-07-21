@@ -46,7 +46,7 @@ validate_numeric() {
   # swallows, so the range validators below would silently accept the value
   # and unbounded numbers would reach lifecycle.sh arithmetic.
   _numeric=$(strip_leading_zeros "$2")
-  if [ "${#_numeric}" -gt 18 ]; then
+  if [ "${#_numeric}" -gt "${#SHELL_SAFE_INTEGER_MAX}" ]; then
     printf 'level=error msg="env var numeric value too large" var=%s length=%d\n' "$1" "${#_numeric}" >&2
     return 1
   fi
