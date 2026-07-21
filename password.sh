@@ -16,17 +16,38 @@ readonly PASSWORD_MIN_LENGTH=12
 resolve_admin_password() {
   ADMIN_PASSWORD_FILE=/var/run/nut-secrets/admin_password
   if [ -z "${ADMIN_PASSWORD:-}" ]; then
-    # Treat a whitespace-only cache as absent (self-heal): POSIX command
-    # substitution strips trailing newlines, but spaces/tabs would otherwise
-    # pass a bare `-n` check and cache an unusable admin password.
-    if [ -s "$ADMIN_PASSWORD_FILE" ] && ADMIN_PASSWORD=$(cat "$ADMIN_PASSWORD_FILE") \
+    # Bounded, validated cache read: generation below always writes exactly
+    # PASSWORD_LENGTH bytes, so only a cache of exactly that size is trusted,
+    # and the read itself is capped at PASSWORD_LENGTH bytes. An unbounded
+    # `cat` of a corrupted or grown cache in the reused writable layer would
+    # let PID 1 consume memory proportional to the file and repeat the OOM on
+    # every restart. Treat a whitespace-only cache as absent (self-heal):
+    # POSIX command substitution strips trailing newlines, but spaces/tabs
+    # would otherwise pass a length check and cache an unusable password.
+    _cache_size=$(stat -c %s "$ADMIN_PASSWORD_FILE" 2>/dev/null) || _cache_size=""
+    if [ "$_cache_size" = "$PASSWORD_LENGTH" ] \
+      && ADMIN_PASSWORD=$(head -c "$PASSWORD_LENGTH" "$ADMIN_PASSWORD_FILE" 2>/dev/null) \
+      && [ "${#ADMIN_PASSWORD}" -eq "$PASSWORD_LENGTH" ] \
       && [ -n "$(printf '%s' "$ADMIN_PASSWORD" | tr -d '[:space:]')" ]; then
       printf 'level=info msg="reusing ADMIN_PASSWORD from container FS (not persisted across recreations)" path=%s\n' \
         "$ADMIN_PASSWORD_FILE" >&2
     else
+      if [ -s "$ADMIN_PASSWORD_FILE" ]; then
+        printf 'level=warn msg="cached ADMIN_PASSWORD invalid (wrong size or unreadable); regenerating" path=%s size=%s expected=%s\n' \
+          "$ADMIN_PASSWORD_FILE" "${_cache_size:-unreadable}" "$PASSWORD_LENGTH" >&2
+      fi
       # Pull more entropy than we need so stripping `/+=` still leaves
       # ≥PASSWORD_LENGTH usable characters; head -c then gives a stable length.
       ADMIN_PASSWORD=$(head -c "$PASSWORD_RAW_BYTES" /dev/urandom | base64 | tr -d '/+=' | head -c "$PASSWORD_LENGTH")
+      # Never cache or use a short password: stripping `/+=` can in principle
+      # leave fewer than PASSWORD_LENGTH characters, and a short read from
+      # /dev/urandom would too. Fail loudly (entrypoint runs under set -e)
+      # rather than silently starting with weakened admin credentials.
+      if [ "${#ADMIN_PASSWORD}" -ne "$PASSWORD_LENGTH" ]; then
+        printf 'level=error msg="generated ADMIN_PASSWORD has unexpected length; refusing weak credentials" got=%d expected=%d\n' \
+          "${#ADMIN_PASSWORD}" "$PASSWORD_LENGTH" >&2
+        return 1
+      fi
       # mktemp in the root-only dir gives an O_EXCL, unpredictable temp name so
       # a compromised `nut` process cannot plant a symlink at the write target.
       if _tmp=$(mktemp "${ADMIN_PASSWORD_FILE}.tmp.XXXXXX") \

@@ -70,17 +70,20 @@ stop_services() {
 # read_pidfile: bounded, race-safe read of a NUT pidfile from the nut-writable
 # /var/run/nut. Refuses a path that is a symlink or not a regular file (a
 # legitimate NUT pidfile is a small regular file), opens it only after
-# dropping to the unprivileged nut user (setpriv, from util-linux-misc) so a
+# dropping to the unprivileged nut user (BusyBox su: Alpine resolves setpriv
+# to the BusyBox applet, which does not implement --reuid/--regid) so a
 # symlink raced in between the check and the open cannot leak a root-only
 # file's content across the nut-to-root confidentiality boundary, and
 # hard-bounds the read (timeout -s KILL 1) so a raced FIFO or other special
-# file cannot block the caller. Prints the first 64 bytes (far beyond any
-# real PID) or nothing; always returns 0.
+# file cannot block the caller. The path travels as a positional parameter
+# ($1), never interpolated into the -c string, so a crafted filename cannot
+# inject shell syntax. Prints the first 64 bytes (far beyond any real PID)
+# or nothing; always returns 0.
 read_pidfile() {
   _rp_path=$1
   [ ! -L "$_rp_path" ] && [ -f "$_rp_path" ] || return 0
-  timeout -s KILL 1 setpriv --reuid=nut --regid=nut --clear-groups \
-    head -c 64 "$_rp_path" 2>/dev/null || true
+  timeout -s KILL 1 su -s /bin/sh -c "exec head -c 64 \"\$1\"" nut sh "$_rp_path" \
+    2>/dev/null || true
 }
 
 # Bounded poll for a NUT daemon PID file. NUT drivers/daemons write a PID

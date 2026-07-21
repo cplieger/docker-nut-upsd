@@ -234,11 +234,14 @@ for fn in upsd_probe_host comms_fresh upsd_responsive restart_ups_driver comms_w
 done
 
 #    read_pidfile: race-safe pidfile reads. A regular nut-readable file's
-#    content comes back through the setpriv privilege drop (real NUT pidfiles
-#    are nut-owned); a planted symlink and a FIFO are both refused. The FIFO
-#    has no writer, so this block completing at all also proves the read path
-#    cannot block on a raced special file.
+#    content comes back through the BusyBox `su` privilege drop (real NUT
+#    pidfiles are nut-owned, so the fixture is chowned to nut explicitly —
+#    readability under the drop must not depend on the build stage's umask);
+#    a planted symlink and a FIFO are both refused. The FIFO has no writer,
+#    so this block completing at all also proves the read path cannot block
+#    on a raced special file.
 printf '12345' >/var/run/nut/rp-regular.pid
+chown nut:nut /var/run/nut/rp-regular.pid
 if [ "$(read_pidfile /var/run/nut/rp-regular.pid)" != "12345" ]; then
   err "FAIL: read_pidfile did not return the content of a regular pidfile"
   fail=1
