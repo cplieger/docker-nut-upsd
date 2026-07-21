@@ -23,7 +23,7 @@ WORKDIR /build/libmodbus
 # cleanly on musl.
 RUN wget -qO libmodbus.tar.gz \
       "https://github.com/stephane/libmodbus/releases/download/${LIBMODBUS_VERSION}/libmodbus-${LIBMODBUS_VERSION#v}.tar.gz" \
-    && echo "${LIBMODBUS_SHA256}  libmodbus.tar.gz" | sha256sum -c - \
+    && printf '%s  %s\n' "${LIBMODBUS_SHA256}" libmodbus.tar.gz | sha256sum -c - \
     && tar xz --strip-components=1 -f libmodbus.tar.gz \
     && rm libmodbus.tar.gz \
     && ac_cv_type_struct_termios2=no \
@@ -45,7 +45,7 @@ WORKDIR /build/netsnmp
 # hadolint ignore=SC2016
 RUN wget -qO netsnmp.tar.gz \
       "https://github.com/net-snmp/net-snmp/archive/refs/tags/${NETSNMP_VERSION}.tar.gz" \
-    && echo "${NETSNMP_SHA256}  netsnmp.tar.gz" | sha256sum -c - \
+    && printf '%s  %s\n' "${NETSNMP_SHA256}" netsnmp.tar.gz | sha256sum -c - \
     && tar xz --strip-components=1 -f netsnmp.tar.gz \
     && rm netsnmp.tar.gz \
     && ./configure --prefix=/usr --disable-static \
@@ -61,7 +61,7 @@ RUN wget -qO netsnmp.tar.gz \
     && if [ ! -f /usr/lib/pkgconfig/netsnmp.pc ]; then \
          mkdir -p /usr/lib/pkgconfig \
          && printf 'prefix=/usr\nexec_prefix=${prefix}\nlibdir=${exec_prefix}/lib\nincludedir=${prefix}/include\n\nName: netsnmp\nDescription: Net-SNMP library\nVersion: %s\nLibs: -L${libdir} -lnetsnmp\nLibs.private: -lssl -lcrypto\nCflags: -I${includedir}\n' \
-           "$(echo "${NETSNMP_VERSION}" | sed 's/^v//')" \
+           "${NETSNMP_VERSION#v}" \
            > /usr/lib/pkgconfig/netsnmp.pc; \
        fi
 
@@ -74,7 +74,7 @@ ARG NUT_SHA256=18bf32e59eb764b13da3c4fa70384926d7fa584cb31d2fe7f137a570633eeec1
 WORKDIR /build/nut
 RUN wget -qO nut.tar.gz \
       "https://github.com/networkupstools/nut/releases/download/${NUT_VERSION}/nut-${NUT_VERSION#v}.tar.gz" \
-    && echo "${NUT_SHA256}  nut.tar.gz" | sha256sum -c - \
+    && printf '%s  %s\n' "${NUT_SHA256}" nut.tar.gz | sha256sum -c - \
     && tar xz --strip-components=1 -f nut.tar.gz \
     && rm nut.tar.gz \
     && PKG_CONFIG_LIBDIR="/usr/lib/pkgconfig" \

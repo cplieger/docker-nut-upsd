@@ -204,7 +204,7 @@ usb_bus_required() {
 # ---------------------------------------------------------------------------
 
 # Each line: VAR_NAME:check1,check2,...
-# Supported checks: newlines, quotes, brackets, identifier, numeric, positive, port, percent
+# Supported checks: newlines, quotes, backslash, brackets, identifier, numeric, positive, port, percent
 VALIDATION_TABLE='
 UPS_NAME:newlines,quotes,brackets,identifier
 UPS_DESC:newlines,quotes,backslash
@@ -326,8 +326,8 @@ _run_table() {
   done || exit 1
 }
 
-# canonicalize_validated_values: strip a single trailing newline (env-file
-# artifact) from every env var the validation tables cover, by assigning each
+# canonicalize_validated_values: strip trailing newline bytes (env-file
+# artifacts) from every env var the validation tables cover, by assigning each
 # through $() (which strips trailing LFs). MUST run BEFORE run_validations and
 # before any raw-value interpretation: the table resolver's own $() already
 # strips trailing LFs, so validation would otherwise pass a value whose raw
