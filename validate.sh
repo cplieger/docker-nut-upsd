@@ -213,7 +213,7 @@ UPS_PORT:newlines,backslash
 API_USER:newlines,identifier
 API_PASSWORD:newlines,quotes,backslash
 API_ADDRESS:newlines,quotes,backslash
-API_PORT:newlines,numeric,port
+API_PORT:newlines,port
 ADMIN_PASSWORD:newlines,quotes,backslash
 SHUTDOWN_ON_BATTERY_CRITICAL:newlines
 DBUS_PROBE_INTERVAL:numeric
@@ -233,9 +233,9 @@ COMMS_BACKOFF_FACTOR:positive
 
 # Optional vars: only validated when non-empty.
 VALIDATION_TABLE_OPTIONAL='
-LOWBATT_PERCENT:newlines,numeric,percent
+LOWBATT_PERCENT:newlines,percent
 LOWBATT_RUNTIME:newlines,numeric
-CRITBATT_PERCENT:newlines,numeric,percent
+CRITBATT_PERCENT:newlines,percent
 CRITBATT_RUNTIME:newlines,numeric
 '
 

@@ -5,7 +5,7 @@ FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6ee
 SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
 
 RUN apk add --no-cache automake build-base clang libtool lld perl pkgconf \
-        gcc musl-dev libusb-compat-dev openssl-dev linux-headers
+        libusb-compat-dev openssl-dev linux-headers
 
 # renovate: datasource=github-releases depName=stephane/libmodbus
 ARG LIBMODBUS_VERSION=v3.2.0
@@ -120,7 +120,7 @@ RUN apk upgrade --no-cache \
     && adduser -S -G nut -h /var/run/nut -s /sbin/nologin nut \
     && install -d -m 770 -o nut -g nut /var/run/nut \
     && install -d -m 700 -o root -g root /var/run/nut-secrets \
-    && install -d -m 770 -o nut -g nut /etc/nut
+    && install -d -m 750 -o root -g nut /etc/nut
 
 COPY --from=builder /out/usr/lib/libmodbus* /usr/lib/
 COPY --from=builder /out/usr/lib/libnetsnmp* /usr/lib/
@@ -167,8 +167,17 @@ COPY --from=test /tests-passed /tests-passed
 # daemon drops to user "nut" internally via the build-time configure flags
 # (--with-user=nut --with-group=nut). AVD-DS-0002 is suppressed via
 # .trivyignore at the repo root; see the rationale there.
-# Source the canonical probe-host mapping used by upsmon and the watchdog.
+# Probe upsd at its configured listen address (upsd_probe_host, lifecycle.sh).
+# stderr is NOT discarded: upsc's error is the only signal in the docker health
+# log distinguishing "Data stale" (driver lost the device) from "Connection
+# refused" (upsd down) from silence (timeout fired). Env is canonicalized via
+# $(printf '%s' ...) — dockerd execs this probe with the RAW container env,
+# not the entrypoint's canonicalize_validated_values copy, so a trailing-LF
+# UPS_NAME/API_PORT/API_ADDRESS that boots fine would otherwise fail every probe.
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=15s \
     CMD . /usr/local/bin/lifecycle.sh; \
-        timeout 3 upsc "${UPS_NAME:-ups}@$(upsd_probe_host):${API_PORT:-3493}" 2>/dev/null | grep -q 'ups.status' || exit 1
+        UPS_NAME=$(printf '%s' "${UPS_NAME:-ups}"); \
+        API_PORT=$(printf '%s' "${API_PORT:-3493}"); \
+        API_ADDRESS=$(printf '%s' "${API_ADDRESS:-0.0.0.0}"); \
+        timeout 3 upsc "${UPS_NAME}@$(upsd_probe_host):${API_PORT}" | grep -q 'ups.status' || exit 1
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

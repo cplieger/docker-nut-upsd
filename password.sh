@@ -69,4 +69,8 @@ warn_weak_api_password() {
     printf 'level=warn msg="API_PASSWORD is weak (default value or <%d chars). Acceptable on a trusted LAN; rotate it if your NUT client supports custom credentials."\n' \
       "$PASSWORD_MIN_LENGTH" >&2
   fi
+  if [ "${#ADMIN_PASSWORD}" -lt "$PASSWORD_MIN_LENGTH" ]; then
+    printf 'level=warn msg="ADMIN_PASSWORD is weak (<%d chars). It guards upsd set/FSD actions; use a longer value or unset it to auto-generate a strong one."\n' \
+      "$PASSWORD_MIN_LENGTH" >&2
+  fi
 }
