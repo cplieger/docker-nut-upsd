@@ -33,7 +33,7 @@ resolve_admin_password() {
         "$ADMIN_PASSWORD_FILE" >&2
     else
       if [ -s "$ADMIN_PASSWORD_FILE" ]; then
-        printf 'level=warn msg="cached ADMIN_PASSWORD invalid (wrong size or unreadable); regenerating" path=%s size=%s expected=%s\n' \
+        printf 'level=warn msg="cached ADMIN_PASSWORD invalid (wrong size, unreadable, or whitespace-only); regenerating" path=%s size=%s expected=%s\n' \
           "$ADMIN_PASSWORD_FILE" "${_cache_size:-unreadable}" "$PASSWORD_LENGTH" >&2
       fi
       # Pull more entropy than we need so stripping `/+=` still leaves

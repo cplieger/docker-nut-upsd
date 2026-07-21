@@ -202,10 +202,14 @@ if find /var/run/nut -maxdepth 1 -name '*.pid' -type f 2>/dev/null | grep -q .; 
   find /var/run/nut -maxdepth 1 -name '*.pid' -type f -delete
 fi
 
-# Clear temp capture files leaked by a kill that landed between mktemp and
-# rm -f in restart_ups_driver / stop_nut_cmd (lifecycle.sh); they live in the
-# writable layer and would otherwise accumulate across container restarts.
-rm -f /var/run/nut-secrets/wd-restart.* /var/run/nut-secrets/stop-cmd.*
+# Clear temp files leaked by a kill that landed between mktemp and rm -f/mv
+# in restart_ups_driver / stop_nut_cmd (lifecycle.sh) or
+# resolve_admin_password (password.sh); they live in the writable layer and
+# would otherwise accumulate across container restarts. Safe here: this run's
+# own admin-password temp was already renamed or removed by
+# resolve_admin_password above, and the capture temps are created later.
+rm -f /var/run/nut-secrets/wd-restart.* /var/run/nut-secrets/stop-cmd.* \
+  /var/run/nut-secrets/admin_password.tmp.*
 
 # Clear a stale POWERDOWNFLAG (killpower) from a previous lifecycle. upsmon
 # creates it on FSD; /var/run/nut-secrets is the writable layer so it survives
