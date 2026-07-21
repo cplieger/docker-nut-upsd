@@ -226,12 +226,36 @@ fi
 #    lifecycle.sh). stop_watchdog and stop_dbus_probe live in entrypoint.sh
 #    and are not asserted here.
 for fn in upsd_probe_host comms_fresh upsd_responsive restart_ups_driver comms_watchdog watchdog_epoch \
-  driver_transport usb_bus_required dbus_poweroff_path_ok dbus_liveness_probe; do
+  driver_transport usb_bus_required dbus_poweroff_path_ok dbus_liveness_probe read_pidfile; do
   if ! command -v "$fn" >/dev/null 2>&1; then
     err "FAIL: helper function missing: $fn"
     fail=1
   fi
 done
+
+#    read_pidfile: race-safe pidfile reads. A regular nut-readable file's
+#    content comes back through the setpriv privilege drop (real NUT pidfiles
+#    are nut-owned); a planted symlink and a FIFO are both refused. The FIFO
+#    has no writer, so this block completing at all also proves the read path
+#    cannot block on a raced special file.
+printf '12345' >/var/run/nut/rp-regular.pid
+if [ "$(read_pidfile /var/run/nut/rp-regular.pid)" != "12345" ]; then
+  err "FAIL: read_pidfile did not return the content of a regular pidfile"
+  fail=1
+fi
+printf 'root-only' >/var/run/nut-secrets/rp-secret
+ln -s /var/run/nut-secrets/rp-secret /var/run/nut/rp-symlink.pid
+if [ -n "$(read_pidfile /var/run/nut/rp-symlink.pid)" ]; then
+  err "FAIL: read_pidfile followed a planted symlink"
+  fail=1
+fi
+mkfifo /var/run/nut/rp-fifo.pid
+if [ -n "$(read_pidfile /var/run/nut/rp-fifo.pid)" ]; then
+  err "FAIL: read_pidfile read from a FIFO"
+  fail=1
+fi
+rm -f /var/run/nut/rp-regular.pid /var/run/nut/rp-symlink.pid \
+  /var/run/nut/rp-fifo.pid /var/run/nut-secrets/rp-secret
 
 #    upsd_probe_host maps ONLY the wildcard binds (and localhost) to loopback;
 #    specific IPv4 binds — including 127.0.0.2-style loopback addresses that a

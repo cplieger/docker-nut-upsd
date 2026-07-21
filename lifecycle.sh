@@ -67,6 +67,22 @@ stop_services() {
   printf 'level=info msg="NUT services stopped"\n' >&2
 }
 
+# read_pidfile: bounded, race-safe read of a NUT pidfile from the nut-writable
+# /var/run/nut. Refuses a path that is a symlink or not a regular file (a
+# legitimate NUT pidfile is a small regular file), opens it only after
+# dropping to the unprivileged nut user (setpriv, from util-linux-misc) so a
+# symlink raced in between the check and the open cannot leak a root-only
+# file's content across the nut-to-root confidentiality boundary, and
+# hard-bounds the read (timeout -s KILL 1) so a raced FIFO or other special
+# file cannot block the caller. Prints the first 64 bytes (far beyond any
+# real PID) or nothing; always returns 0.
+read_pidfile() {
+  _rp_path=$1
+  [ ! -L "$_rp_path" ] && [ -f "$_rp_path" ] || return 0
+  timeout -s KILL 1 setpriv --reuid=nut --regid=nut --clear-groups \
+    head -c 64 "$_rp_path" 2>/dev/null || true
+}
+
 # Bounded poll for a NUT daemon PID file. NUT drivers/daemons write a PID
 # file at /var/run/nut/<name>.pid after a successful fork+daemonize, which
 # is the canonical completion signal upstream relies on (upsdrvctl itself
@@ -84,10 +100,7 @@ wait_for_pidfile() {
   while [ "$_wf_i" -lt "$PIDFILE_POLL_MAX" ]; do
     # Pidfiles live in the nut-writable /var/run/nut; only trust strictly
     # numeric content (mirrors restart_ups_driver's confused-deputy guard).
-    _wf_pid=""
-    if [ ! -L "$2" ]; then
-      _wf_pid=$(head -c 64 "$2" 2>/dev/null || true)
-    fi
+    _wf_pid=$(read_pidfile "$2")
     case "$_wf_pid" in
       '' | *[!0-9]*) ;; # empty, partial write, or untrusted content: keep polling
       *[!0]*)
@@ -221,13 +234,10 @@ restart_ups_driver() {
   _pf="$(driver_pidfile)"
   # Read the PID once: re-cat'ing after `upsdrvctl stop` risks acting on a
   # pidfile whose process already exited (and whose PID may have been reused).
-  # The pidfile lives in the nut-writable /var/run/nut: cap the bytes root
-  # will ingest/log and refuse a planted symlink (a legitimate NUT pidfile
-  # is a small regular file; 64 bytes far exceeds any real PID).
-  _pid=""
-  if [ ! -L "$_pf" ]; then
-    _pid=$(head -c 64 "$_pf" 2>/dev/null || true)
-  fi
+  # The pidfile lives in the nut-writable /var/run/nut: read_pidfile caps the
+  # bytes root will ingest/log, refuses symlinks/special files, and drops to
+  # nut before opening so a raced symlink cannot leak root-only content.
+  _pid=$(read_pidfile "$_pf")
   # Confused-deputy guard: the pidfile lives in the nut-writable /var/run/nut,
   # so a compromised nut process can plant an arbitrary PID (1, upsmon, or
   # "-1" = every process) and turn this root SIGKILL into a kill of any
