@@ -3,7 +3,7 @@
 # Sourced by entrypoint.sh; not executed directly.
 
 readonly PIDFILE_POLL_INTERVAL="0.1"
-readonly PIDFILE_POLL_MAX=50 # total wait = POLL_MAX × POLL_INTERVAL = 5s
+readonly PIDFILE_POLL_MAX=50 # nominal wait = POLL_MAX × POLL_INTERVAL = 5s (each poll's pidfile read adds its own <=1s bound; see read_pidfile)
 readonly DBUS_PROBE_REPLY_TIMEOUT_MS=3000
 # Per-command bound for the stop_services control calls: 3 commands x 3s = 9s
 # worst case, inside Docker's default 10s stop budget before SIGKILL.
@@ -192,6 +192,14 @@ driver_pidfile() {
   printf '/var/run/nut/%s-%s.pid' "$UPS_DRIVER" "$UPS_NAME"
 }
 
+# driver_binary: installed driver path (--with-drvpath=/usr/lib/nut in the
+# Dockerfile). Centralized like driver_pidfile: the /proc/<pid>/exe identity
+# checks in restart_ups_driver and the entrypoint's wait_for_pidfile gate must
+# compare against the same literal.
+driver_binary() {
+  printf '/usr/lib/nut/%s' "$UPS_DRIVER"
+}
+
 # restart_ups_driver: re-home the driver onto the (possibly re-enumerated) USB
 # node. Runs as root (PID 1 lineage). Re-asserts the nut group on the bus so
 # the driver's own reconnect attempts can also open a freshly created
@@ -268,12 +276,12 @@ restart_ups_driver() {
   if [ -n "$_pid" ] && kill -0 "$_pid" 2>/dev/null; then
     # Verify identity, then re-check existence immediately before signaling
     # to narrow the PID-reuse window as far as plain sh allows.
-    if [ "$(readlink -f "/proc/$_pid/exe" 2>/dev/null)" = "/usr/lib/nut/$UPS_DRIVER" ] \
+    if [ "$(readlink -f "/proc/$_pid/exe" 2>/dev/null)" = "$(driver_binary)" ] \
       && kill -0 "$_pid" 2>/dev/null; then
       kill -9 "$_pid" 2>/dev/null || true
     else
-      printf 'level=error msg="comms watchdog refusing to kill PID not verified as the UPS driver" ups=%s pid=%s expected=/usr/lib/nut/%s\n' \
-        "$UPS_NAME" "$_pid" "$UPS_DRIVER" >&2
+      printf 'level=error msg="comms watchdog refusing to kill PID not verified as the UPS driver" ups=%s pid=%s expected=%s\n' \
+        "$UPS_NAME" "$_pid" "$(driver_binary)" >&2
     fi
   fi
   rm -f "$_pf"

@@ -257,7 +257,7 @@ start_nut_daemon() {
 # path), so it only fires on a genuine wedge.
 start_nut_daemon "upsdrvctl" 90 /usr/sbin/upsdrvctl start
 # NUT drivers write /var/run/nut/<driver>-<ups>.pid on successful start.
-wait_for_pidfile "UPS driver" "$(driver_pidfile)" "/usr/lib/nut/$UPS_DRIVER" || {
+wait_for_pidfile "UPS driver" "$(driver_pidfile)" "$(driver_binary)" || {
   stop_services
   exit 1
 }
