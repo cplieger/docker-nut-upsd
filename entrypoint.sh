@@ -177,13 +177,20 @@ stop_dbus_probe() {
   DBUS_PROBE_PID=""
 }
 
+# teardown_all: the one teardown sequence every exit path shares (signal
+# trap, upsd-unresponsive exit, upsmon-exit path) - reap both background
+# loops, then stop the NUT daemons. Exit codes stay with the callers.
+teardown_all() {
+  stop_watchdog
+  stop_dbus_probe
+  stop_services
+}
+
 # Signal handler: clean up, then exit 0 (signal-initiated stop).
 # shellcheck disable=SC2317,SC2329 # invoked via trap; shellcheck cannot see the call site
 graceful_shutdown() {
   printf 'level=info msg="received shutdown signal"\n' >&2
-  stop_watchdog
-  stop_dbus_probe
-  stop_services
+  teardown_all
   exit 0
 }
 trap graceful_shutdown TERM INT QUIT HUP
@@ -330,9 +337,7 @@ while kill -0 "$UPSMON_PID" 2>/dev/null; do
     if [ "$upsd_failures" -ge "$UPSD_PROBE_MAX_FAILURES" ]; then
       printf 'level=error msg="upsd unresponsive; stopping services and exiting so the restart policy rebuilds the stack" consecutive_failures=%d probe_interval=%ss\n' \
         "$upsd_failures" "$UPSD_PROBE_INTERVAL" >&2
-      stop_watchdog
-      stop_dbus_probe
-      stop_services
+      teardown_all
       exit 1
     fi
     printf 'level=warn msg="upsd not responding to protocol probe" consecutive_failures=%d threshold=%d\n' \
@@ -352,7 +357,5 @@ if [ "$rc" -eq 0 ]; then
 else
   printf 'level=error msg="upsmon exited unexpectedly" rc=%d\n' "$rc" >&2
 fi
-stop_watchdog
-stop_dbus_probe
-stop_services
+teardown_all
 exit "$rc"

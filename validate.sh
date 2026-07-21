@@ -114,12 +114,14 @@ validate_identifier() {
       ;;
   esac
   # Position rule: reject a leading dash for every identifier this check
-  # covers (UPS_NAME and API_USER). CLI consumers pass UPS_NAME as the FIRST
-  # getopt-parsed argument (the HEALTHCHECK's `upsc $UPS_NAME@...`, the
-  # watchdog's comms probe, `upsdrvctl stop $UPS_NAME`), so a dash-leading
+  # covers (UPS_NAME, UPS_DRIVER, API_USER). CLI consumers pass UPS_NAME as
+  # the FIRST getopt-parsed argument (the HEALTHCHECK's `upsc $UPS_NAME@...`,
+  # the watchdog's comms probe, `upsdrvctl stop $UPS_NAME`), so a dash-leading
   # name parses as options and fails every one of them while boot succeeds.
-  # API_USER is only written quoted into configs, but a leading dash is not a
-  # meaningful identifier for it either, so the shared check stays uniform.
+  # UPS_DRIVER and API_USER have no getopt-positional exposure (API_USER is
+  # written as an unquoted [$API_USER] section header and a quoted MONITOR
+  # credential), but a leading dash is not a meaningful identifier for either,
+  # so the shared check stays uniform.
   case "$2" in
     -*)
       printf 'level=error msg="env var must not start with a dash" var=%s value="%s"\n' "$1" "$(log_value "$2")" >&2
