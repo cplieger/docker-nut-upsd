@@ -24,10 +24,11 @@ stop_nut_cmd() {
   # Capture via temp file, not $(): a TERM-ignoring control client would keep
   # the pipe's write end open past timeout's TERM and hold PID 1 inside the
   # signal trap indefinitely, defeating this function's stated purpose (Docker's
-  # 10s SIGKILL as the only backstop). A regular-file read never blocks. No -k:
-  # the documented 3x3=9s stop-budget math stays unchanged.
+  # 10s SIGKILL as the only backstop). A regular-file read never blocks. Use
+  # KILL at the deadline because timeout's default TERM can itself wait forever
+  # for a TERM-ignoring client; this keeps the documented 3x3=9s budget hard.
   _stop_out_file=$(mktemp /var/run/nut-secrets/stop-cmd.XXXXXX 2>/dev/null) || _stop_out_file="/dev/null"
-  if timeout "$STOP_CMD_TIMEOUT" "$@" >"$_stop_out_file" 2>&1; then
+  if timeout -s KILL "$STOP_CMD_TIMEOUT" "$@" >"$_stop_out_file" 2>&1; then
     :
   else
     _stop_rc=$?

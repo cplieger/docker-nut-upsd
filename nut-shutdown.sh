@@ -39,7 +39,7 @@ while [ "$attempt" -le "$DBUS_MAX_RETRIES" ]; do
   attempt=$((attempt + 1))
 done
 
-printf 'level=error msg="D-Bus poweroff failed after %d attempts; host will NOT shut down cleanly"\n' "$DBUS_MAX_RETRIES" >&2
+printf 'level=error msg="D-Bus poweroff failed after %d attempts; host will NOT shut down cleanly" detail="%s"\n' "$DBUS_MAX_RETRIES" "$(log_value "${_out:-}")" >&2
 # The poweroff conclusively failed, so no shutdown is in progress anymore.
 # Clear NUT's POWERDOWNFLAG so the comms watchdog's killpower stand-down
 # (lifecycle.sh restart_ups_driver) does not stay latched for the rest of
