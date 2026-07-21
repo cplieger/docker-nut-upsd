@@ -277,7 +277,8 @@ rm -f /var/run/nut/rp-regular.pid /var/run/nut/rp-symlink.pid \
 #    literals gain NUT's documented brackets ([::1], [2001:db8::1]), and the
 #    :: wildcard maps to the bracketed loopback [::1]. Guards the shared
 #    helper against regressing to address-family-wide rewriting (the
-#    Dockerfile HEALTHCHECK inlines the same mapping; keep both in sync).
+#    Dockerfile HEALTHCHECK sources this same helper, so these cases
+#    directly cover the healthcheck mapping).
 for spec in '0.0.0.0=127.0.0.1' 'localhost=127.0.0.1' '::=[::1]' \
   '::1=[::1]' '2001:db8::1=[2001:db8::1]' \
   '127.0.0.2=127.0.0.2' '192.168.1.5=192.168.1.5'; do

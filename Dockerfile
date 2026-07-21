@@ -167,14 +167,8 @@ COPY --from=test /tests-passed /tests-passed
 # daemon drops to user "nut" internally via the build-time configure flags
 # (--with-user=nut --with-group=nut). AVD-DS-0002 is suppressed via
 # .trivyignore at the repo root; see the rationale there.
-# The probe host mirrors lifecycle.sh upsd_probe_host: upsd binds ONLY the
-# LISTEN address generated from API_ADDRESS, so a non-wildcard bind must be
-# probed at that address (127.0.0.1 would report permanently unhealthy);
-# only wildcard/localhost map to loopback, and every IPv6 literal is
-# bracketed (:: as [::1], specific addresses as [<addr>]) per NUT's
-# host:port syntax. The mapping is inlined because the healthcheck runs
-# with the container's configured env, not the entrypoint's shell state.
+# Source the canonical probe-host mapping used by upsmon and the watchdog.
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=15s \
-    CMD H="${API_ADDRESS:-0.0.0.0}"; case "$H" in 0.0.0.0|localhost) H=127.0.0.1;; ::) H="[::1]";; *:*) H="[$H]";; esac; \
-        timeout 3 upsc "${UPS_NAME:-ups}@$H:${API_PORT:-3493}" 2>/dev/null | grep -q 'ups.status' || exit 1
+    CMD . /usr/local/bin/lifecycle.sh; \
+        timeout 3 upsc "${UPS_NAME:-ups}@$(upsd_probe_host):${API_PORT:-3493}" 2>/dev/null | grep -q 'ups.status' || exit 1
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
