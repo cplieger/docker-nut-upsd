@@ -9,6 +9,22 @@ readonly DBUS_PROBE_REPLY_TIMEOUT_MS=3000
 # worst case, inside Docker's default 10s stop budget before SIGKILL.
 readonly STOP_CMD_TIMEOUT=3
 
+# Shared temp-file capture lifecycle for bounded subprocess output. Capture
+# via a regular file, never $(): a TERM-ignoring child can hold a pipe's
+# write end open past timeout's signal and block the reader forever; a
+# regular-file read never blocks. Files live in the root-only
+# /var/run/nut-secrets (symlink hardening); if mktemp fails the caller still
+# runs with output discarded to /dev/null.
+capture_tmpfile() {
+  mktemp "/var/run/nut-secrets/$1.XXXXXX" 2>/dev/null || printf '/dev/null'
+}
+capture_head() {
+  head -c 512 "$1" 2>/dev/null || true
+}
+capture_cleanup() {
+  [ "$1" = "/dev/null" ] || rm -f "$1"
+}
+
 # ---------------------------------------------------------------------------
 # Service lifecycle functions
 # ---------------------------------------------------------------------------
@@ -27,16 +43,16 @@ stop_nut_cmd() {
   # 10s SIGKILL as the only backstop). A regular-file read never blocks. Use
   # KILL at the deadline because timeout's default TERM can itself wait forever
   # for a TERM-ignoring client; this keeps the documented 3x3=9s budget hard.
-  _stop_out_file=$(mktemp /var/run/nut-secrets/stop-cmd.XXXXXX 2>/dev/null) || _stop_out_file="/dev/null"
+  _stop_out_file=$(capture_tmpfile stop-cmd)
   if timeout -s KILL "$STOP_CMD_TIMEOUT" "$@" >"$_stop_out_file" 2>&1; then
     :
   else
     _stop_rc=$?
-    _stop_out=$(head -c 512 "$_stop_out_file" 2>/dev/null || true)
+    _stop_out=$(capture_head "$_stop_out_file")
     printf 'level=warn msg="%s stop failed (may already be stopped)" rc=%d detail="%s"\n' \
       "$_stop_label" "$_stop_rc" "$(log_value "$_stop_out")" >&2
   fi
-  [ "$_stop_out_file" = "/dev/null" ] || rm -f "$_stop_out_file"
+  capture_cleanup "$_stop_out_file"
   return 0
 }
 
@@ -68,7 +84,10 @@ wait_for_pidfile() {
   while [ "$_wf_i" -lt "$PIDFILE_POLL_MAX" ]; do
     # Pidfiles live in the nut-writable /var/run/nut; only trust strictly
     # numeric content (mirrors restart_ups_driver's confused-deputy guard).
-    _wf_pid=$(cat "$2" 2>/dev/null || true)
+    _wf_pid=""
+    if [ ! -L "$2" ]; then
+      _wf_pid=$(head -c 64 "$2" 2>/dev/null || true)
+    fi
     case "$_wf_pid" in
       '' | *[!0-9]*) ;; # empty, partial write, or untrusted content: keep polling
       *[!0]*)
@@ -198,11 +217,17 @@ restart_ups_driver() {
       printf 'level=warn msg="comms watchdog could not re-assert nut group on USB nodes" ups=%s\n' "$UPS_NAME" >&2
     fi
   fi
-  timeout 30 /usr/sbin/upsdrvctl stop "$UPS_NAME" >/dev/null 2>&1 || true
+  timeout -k 5 30 /usr/sbin/upsdrvctl stop "$UPS_NAME" >/dev/null 2>&1 || true
   _pf="$(driver_pidfile)"
   # Read the PID once: re-cat'ing after `upsdrvctl stop` risks acting on a
   # pidfile whose process already exited (and whose PID may have been reused).
-  _pid=$(cat "$_pf" 2>/dev/null || true)
+  # The pidfile lives in the nut-writable /var/run/nut: cap the bytes root
+  # will ingest/log and refuse a planted symlink (a legitimate NUT pidfile
+  # is a small regular file; 64 bytes far exceeds any real PID).
+  _pid=""
+  if [ ! -L "$_pf" ]; then
+    _pid=$(head -c 64 "$_pf" 2>/dev/null || true)
+  fi
   # Confused-deputy guard: the pidfile lives in the nut-writable /var/run/nut,
   # so a compromised nut process can plant an arbitrary PID (1, upsmon, or
   # "-1" = every process) and turn this root SIGKILL into a kill of any
@@ -215,6 +240,15 @@ restart_ups_driver() {
     *[!0-9]*)
       printf 'level=error msg="comms watchdog refusing non-numeric PID from pidfile" ups=%s pidfile=%s pid="%s"\n' \
         "$UPS_NAME" "$_pf" "$(log_value "$_pid")" >&2
+      _pid=""
+      ;;
+    *[!0]*) ;; # numeric with a nonzero digit: candidate for the verified hard-kill below
+    *)
+      # All-zero PID: `kill -0 0` probes the caller's own process group instead
+      # of a specific PID, so refuse it outright (mirrors wait_for_pidfile's
+      # zero-PID guard) rather than relying on the /proc/<pid>/exe check.
+      printf 'level=error msg="comms watchdog refusing all-zero PID from pidfile" ups=%s pidfile=%s\n' \
+        "$UPS_NAME" "$_pf" >&2
       _pid=""
       ;;
   esac
@@ -238,7 +272,7 @@ restart_ups_driver() {
   # blocks. -k 5 hard-kills a TERM-ignoring upsdrvctl like the boot path does.
   # The temp file lives in the root-only /var/run/nut-secrets, consistent with
   # the existing symlink-hardening rationale.
-  _out_file=$(mktemp /var/run/nut-secrets/wd-restart.XXXXXX 2>/dev/null) || _out_file="/dev/null"
+  _out_file=$(capture_tmpfile wd-restart)
   if timeout -k 5 90 /usr/sbin/upsdrvctl start "$UPS_NAME" >"$_out_file" 2>&1; then
     printf 'level=info msg="comms watchdog driver restart issued" ups=%s\n' "$UPS_NAME" >&2
   else
@@ -246,11 +280,11 @@ restart_ups_driver() {
     # its class; log_value flattens CR/tab/control bytes that the previous
     # LF-only sanitizer let split or corrupt the logfmt record.
     _rc=$?
-    _out=$(head -c 512 "$_out_file" 2>/dev/null || true)
+    _out=$(capture_head "$_out_file")
     printf 'level=error msg="comms watchdog driver restart failed" ups=%s rc=%d detail="%s"\n' \
       "$UPS_NAME" "$_rc" "$(log_value "$_out")" >&2
   fi
-  [ "$_out_file" = "/dev/null" ] || rm -f "$_out_file"
+  capture_cleanup "$_out_file"
   # Signal that a real restart was attempted (distinct from the killpower
   # stand-down's non-zero return) so comms_watchdog counts it against the budget.
   return 0
