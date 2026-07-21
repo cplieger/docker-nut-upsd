@@ -114,6 +114,17 @@ if (
   err "FAIL: bracket-injection UPS_NAME was accepted"
   fail=1
 fi
+# A dash-leading UPS_NAME must fail fast at boot: every CLI consumer passes
+# the name as the first getopt-parsed argument (healthcheck `upsc -foo@...`,
+# comms_fresh, `upsdrvctl stop -foo`), so it parses as options and the
+# container would boot into a permanently-broken state.
+if (
+  UPS_NAME='-foo'
+  run_validations
+) >/dev/null 2>&1; then
+  err "FAIL: dash-leading UPS_NAME was accepted"
+  fail=1
+fi
 if (
   UPS_PORT='notapath'
   run_validations
