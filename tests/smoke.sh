@@ -128,6 +128,26 @@ if (
   err "FAIL: out-of-range API_PORT was accepted"
   fail=1
 fi
+# Digit strings beyond LONG_MAX make BusyBox test(1) error (status 2) instead
+# of comparing, and an enclosing `if` swallows that — validate_numeric must
+# reject >18 normalized digits before any range comparison runs.
+if (
+  API_PORT='9999999999999999999'
+  run_validations
+) >/dev/null 2>&1; then
+  err "FAIL: overlong API_PORT (>18 digits) was accepted"
+  fail=1
+fi
+# The stage-2 backoff threshold multiplies these two; each fits in 18 digits
+# but the product would overflow $(( )), so run_validations must bound the pair.
+if (
+  COMMS_RECOVERY_TIMEOUT='999999999999999999'
+  COMMS_BACKOFF_FACTOR='5'
+  run_validations
+) >/dev/null 2>&1; then
+  err "FAIL: COMMS_RECOVERY_TIMEOUT x COMMS_BACKOFF_FACTOR product overflow was accepted"
+  fail=1
+fi
 if (
   COMMS_CHECK_INTERVAL='notanumber'
   run_validations

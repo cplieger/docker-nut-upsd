@@ -2,6 +2,12 @@
 # validate.sh — validation functions and table-driven dispatch for NUT env vars.
 # Sourced by entrypoint.sh; not executed directly.
 
+# Largest value safely representable in shell integer arithmetic and test(1)
+# comparisons (18 nines fits a signed 64-bit long). validate_numeric bounds
+# every numeric env var to 18 normalized digits, and run_validations bounds
+# the one multiplied pair so its product stays under this ceiling.
+readonly SHELL_SAFE_INTEGER_MAX=999999999999999999
+
 # ---------------------------------------------------------------------------
 # Validation functions
 # ---------------------------------------------------------------------------
@@ -35,11 +41,21 @@ validate_numeric() {
       return 1
       ;;
   esac
+  # Reject normalized values too long to compare as shell integers: beyond
+  # LONG_MAX, BusyBox test(1) errors with status 2 — which an enclosing `if`
+  # swallows, so the range validators below would silently accept the value
+  # and unbounded numbers would reach lifecycle.sh arithmetic.
+  _numeric=$(strip_leading_zeros "$2")
+  if [ "${#_numeric}" -gt 18 ]; then
+    printf 'level=error msg="env var numeric value too large" var=%s length=%d\n' "$1" "${#_numeric}" >&2
+    return 1
+  fi
 }
 
 validate_positive() {
   validate_numeric "$1" "$2" || return 1
-  if [ "$2" -lt 1 ]; then
+  _numeric=$(strip_leading_zeros "$2")
+  if [ "$_numeric" -lt 1 ]; then
     printf 'level=error msg="env var must be a positive integer (>= 1)" var=%s value="%s"\n' "$1" "$(log_value "$2")" >&2
     return 1
   fi
@@ -47,7 +63,8 @@ validate_positive() {
 
 validate_port() {
   validate_numeric "$1" "$2" || return 1
-  if [ "$2" -lt 1 ] || [ "$2" -gt 65535 ]; then
+  _numeric=$(strip_leading_zeros "$2")
+  if [ "$_numeric" -lt 1 ] || [ "$_numeric" -gt 65535 ]; then
     printf 'level=error msg="env var must be 1-65535" var=%s value="%s"\n' "$1" "$(log_value "$2")" >&2
     return 1
   fi
@@ -55,7 +72,8 @@ validate_port() {
 
 validate_percent() {
   validate_numeric "$1" "$2" || return 1
-  if [ "$2" -gt 100 ]; then
+  _numeric=$(strip_leading_zeros "$2")
+  if [ "$_numeric" -gt 100 ]; then
     printf 'level=error msg="env var must be 0-100" var=%s value="%s"\n' "$1" "$(log_value "$2")" >&2
     return 1
   fi
@@ -337,6 +355,19 @@ canonicalize_validated_values() {
 run_validations() {
   _run_table "$VALIDATION_TABLE" 0
   _run_table "$VALIDATION_TABLE_OPTIONAL" 1
+
+  # COMMS_RECOVERY_TIMEOUT and COMMS_BACKOFF_FACTOR are the one validated pair
+  # that gets MULTIPLIED in shell arithmetic (lifecycle.sh's stage-2 backoff
+  # threshold). Each is individually bounded to 18 digits by validate_numeric,
+  # but their product can still overflow $(( )); bound the pair so the product
+  # stays representable. Both are validated `positive` above, so _backoff >= 1
+  # and the division is safe.
+  _recovery=$(strip_leading_zeros "$COMMS_RECOVERY_TIMEOUT")
+  _backoff=$(strip_leading_zeros "$COMMS_BACKOFF_FACTOR")
+  if [ "$_recovery" -gt $((SHELL_SAFE_INTEGER_MAX / _backoff)) ]; then
+    printf 'level=error msg="watchdog recovery interval product is too large" recovery_timeout=%s backoff_factor=%s\n' "$_recovery" "$_backoff" >&2
+    exit 1
+  fi
 
   # UPS_PORT shape depends on the driver's transport (see driver_transport):
   #   usb   — "auto" (USB auto-detection) or an explicit /dev/* node

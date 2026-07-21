@@ -112,12 +112,14 @@ wait_for_pidfile() {
 # exited by the supervision loop). Only the wildcard binds (and the localhost
 # alias) map to loopback; every specific bind — including 127.0.0.2-style
 # loopback addresses, which a 127.0.0.1 probe cannot reach — passes through
-# and is probed exactly where upsd listens. The IPv6 wildcard maps to the
-# bracketed [::1] form NUT documents for IPv6 host:port syntax.
+# and is probed exactly where upsd listens. Every IPv6 literal is bracketed
+# (the wildcard as [::1], specific addresses as [<addr>]) because NUT's
+# host:port syntax requires brackets around any colon-bearing host.
 upsd_probe_host() {
   case "${API_ADDRESS:-0.0.0.0}" in
     0.0.0.0 | localhost) printf '127.0.0.1' ;;
     ::) printf '[::1]' ;;
+    *:*) printf '[%s]' "${API_ADDRESS}" ;;
     *) printf '%s' "${API_ADDRESS}" ;;
   esac
 }
