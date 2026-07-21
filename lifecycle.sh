@@ -21,13 +21,21 @@ readonly STOP_CMD_TIMEOUT=3
 stop_nut_cmd() {
   _stop_label="$1"
   shift
-  if _stop_out=$(timeout "$STOP_CMD_TIMEOUT" "$@" 2>&1); then
-    return 0
+  # Capture via temp file, not $(): a TERM-ignoring control client would keep
+  # the pipe's write end open past timeout's TERM and hold PID 1 inside the
+  # signal trap indefinitely, defeating this function's stated purpose (Docker's
+  # 10s SIGKILL as the only backstop). A regular-file read never blocks. No -k:
+  # the documented 3x3=9s stop-budget math stays unchanged.
+  _stop_out_file=$(mktemp /var/run/nut-secrets/stop-cmd.XXXXXX 2>/dev/null) || _stop_out_file="/dev/null"
+  if timeout "$STOP_CMD_TIMEOUT" "$@" >"$_stop_out_file" 2>&1; then
+    :
   else
     _stop_rc=$?
+    _stop_out=$(head -c 512 "$_stop_out_file" 2>/dev/null || true)
     printf 'level=warn msg="%s stop failed (may already be stopped)" rc=%d detail="%s"\n' \
       "$_stop_label" "$_stop_rc" "$(log_value "$_stop_out")" >&2
   fi
+  [ "$_stop_out_file" = "/dev/null" ] || rm -f "$_stop_out_file"
   return 0
 }
 
@@ -50,16 +58,13 @@ stop_services() {
 # changed. Polls every PIDFILE_POLL_INTERVAL up to total timeout. Returns 0
 # on success, 1 on timeout.
 wait_for_pidfile() {
-  # Required variables — fail fast if caller forgot to set them.
-  : "${PIDFILE_POLL_INTERVAL:?wait_for_pidfile requires PIDFILE_POLL_INTERVAL}"
-  : "${PIDFILE_POLL_MAX:?wait_for_pidfile requires PIDFILE_POLL_MAX}"
   # $1 = label, $2 = absolute PID file path, $3 = expected daemon binary.
   # Resolve the expected side once so driver symlinks compare canonically
   # against /proc/<pid>/exe (which the kernel resolves).
   : "${3:?wait_for_pidfile requires an expected binary path}"
   _wf_exe=$(readlink -f "$3" 2>/dev/null) || _wf_exe="$3"
-  i=0
-  while [ $i -lt "$PIDFILE_POLL_MAX" ]; do
+  _wf_i=0
+  while [ "$_wf_i" -lt "$PIDFILE_POLL_MAX" ]; do
     # Pidfiles live in the nut-writable /var/run/nut; only trust strictly
     # numeric content (mirrors restart_ups_driver's confused-deputy guard).
     _wf_pid=$(cat "$2" 2>/dev/null || true)
@@ -77,7 +82,7 @@ wait_for_pidfile() {
       *) ;; # all-zero PID: `kill -0 0` signals the caller's own process group — refuse
     esac
     sleep "$PIDFILE_POLL_INTERVAL"
-    i=$((i + 1))
+    _wf_i=$((_wf_i + 1))
   done
   printf 'level=error msg="%s did not write a valid PID file in time" path=%s polls=%d interval=%s\n' \
     "$1" "$2" "$PIDFILE_POLL_MAX" "$PIDFILE_POLL_INTERVAL" >&2
@@ -131,7 +136,7 @@ upsd_responsive() {
   # after up to 5s of foreground upsc — that 5s would push worst-case teardown
   # to 14s, past Docker's 10s stop budget (see STOP_CMD_TIMEOUT above).
   # The orphaned upsc self-terminates within its own 5s timeout.
-  timeout 5 upsc -l "$(upsd_probe_host):${API_PORT}" >/dev/null 2>&1 &
+  timeout 5 upsc -l "$(upsd_probe_host):${API_PORT:-3493}" >/dev/null 2>&1 &
   wait $!
 }
 
@@ -223,16 +228,26 @@ restart_ups_driver() {
   fi
   rm -f "$_pf"
   # 90s > NUT's 75s default maxstartdelay, so timeout only fires on a genuine wedge.
-  if _out=$(timeout 90 /usr/sbin/upsdrvctl start "$UPS_NAME" 2>&1); then
+  # Capture via temp file, not $(): command substitution reads the pipe until
+  # EOF, and a wedged pre-daemonize driver grandchild keeps the write end open
+  # past timeout's TERM of upsdrvctl — blocking the watchdog subshell forever
+  # (exactly the wedge this timeout exists for). A regular-file read never
+  # blocks. -k 5 hard-kills a TERM-ignoring upsdrvctl like the boot path does.
+  # The temp file lives in the root-only /var/run/nut-secrets, consistent with
+  # the existing symlink-hardening rationale.
+  _out_file=$(mktemp /var/run/nut-secrets/wd-restart.XXXXXX 2>/dev/null) || _out_file="/dev/null"
+  if timeout -k 5 90 /usr/sbin/upsdrvctl start "$UPS_NAME" >"$_out_file" 2>&1; then
     printf 'level=info msg="comms watchdog driver restart issued" ups=%s\n' "$UPS_NAME" >&2
   else
     # Capture the exit status (124 = timeout) so a silent failure still names
     # its class; log_value flattens CR/tab/control bytes that the previous
     # LF-only sanitizer let split or corrupt the logfmt record.
     _rc=$?
+    _out=$(head -c 512 "$_out_file" 2>/dev/null || true)
     printf 'level=error msg="comms watchdog driver restart failed" ups=%s rc=%d detail="%s"\n' \
       "$UPS_NAME" "$_rc" "$(log_value "$_out")" >&2
   fi
+  [ "$_out_file" = "/dev/null" ] || rm -f "$_out_file"
   # Signal that a real restart was attempted (distinct from the killpower
   # stand-down's non-zero return) so comms_watchdog counts it against the budget.
   return 0
@@ -328,7 +343,7 @@ comms_watchdog() {
 # nut-shutdown.sh will call during a forced shutdown.
 dbus_poweroff_path_ok() {
   [ -S /run/dbus/system_bus_socket ] || return 1
-  dbus-send --system --print-reply --reply-timeout="$DBUS_PROBE_REPLY_TIMEOUT_MS" \
+  timeout 5 dbus-send --system --print-reply --reply-timeout="$DBUS_PROBE_REPLY_TIMEOUT_MS" \
     --dest=org.freedesktop.login1 /org/freedesktop/login1 \
     org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1
 }

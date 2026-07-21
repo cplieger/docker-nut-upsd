@@ -92,10 +92,14 @@ USERSEOF
 # restart_ups_driver). Every legitimate actor is root: upsmon's privileged
 # parent writes the flag on FSD, the entrypoint clears it at boot, the
 # watchdog tests it, and nut-shutdown.sh clears it on a failed poweroff.
+# The MONITOR host comes from upsd_probe_host (lifecycle.sh, sourced before
+# this runs): upsd binds ONLY the LISTEN address generated from API_ADDRESS,
+# so upsmon must connect where upsd actually listens — the same mapping the
+# comms watchdog probe and the Dockerfile HEALTHCHECK apply.
 generate_upsmon_conf() {
   use_user_override upsmon.conf && return 0
   cat >/etc/nut/upsmon.conf <<MONEOF
-MONITOR $UPS_NAME@127.0.0.1:$API_PORT 1 "$API_USER" "$API_PASSWORD" primary
+MONITOR $UPS_NAME@$(upsd_probe_host):$API_PORT 1 "$API_USER" "$API_PASSWORD" primary
 SHUTDOWNCMD "$SHUTDOWN_CMD"
 POWERDOWNFLAG /var/run/nut-secrets/killpower
 NOTIFYCMD /usr/local/bin/nut-notify.sh

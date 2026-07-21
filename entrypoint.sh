@@ -131,9 +131,9 @@ generate_all_configs
 # ---------------------------------------------------------------------------
 # Permissions
 # ---------------------------------------------------------------------------
-chown -R root:nut /etc/nut
+find /etc/nut ! -name '*.user' -exec chown root:nut {} +
 find /etc/nut -type d -exec chmod 750 {} +
-find /etc/nut -type f -exec chmod 640 {} +
+find /etc/nut -type f ! -name '*.user' -exec chmod 640 {} +
 if usb_bus_required; then
   if chgrp -R nut /dev/bus/usb 2>/dev/null; then
     printf 'level=info msg="chgrp nut:/dev/bus/usb applied (host device nodes)"\n' >&2
@@ -148,18 +148,24 @@ fi
 # Start NUT services with signal handling
 # ---------------------------------------------------------------------------
 
+# stop_bg_pid: kill and reap one background loop by PID; no-op for an empty
+# PID (not started / already stopped).
+stop_bg_pid() {
+  [ -n "$1" ] || return 0
+  kill "$1" 2>/dev/null || true
+  wait "$1" 2>/dev/null || true
+}
+
 # Background comms-watchdog PID (empty until started below). stop_watchdog is
 # safe to call before the watchdog starts and after it has exited.
 WATCHDOG_PID=""
 stop_watchdog() {
-  [ -n "${WATCHDOG_PID:-}" ] || return 0
-  kill "$WATCHDOG_PID" 2>/dev/null || true
   # Reap the watchdog subshell before the caller runs stop_services. Note: a SIGTERM
   # that lands while the subshell is mid-`upsdrvctl start` kills the subshell
   # immediately and orphans that child, so `wait` reaps the subshell but the orphan
   # may briefly race stop_services' `upsdrvctl stop`. Harmless at teardown —
   # next boot clears stale pidfiles.
-  wait "$WATCHDOG_PID" 2>/dev/null || true
+  stop_bg_pid "${WATCHDOG_PID:-}"
   WATCHDOG_PID=""
 }
 
@@ -167,9 +173,7 @@ stop_watchdog() {
 # enabled). Same lifecycle contract as stop_watchdog above.
 DBUS_PROBE_PID=""
 stop_dbus_probe() {
-  [ -n "${DBUS_PROBE_PID:-}" ] || return 0
-  kill "$DBUS_PROBE_PID" 2>/dev/null || true
-  wait "$DBUS_PROBE_PID" 2>/dev/null || true
+  stop_bg_pid "${DBUS_PROBE_PID:-}"
   DBUS_PROBE_PID=""
 }
 
@@ -210,39 +214,39 @@ if [ -e /var/run/nut-secrets/killpower ]; then
   rm -f /var/run/nut-secrets/killpower
 fi
 
-printf 'level=info msg="starting upsdrvctl"\n' >&2
+# start_nut_daemon LABEL TIMEOUT CMD...: start one NUT daemon bounded by
+# `timeout -k 5 TIMEOUT` (hard bound past NUT's own start delays; -k 5 hard-kills
+# a child that ignores TERM at expiry). Background + wait (mirroring the
+# supervision loop's sleep) so a SIGTERM during boot interrupts `wait` and runs
+# graceful_shutdown at once instead of being deferred for up to the full
+# timeout — past Docker's 10s stop budget. On failure: log, stop services,
+# exit 1.
+start_nut_daemon() {
+  _sd_label="$1"
+  _sd_timeout="$2"
+  shift 2
+  printf 'level=info msg="starting %s"\n' "$_sd_label" >&2
+  timeout -k 5 "$_sd_timeout" "$@" &
+  if wait $!; then
+    :
+  else
+    _sd_rc=$?
+    printf 'level=error msg="%s start failed or timed out at boot" rc=%d\n' "$_sd_label" "$_sd_rc" >&2
+    stop_services
+    exit 1
+  fi
+}
+
 # timeout 90 > NUT's 75s default maxstartdelay (matches the watchdog's restart
-# path), so it only fires on a genuine wedge; -k 5 hard-kills a child that
-# ignores the TERM at expiry so the bound is genuinely hard. Background + wait
-# (mirroring the supervision loop's sleep) so a SIGTERM during boot interrupts
-# `wait` and runs graceful_shutdown at once instead of being deferred for up
-# to the full timeout — past Docker's 10s stop budget.
-timeout -k 5 90 /usr/sbin/upsdrvctl start &
-if wait $!; then
-  :
-else
-  _start_rc=$?
-  printf 'level=error msg="upsdrvctl start failed or timed out at boot" rc=%d\n' "$_start_rc" >&2
-  stop_services
-  exit 1
-fi
+# path), so it only fires on a genuine wedge.
+start_nut_daemon "upsdrvctl" 90 /usr/sbin/upsdrvctl start
 # NUT drivers write /var/run/nut/<driver>-<ups>.pid on successful start.
 wait_for_pidfile "UPS driver" "$(driver_pidfile)" "/usr/lib/nut/$UPS_DRIVER" || {
   stop_services
   exit 1
 }
 
-printf 'level=info msg="starting upsd"\n' >&2
-# Background + wait for the same trap-interruptibility as upsdrvctl above.
-timeout -k 5 30 /usr/sbin/upsd &
-if wait $!; then
-  :
-else
-  _start_rc=$?
-  printf 'level=error msg="upsd start failed or timed out at boot" rc=%d\n' "$_start_rc" >&2
-  stop_services
-  exit 1
-fi
+start_nut_daemon "upsd" 30 /usr/sbin/upsd
 wait_for_pidfile "upsd" "/var/run/nut/upsd.pid" /usr/sbin/upsd || {
   stop_services
   exit 1

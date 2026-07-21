@@ -19,7 +19,7 @@ The container runs the Network UPS Tools (NUT) upsd daemon in Alpine Linux. The 
 - Exposes the standard NUT protocol on port 3493 for network clients
 - Optional host shutdown via D-Bus when the UPS reaches critical battery (`SHUTDOWN_ON_BATTERY_CRITICAL=true`)
 - Survives UPS-initiated USB re-enumeration — a built-in comms watchdog re-homes the driver onto the re-enumerated device automatically (see [USB hotplug & comms recovery](#usb-hotplug--comms-recovery))
-- Custom config override: mount your own NUT config files as `*.user` (e.g. `ups.conf.user`) into `/etc/nut/` to bypass env-var generation
+- Custom config override: mount your own NUT config files as `*.user` (e.g. `ups.conf.user`) into `/etc/nut/` to bypass env-var generation. If you mount `ups.conf.user`, keep its section name (`[...]`) equal to `UPS_NAME` — the healthcheck, the generated `upsmon.conf` MONITOR line, and the comms watchdog all address the UPS by `UPS_NAME`, so a mismatched section name reports permanently unhealthy and makes the watchdog restart a nonexistent UPS
 - Configurable low-battery and critical-battery thresholds
 - Clean signal handling — SIGTERM gracefully stops all NUT services
 
@@ -186,6 +186,15 @@ topology or mount removal can quarantine that capability away from
 the daemon. The meaningful hardening surface is the listener itself —
 strong `API_PASSWORD`/`ADMIN_PASSWORD` credentials and limiting who
 can reach port 3493.
+
+One host-side effect to know about: because `/dev/bus/usb` is a live
+bind of the host bus, the container's startup and watchdog
+`chgrp -R nut /dev/bus/usb` retag every host USB device node to the
+container's `nut` GID (an Alpine system GID). If that numeric GID is
+assigned to a group on the host, members of that host group gain
+read/write access (default `0664` node mode) to all USB devices. If
+that matters for your host, run the container under a user namespace
+remap, or reserve the matching host GID for a dedicated group.
 
 **Details for advanced users:** NUT is built with
 `--disable-shared --enable-static` so all binaries are

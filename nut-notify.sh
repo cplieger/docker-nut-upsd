@@ -13,7 +13,6 @@ log_value() {
 }
 
 NOTIFYTYPE="${NOTIFYTYPE:-unknown}"
-level=info
 case "$NOTIFYTYPE" in
   ONLINE | COMMOK) level=info ;;
   ONBATT | LOWBATT | COMMBAD | NOCOMM | REPLBATT) level=warn ;;
