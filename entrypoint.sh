@@ -158,19 +158,22 @@ else
   fi
 fi
 
-# Clear stale, unselected TLS working copies from a previous lifecycle (mount
-# removed or API_TLS toggled off): they persist in the writable layer and the
-# mounted-PEM copy holds withdrawn private-key material nut-readable. Only when
-# no upsd.conf.user override is mounted -- a mounted override may legitimately
-# reference either working-copy path (README 'TLS (STARTTLS)').
-if [ ! -e /etc/nut/upsd.conf.user ]; then
-  if [ "$API_TLS" != "true" ]; then
-    rm -f /etc/nut/upsd-mounted.pem /etc/nut/upsd-selfsigned.pem
-  elif [ "$TLS_CERT_PATH" = "/etc/nut/upsd-mounted.pem" ]; then
-    rm -f /etc/nut/upsd-selfsigned.pem
-  else
-    rm -f /etc/nut/upsd-mounted.pem
-  fi
+# Reconcile the two managed TLS working copies to the current selection —
+# always, even with an upsd.conf.user override mounted. resolve_tls_cert
+# provisions exactly one source per boot (mounted-PEM precedence, README 'TLS
+# (STARTTLS)'), so any unselected copy is withdrawn private-key material from
+# a previous lifecycle (mount removed or API_TLS toggled off) persisting
+# nut-readable in the writable layer. An override naming a withdrawn source
+# now fails visibly at upsd startup instead of silently serving stale key
+# material; overrides naming the currently provisioned source keep working.
+# set -u safe: $TLS_CERT_PATH is only read on the API_TLS=true branch, where
+# resolve_tls_cert (above) guarantees it is set.
+if [ "$API_TLS" != "true" ]; then
+  rm -f "$TLS_CERT_MOUNTED_RUNTIME" "$TLS_CERT_RUNTIME"
+elif [ "$TLS_CERT_PATH" = "$TLS_CERT_MOUNTED_RUNTIME" ]; then
+  rm -f "$TLS_CERT_RUNTIME"
+else
+  rm -f "$TLS_CERT_MOUNTED_RUNTIME"
 fi
 
 # ---------------------------------------------------------------------------
@@ -273,11 +276,11 @@ fi
 # removed by the resolve_* calls above, and the capture temps are created
 # later.
 rm -f /var/run/nut-secrets/wd-restart.* /var/run/nut-secrets/stop-cmd.* \
-  /var/run/nut-secrets/admin_password.tmp.* \
-  /var/run/nut-secrets/local_upsmon_password.tmp.* \
-  /var/run/nut-secrets/upsd-selfsigned.pem.tmp.* \
-  /etc/nut/upsd-selfsigned.pem.tmp.* \
-  /etc/nut/upsd-mounted.pem.tmp.*
+  "${ADMIN_PASSWORD_FILE}.tmp."* \
+  "${LOCAL_UPSMON_PASSWORD_FILE}.tmp."* \
+  "${TLS_CERT_CACHE}.tmp."* \
+  "${TLS_CERT_RUNTIME}.tmp."* \
+  "${TLS_CERT_MOUNTED_RUNTIME}.tmp."*
 
 # Clear a stale POWERDOWNFLAG (killpower) from a previous lifecycle. upsmon
 # creates it on FSD; /var/run/nut-secrets is the writable layer so it survives

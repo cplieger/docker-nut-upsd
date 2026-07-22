@@ -4,7 +4,7 @@ FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6ee
 
 SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
 
-RUN apk add --no-cache automake build-base clang libtool lld perl pkgconf \
+RUN apk add --no-cache automake build-base clang libtool lld patch perl pkgconf \
         libusb-compat-dev openssl-dev linux-headers
 
 # renovate: datasource=github-releases depName=stephane/libmodbus
@@ -72,11 +72,18 @@ ARG NUT_VERSION=v2.8.5
 # curl -sL https://github.com/networkupstools/nut/releases/download/<vX.Y.Z>/nut-<X.Y.Z>.tar.gz | sha256sum
 ARG NUT_SHA256=18bf32e59eb764b13da3c4fa70384926d7fa584cb31d2fe7f137a570633eeec1
 WORKDIR /build/nut
+# CVE-2026-54161 / GHSA-mjgp-j4gm-6qg5 backport (see the patch header): v2.8.5
+# ships upsmon/upssched invoking NOTIFYCMD/CMDSCRIPT via system() with
+# server-controlled text interpolated into the shell command. Applied strictly
+# (--fuzz=0) so source drift on a version bump fails the build loudly instead
+# of silently shipping unpatched binaries. Remove with NUT_VERSION >= v2.8.6.
+COPY patches/cve-2026-54161-notifycmd-execvp.patch /build/patches/
 RUN wget -qO nut.tar.gz \
       "https://github.com/networkupstools/nut/releases/download/${NUT_VERSION}/nut-${NUT_VERSION#v}.tar.gz" \
     && printf '%s  %s\n' "${NUT_SHA256}" nut.tar.gz | sha256sum -c - \
     && tar xz --strip-components=1 -f nut.tar.gz \
     && rm nut.tar.gz \
+    && patch -p1 --fuzz=0 -i /build/patches/cve-2026-54161-notifycmd-execvp.patch \
     && PKG_CONFIG_LIBDIR="/usr/lib/pkgconfig" \
        LIBS="-lssl -lcrypto" \
        ac_cv_func_setpgrp_void=yes \
