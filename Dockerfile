@@ -121,8 +121,12 @@ RUN wget -qO nut.tar.gz \
 # version ARGs the builds use — a Renovate bump keeps the SBOM correct with
 # zero extra maintenance — and ship it in the runtime image where Syft's
 # *.cdx.json cataloger picks it up (see the COPY in the runtime stage).
-# The VEX entry documents the CVE-2026-54161 backport applied above; remove
-# it together with the patch at NUT_VERSION >= v2.8.6.
+# The VEX entry ships in-image and documents the CVE-2026-54161 backport
+# applied above for anyone scanning the embedded fragment; the SIGNED
+# release SBOM (SPDX) carries the component inventory only — SPDX has no
+# VEX analysis channel, so the resolved-state never reaches the signed
+# attestation (a dedicated VEX attestation is pipeline-side future work).
+# Remove the entry together with the patch at NUT_VERSION >= v2.8.6.
 RUN cat > /out/nut-upsd.cdx.json <<EOF
 {
   "bomFormat": "CycloneDX",
