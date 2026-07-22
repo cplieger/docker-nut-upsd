@@ -200,7 +200,8 @@ net-snmp — generated at build time from the same Renovate-tracked
 version ARGs the builds use, so version bumps keep it accurate — with
 purl/CPE identifiers for advisory matching and a VEX entry documenting
 the backported CVE-2026-54161 fix. Syft picks it up via its SBOM
-cataloger (`--select-catalogers "+sbom-cataloger"`).
+cataloger (`--select-catalogers "+sbom-cataloger"`), which the
+committed `.syft.yaml` enables for this repo's signed release SBOM.
 
 | Tool                                             | Result                                                                                            |
 | ------------------------------------------------ | ------------------------------------------------------------------------------------------------- |

@@ -943,7 +943,9 @@ else
   done
   # Each component carries a version-shaped value (ARG-derived, leading v
   # stripped): assert three "version": "X.Y..." occurrences.
-  versions=$(grep -c '"version": "[0-9][0-9.]*"' "$SBOM")
+  # grep -c prints the count (0 included) even when it exits 1 on zero
+  # matches; || true keeps set -e from aborting before the FAIL report.
+  versions=$(grep -c '"version": "[0-9][0-9.]*"' "$SBOM" || true)
   if [ "$versions" -ne 3 ]; then
     err "FAIL: embedded SBOM fragment has $versions version-shaped component versions (want 3)"
     fail=1

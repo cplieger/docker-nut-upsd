@@ -100,10 +100,14 @@ new generated file should respect that same override hook.
   `patch -p1 --fuzz=0` (strict, so source drift on a version bump fails
   the build loudly instead of silently shipping unpatched binaries).
   Each patch header names its upstream commit and removal condition -
-  e.g. the CVE-2026-54161 NOTIFYCMD/execvp backport is removed (patch
-  file + Dockerfile COPY/apply step together) once `NUT_VERSION` reaches
-  v2.8.6. A failing `patch` step on a NUT version bump usually means the
-  fix landed upstream: drop the patch rather than re-diffing it.
+  e.g. the CVE-2026-54161 NOTIFYCMD/execvp backport is removed once
+  `NUT_VERSION` reaches v2.8.6 — four coupled sites go together: the
+  patch file, the Dockerfile COPY/apply step, the CVE's VEX entry in the
+  Dockerfile's SBOM-fragment RUN, and the smoke test's section-8
+  `CVE-2026-54161` assertion (and refresh the README Security paragraph
+  that describes the VEX entry). A failing `patch` step on a NUT version
+  bump usually means the fix landed upstream: drop the patch rather than
+  re-diffing it.
 - **USB re-enumeration is expected, not exceptional.** Many UPSes reset
   their USB link periodically (the driver runs fine, then goes "Data
   stale"). The `comms_watchdog` in `lifecycle.sh` recovers from this by

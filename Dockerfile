@@ -123,17 +123,51 @@ RUN wget -qO nut.tar.gz \
 # *.cdx.json cataloger picks it up (see the COPY in the runtime stage).
 # The VEX entry documents the CVE-2026-54161 backport applied above; remove
 # it together with the patch at NUT_VERSION >= v2.8.6.
-RUN { \
-      printf '{\n  "bomFormat": "CycloneDX",\n  "specVersion": "1.5",\n  "version": 1,\n  "components": [\n' \
-      && printf '    {\n      "bom-ref": "pkg:github/networkupstools/nut@%s",\n      "type": "application",\n      "name": "nut",\n      "version": "%s",\n      "purl": "pkg:github/networkupstools/nut@%s",\n      "cpe": "cpe:2.3:a:networkupstools:nut:%s:*:*:*:*:*:*:*"\n    },\n' \
-           "${NUT_VERSION}" "${NUT_VERSION#v}" "${NUT_VERSION}" "${NUT_VERSION#v}" \
-      && printf '    {\n      "bom-ref": "pkg:github/stephane/libmodbus@%s",\n      "type": "library",\n      "name": "libmodbus",\n      "version": "%s",\n      "purl": "pkg:github/stephane/libmodbus@%s",\n      "cpe": "cpe:2.3:a:libmodbus:libmodbus:%s:*:*:*:*:*:*:*"\n    },\n' \
-           "${LIBMODBUS_VERSION}" "${LIBMODBUS_VERSION#v}" "${LIBMODBUS_VERSION}" "${LIBMODBUS_VERSION#v}" \
-      && printf '    {\n      "bom-ref": "pkg:github/net-snmp/net-snmp@%s",\n      "type": "library",\n      "name": "net-snmp",\n      "version": "%s",\n      "purl": "pkg:github/net-snmp/net-snmp@%s",\n      "cpe": "cpe:2.3:a:net-snmp:net-snmp:%s:*:*:*:*:*:*:*"\n    }\n' \
-           "${NETSNMP_VERSION}" "${NETSNMP_VERSION#v}" "${NETSNMP_VERSION}" "${NETSNMP_VERSION#v}" \
-      && printf '  ],\n  "vulnerabilities": [\n    {\n      "id": "CVE-2026-54161",\n      "analysis": {\n        "state": "resolved",\n        "detail": "Built with the checked-in backport patches/cve-2026-54161-notifycmd-execvp.patch (upstream ecf98e7542e4ae2b62b211622ee26989274b2220) applied at build time; remove this entry with the patch at NUT_VERSION >= v2.8.6."\n      },\n      "affects": [\n        { "ref": "pkg:github/networkupstools/nut@%s" }\n      ]\n    }\n  ]\n}\n' \
-           "${NUT_VERSION}"; \
-    } > /out/nut-upsd.cdx.json
+RUN cat > /out/nut-upsd.cdx.json <<EOF
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "version": 1,
+  "components": [
+    {
+      "bom-ref": "pkg:github/networkupstools/nut@${NUT_VERSION}",
+      "type": "application",
+      "name": "nut",
+      "version": "${NUT_VERSION#v}",
+      "purl": "pkg:github/networkupstools/nut@${NUT_VERSION}",
+      "cpe": "cpe:2.3:a:networkupstools:nut:${NUT_VERSION#v}:*:*:*:*:*:*:*"
+    },
+    {
+      "bom-ref": "pkg:github/stephane/libmodbus@${LIBMODBUS_VERSION}",
+      "type": "library",
+      "name": "libmodbus",
+      "version": "${LIBMODBUS_VERSION#v}",
+      "purl": "pkg:github/stephane/libmodbus@${LIBMODBUS_VERSION}",
+      "cpe": "cpe:2.3:a:libmodbus:libmodbus:${LIBMODBUS_VERSION#v}:*:*:*:*:*:*:*"
+    },
+    {
+      "bom-ref": "pkg:github/net-snmp/net-snmp@${NETSNMP_VERSION}",
+      "type": "library",
+      "name": "net-snmp",
+      "version": "${NETSNMP_VERSION#v}",
+      "purl": "pkg:github/net-snmp/net-snmp@${NETSNMP_VERSION}",
+      "cpe": "cpe:2.3:a:net-snmp:net-snmp:${NETSNMP_VERSION#v}:*:*:*:*:*:*:*"
+    }
+  ],
+  "vulnerabilities": [
+    {
+      "id": "CVE-2026-54161",
+      "analysis": {
+        "state": "resolved",
+        "detail": "Built with the checked-in backport patches/cve-2026-54161-notifycmd-execvp.patch (upstream ecf98e7542e4ae2b62b211622ee26989274b2220) applied at build time; remove this entry with the patch at NUT_VERSION >= v2.8.6."
+      },
+      "affects": [
+        { "ref": "pkg:github/networkupstools/nut@${NUT_VERSION}" }
+      ]
+    }
+  ]
+}
+EOF
 
 FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS runtime
 
