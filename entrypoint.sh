@@ -158,6 +158,21 @@ else
   fi
 fi
 
+# Clear stale, unselected TLS working copies from a previous lifecycle (mount
+# removed or API_TLS toggled off): they persist in the writable layer and the
+# mounted-PEM copy holds withdrawn private-key material nut-readable. Only when
+# no upsd.conf.user override is mounted -- a mounted override may legitimately
+# reference either working-copy path (README 'TLS (STARTTLS)').
+if [ ! -e /etc/nut/upsd.conf.user ]; then
+  if [ "$API_TLS" != "true" ]; then
+    rm -f /etc/nut/upsd-mounted.pem /etc/nut/upsd-selfsigned.pem
+  elif [ "$TLS_CERT_PATH" = "/etc/nut/upsd-mounted.pem" ]; then
+    rm -f /etc/nut/upsd-selfsigned.pem
+  else
+    rm -f /etc/nut/upsd-mounted.pem
+  fi
+fi
+
 # ---------------------------------------------------------------------------
 # Generate NUT config files (from generate-config.sh)
 # ---------------------------------------------------------------------------
