@@ -33,11 +33,14 @@ set -eu
 # filter and obstructs — or, for a followed symlink, redirects — the root
 # daemon's later pidfile write. We own this directory and no other process
 # can legitimately hold these paths at boot. -delete unlinks every type and
-# rmdirs an empty directory but fails on a non-empty one, so fail loud
-# instead of booting past a surviving obstruction.
+# rmdirs an empty directory, but BusyBox find's exit code stays 0 when a
+# non-empty directory at a *.pid path survives the delete, so the re-scan
+# below enforces the pathname postcondition instead of trusting the exit
+# status — fail loud rather than booting past a surviving obstruction.
 if find /var/run/nut -maxdepth 1 -name '*.pid' 2>/dev/null | grep -q .; then
   printf 'level=info msg="clearing stale NUT PID paths from previous lifecycle" path=/var/run/nut\n' >&2
-  if ! find /var/run/nut -maxdepth 1 -name '*.pid' -delete 2>/dev/null; then
+  find /var/run/nut -maxdepth 1 -name '*.pid' -delete 2>/dev/null || true
+  if find /var/run/nut -maxdepth 1 -name '*.pid' 2>/dev/null | grep -q .; then
     printf 'level=error msg="failed to clear a stale NUT PID path; refusing to start" path=/var/run/nut\n' >&2
     exit 1
   fi
