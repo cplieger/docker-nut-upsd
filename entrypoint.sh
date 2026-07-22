@@ -270,18 +270,24 @@ if find /var/run/nut -maxdepth 1 -name '*.pid' -type f 2>/dev/null | grep -q .; 
 fi
 
 # Clear temp files leaked by a kill that landed between mktemp and rm -f/mv
-# in lifecycle.sh's capture helpers (start_recovered_driver, stop_nut_cmd) or
-# the password/TLS-certificate resolvers (password.sh); they live in the
-# writable layer and would otherwise accumulate across container restarts.
-# Safe here: this run's own password and TLS temps were already renamed or
-# removed by the resolve_* calls above, and the capture temps are created
-# later.
+# in lifecycle.sh's capture helpers (start_recovered_driver, stop_nut_cmd),
+# the password/TLS-certificate resolvers (password.sh), or the
+# mounted-override staging install (generate-config.sh use_user_override);
+# they live in the writable layer and would otherwise accumulate across
+# container restarts. Safe here: this run's own password, TLS, and override
+# temps were already renamed or removed by the resolve_* /
+# generate_all_configs calls above, and the capture temps are created later.
+# The override globs are literals because use_user_override builds its
+# destination dynamically from its argument; the four names below are the
+# four generate_* callers' destinations.
 rm -f "$WD_RESTART_CAPTURE_PREFIX".* "$STOP_CMD_CAPTURE_PREFIX".* \
   "${ADMIN_PASSWORD_FILE}.tmp."* \
   "${LOCAL_UPSMON_PASSWORD_FILE}.tmp."* \
   "${TLS_CERT_CACHE}.tmp."* \
   "${TLS_CERT_RUNTIME}.tmp."* \
-  "${TLS_CERT_MOUNTED_RUNTIME}.tmp."*
+  "${TLS_CERT_MOUNTED_RUNTIME}.tmp."* \
+  /etc/nut/ups.conf.tmp.* /etc/nut/upsd.conf.tmp.* \
+  /etc/nut/upsd.users.tmp.* /etc/nut/upsmon.conf.tmp.*
 
 # Clear a stale POWERDOWNFLAG (killpower) from a previous lifecycle. upsmon
 # creates it on FSD; /var/run/nut-secrets is the writable layer so it survives
