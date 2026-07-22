@@ -207,6 +207,24 @@ if ! grep -q 'level=error msg="mounted override path is not a regular file' "$FI
   fail=1
 fi
 rm -f /etc/nut/ups.conf.user "$FIFO_ERR"
+#    Dangling-symlink override: -e follows the link, so a broken symlink must
+#    fall back to generation (boot continues) but be named at level=warn
+#    rather than dropped silently.
+ln -s /etc/nut/does-not-exist /etc/nut/ups.conf.user
+DANGLE_ERR=$(mktemp)
+if ! generate_ups_conf >/dev/null 2>"$DANGLE_ERR"; then
+  err "FAIL: dangling-symlink ups.conf.user aborted generation instead of falling back"
+  fail=1
+fi
+if ! grep -q 'level=warn msg="mounted override path is a dangling symlink' "$DANGLE_ERR"; then
+  err "FAIL: dangling-symlink override was not logged at level=warn"
+  fail=1
+fi
+rm -f /etc/nut/ups.conf.user "$DANGLE_ERR"
+grep -q '^\[ups\]' /etc/nut/ups.conf || {
+  err "FAIL: fallback generation did not write ups.conf"
+  fail=1
+}
 
 # resolve_local_upsmon_password (password.sh): generates a PASSWORD_LENGTH-char
 # secret, caches it root-only, and reuses the cache on the next resolve

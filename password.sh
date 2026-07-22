@@ -211,6 +211,12 @@ _install_selfsigned_cert() {
 # endpoint the operator left default-on must not silently degrade to
 # cleartext).
 resolve_tls_cert() {
+  # Same dangling-symlink diagnostic as use_user_override (generate-config.sh):
+  # -e follows the link, so a broken symlink at the mount path would silently
+  # fall through to the self-signed certificate.
+  if [ ! -e "$TLS_CERT_MOUNT" ] && [ -L "$TLS_CERT_MOUNT" ]; then
+    printf 'level=warn msg="mounted TLS certificate path is a dangling symlink; ignoring it and provisioning the self-signed certificate" path=%s\n' "$TLS_CERT_MOUNT" >&2
+  fi
   if [ -e "$TLS_CERT_MOUNT" ]; then
     # Refuse a non-regular mount (directory, FIFO, device node) up front: a
     # writer-less FIFO would block nut_can_read/openssl forever and hang the

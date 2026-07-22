@@ -8,7 +8,16 @@
 # If /etc/nut/<name>.user exists, copy it over /etc/nut/<name> and return 0
 # (caller skips generation). Return 1 otherwise.
 use_user_override() {
-  [ -e "/etc/nut/$1.user" ] || return 1
+  if [ ! -e "/etc/nut/$1.user" ]; then
+    # A dangling symlink (e.g. a mounted directory of symlinks with a broken
+    # target) fails -e and would silently drop the operator's override; name
+    # it before falling back to generation (warn-only: mirrors the fail-loud
+    # posture of the non-regular-file gate below without changing behavior).
+    if [ -L "/etc/nut/$1.user" ]; then
+      printf 'level=warn msg="mounted override path is a dangling symlink; ignoring it and generating the file" file=%s.user\n' "$1" >&2
+    fi
+    return 1
+  fi
   # Refuse a non-regular mount (directory, FIFO, device node) up front: cp of
   # a writer-less FIFO would block forever and hang config generation with no
   # log line. Mirrors the resolve_tls_cert gate on /etc/nut/upsd.pem.
