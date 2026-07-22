@@ -166,7 +166,7 @@ The scripts and Dockerfile are linted in CI; run the same tools before
 pushing:
 
 ```sh
-shellcheck *.sh
+shellcheck -x *.sh tests/*.sh
 hadolint Dockerfile
 docker build -t nut-upsd-test .
 ```

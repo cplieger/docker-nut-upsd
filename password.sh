@@ -24,7 +24,11 @@ _replace_file() {
   _rf_src="$1"
   _rf_dst="$2"
   [ ! -d "$_rf_dst" ] || return 1
-  mv "$_rf_src" "$_rf_dst"
+  if ! _rf_err=$(mv "$_rf_src" "$_rf_dst" 2>&1); then
+    printf 'level=warn msg="rename failed while installing file" dst=%s err="%s"\n' \
+      "$_rf_dst" "$(log_value "$_rf_err")" >&2
+    return 1
+  fi
 }
 
 # _resolve_cached_password LABEL CACHE_FILE: shared engine for the credentials
