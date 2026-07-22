@@ -13,6 +13,59 @@ set -eu
 # shellcheck source-path=SCRIPTDIR source=password.sh
 . /usr/local/bin/password.sh
 
+# ---------------------------------------------------------------------------
+# Prior-lifecycle reclamation
+# ---------------------------------------------------------------------------
+# Both blocks below clear artifacts a crashed or force-killed previous run
+# left in the writable layer. They run FIRST — before password/TLS resolution
+# and config generation — so crash-leaked files are reclaimed before any new
+# temp or generated-config write could hit exhausted blocks or inodes (a late
+# cleanup is unreachable under set -e exactly when it is needed most). Every
+# path constant used here is a readonly top-level definition in the helpers
+# sourced above, and no current-run temp can exist yet.
+
+# Clear stale driver/daemon PID paths from the nut-writable /var/run/nut.
+# PID files from a crashed previous run survive a `docker restart` and cause
+# upsdrvctl to trigger its "Duplicate driver instance detected" path, which
+# kills the freshly started driver seconds after launch. Match EVERY object
+# type at a reserved *.pid pathname, not just regular files: a symlink, FIFO,
+# socket, or directory planted there by the nut user survives a -type f
+# filter and obstructs — or, for a followed symlink, redirects — the root
+# daemon's later pidfile write. We own this directory and no other process
+# can legitimately hold these paths at boot. -delete unlinks every type and
+# rmdirs an empty directory but fails on a non-empty one, so fail loud
+# instead of booting past a surviving obstruction.
+if find /var/run/nut -maxdepth 1 -name '*.pid' 2>/dev/null | grep -q .; then
+  printf 'level=info msg="clearing stale NUT PID paths from previous lifecycle" path=/var/run/nut\n' >&2
+  if ! find /var/run/nut -maxdepth 1 -name '*.pid' -delete 2>/dev/null; then
+    printf 'level=error msg="failed to clear a stale NUT PID path; refusing to start" path=/var/run/nut\n' >&2
+    exit 1
+  fi
+fi
+
+# Clear temp files leaked by a kill that landed between mktemp and rm -f/mv
+# in lifecycle.sh's capture helpers (start_recovered_driver, stop_nut_cmd),
+# the password/TLS-certificate resolvers (password.sh), or the
+# mounted-override staging install (generate-config.sh use_user_override).
+# Root-owned paths, unlike /var/run/nut above. Everything matched is
+# crash-leaked: every producer runs later in this boot. The override globs
+# are literals because use_user_override builds its destination dynamically
+# from its argument; the four names below are the four generate_* callers'
+# destinations. Warn-only on failure: set -e must not turn one undeletable
+# stale artifact into an unannotated boot abort — the producers that later
+# need the space fail with their own structured errors if storage is still
+# unavailable.
+if ! rm -f "$WD_RESTART_CAPTURE_PREFIX".* "$STOP_CMD_CAPTURE_PREFIX".* \
+  "${ADMIN_PASSWORD_FILE}.tmp."* \
+  "${LOCAL_UPSMON_PASSWORD_FILE}.tmp."* \
+  "${TLS_CERT_CACHE}.tmp."* \
+  "${TLS_CERT_RUNTIME}.tmp."* \
+  "${TLS_CERT_MOUNTED_RUNTIME}.tmp."* \
+  /etc/nut/ups.conf.tmp.* /etc/nut/upsd.conf.tmp.* \
+  /etc/nut/upsd.users.tmp.* /etc/nut/upsmon.conf.tmp.*; then
+  printf 'level=warn msg="could not remove a crash-leaked temp file from a previous lifecycle; continuing" path_hint=/var/run/nut-secrets\n' >&2
+fi
+
 # Canonicalize every validated env var BEFORE any raw-value interpretation —
 # including the := defaults right below: an LF-only value (env-file artifact)
 # is non-empty raw, so it would dodge the documented default and then fail
@@ -257,37 +310,6 @@ trap graceful_shutdown TERM INT QUIT HUP
 
 printf 'level=info msg="starting NUT services" ups=%s driver=%s port=%s listen=%s:%s\n' \
   "$UPS_NAME" "$UPS_DRIVER" "$UPS_PORT" "$API_ADDRESS" "$API_PORT" >&2
-
-# Clear stale driver/daemon PID files from a previous container lifecycle.
-# /var/run/nut lives in the container's writable layer, so PID files from a
-# crashed or force-killed previous run survive a `docker restart` and cause
-# upsdrvctl to trigger its "Duplicate driver instance detected" path, which
-# kills the freshly started driver seconds after launch. We own this
-# directory and no other process can legitimately hold these PIDs at boot.
-if find /var/run/nut -maxdepth 1 -name '*.pid' -type f 2>/dev/null | grep -q .; then
-  printf 'level=info msg="clearing stale NUT PID files from previous lifecycle" path=/var/run/nut\n' >&2
-  find /var/run/nut -maxdepth 1 -name '*.pid' -type f -delete
-fi
-
-# Clear temp files leaked by a kill that landed between mktemp and rm -f/mv
-# in lifecycle.sh's capture helpers (start_recovered_driver, stop_nut_cmd),
-# the password/TLS-certificate resolvers (password.sh), or the
-# mounted-override staging install (generate-config.sh use_user_override);
-# they live in the writable layer and would otherwise accumulate across
-# container restarts. Safe here: this run's own password, TLS, and override
-# temps were already renamed or removed by the resolve_* /
-# generate_all_configs calls above, and the capture temps are created later.
-# The override globs are literals because use_user_override builds its
-# destination dynamically from its argument; the four names below are the
-# four generate_* callers' destinations.
-rm -f "$WD_RESTART_CAPTURE_PREFIX".* "$STOP_CMD_CAPTURE_PREFIX".* \
-  "${ADMIN_PASSWORD_FILE}.tmp."* \
-  "${LOCAL_UPSMON_PASSWORD_FILE}.tmp."* \
-  "${TLS_CERT_CACHE}.tmp."* \
-  "${TLS_CERT_RUNTIME}.tmp."* \
-  "${TLS_CERT_MOUNTED_RUNTIME}.tmp."* \
-  /etc/nut/ups.conf.tmp.* /etc/nut/upsd.conf.tmp.* \
-  /etc/nut/upsd.users.tmp.* /etc/nut/upsmon.conf.tmp.*
 
 # Clear a stale POWERDOWNFLAG (killpower) from a previous lifecycle. upsmon
 # creates it on FSD; /var/run/nut-secrets is the writable layer so it survives
