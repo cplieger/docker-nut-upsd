@@ -155,7 +155,7 @@ tls_cert_fingerprint() {
 # the boot aborts; a bare `mktemp || return 1` would exit the container with
 # only mktemp's own unstructured stderr as the diagnostic.
 _tls_mktemp() {
-  mktemp "$1.tmp.XXXXXX" || {
+  mktemp "$1.tmp.XXXXXX" 2>/dev/null || {
     printf 'level=error msg="mktemp failed while provisioning the TLS certificate" prefix=%s\n' "$1" >&2
     return 1
   }
