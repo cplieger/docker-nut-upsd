@@ -204,8 +204,9 @@ inventory into this repo's signed release SBOM via its SBOM cataloger
 (`--select-catalogers "+sbom-cataloger"`), which the committed
 `.syft.yaml` enables. The VEX entry lives in the embedded fragment
 itself (in-image, for anyone scanning the shipped file); the signed
-release SBOM is SPDX, which has no VEX analysis channel, so it carries
-the component inventory only.
+release SBOM is Syft's SPDX 2.3 output. Syft does not propagate
+CycloneDX vulnerability analysis into that output, so it carries only
+the component inventory.
 
 | Tool                                             | Result                                                                                            |
 | ------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
