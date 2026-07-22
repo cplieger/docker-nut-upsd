@@ -766,6 +766,53 @@ if ! grep -q 'level=warn msg="mounted TLS certificate does not parse' "$BADPEM_E
 fi
 rm -f /etc/nut/upsd.pem /etc/nut/upsd-mounted.pem "$BADPEM_ERR"
 
+#    Working-copy reconciliation under a config override: a regular
+#    upsd.conf.user must NOT suppress reconcile_tls_working_copies. With
+#    API_TLS=true and no mounted PEM, a stale /etc/nut/upsd-mounted.pem left
+#    by a previous lifecycle (mount removed) must be deleted after
+#    self-signed selection, while the selected working copy survives.
+printf '# operator override\nLISTEN 0.0.0.0 3493\n' >/etc/nut/upsd.conf.user
+rm -f /etc/nut/upsd.pem
+printf 'stale key material\n' >/etc/nut/upsd-mounted.pem
+if ! (
+  resolve_tls_cert 2>/dev/null || exit 1
+  reconcile_tls_working_copies
+  [ "$TLS_CERT_PATH" = "/etc/nut/upsd-selfsigned.pem" ]
+); then
+  err "FAIL: reconcile under an upsd.conf.user override did not select the self-signed working copy"
+  fail=1
+fi
+if [ ! -f /etc/nut/upsd-selfsigned.pem ]; then
+  err "FAIL: reconciliation removed the selected self-signed working copy"
+  fail=1
+fi
+if [ -e /etc/nut/upsd-mounted.pem ]; then
+  err "FAIL: stale /etc/nut/upsd-mounted.pem survived reconciliation under an upsd.conf.user override"
+  fail=1
+fi
+rm -f /etc/nut/upsd.conf.user /etc/nut/upsd-mounted.pem
+
+#    API_TLS=false removes BOTH managed working copies — withdrawn
+#    private-key material must not persist nut-readable in the writable
+#    layer, even with an override mounted.
+printf '# operator override\nLISTEN 0.0.0.0 3493\n' >/etc/nut/upsd.conf.user
+printf 'stale self-signed copy\n' >/etc/nut/upsd-selfsigned.pem
+printf 'stale mounted copy\n' >/etc/nut/upsd-mounted.pem
+(
+  API_TLS=false
+  reconcile_tls_working_copies
+)
+if [ -e /etc/nut/upsd-selfsigned.pem ] || [ -e /etc/nut/upsd-mounted.pem ]; then
+  err "FAIL: API_TLS=false reconciliation did not remove both managed TLS working copies"
+  fail=1
+fi
+rm -f /etc/nut/upsd.conf.user /etc/nut/upsd-selfsigned.pem /etc/nut/upsd-mounted.pem
+# Restore the baseline self-signed working copy for any later sections.
+if ! resolve_tls_cert 2>/dev/null; then
+  err "FAIL: could not restore the self-signed working copy after the reconcile cases"
+  fail=1
+fi
+
 #    API_TLS=false: no TLS directives and no new cert — upsd.conf must be
 #    byte-identical to the pre-TLS-feature output.
 if ! (

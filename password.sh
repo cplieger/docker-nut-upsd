@@ -271,3 +271,18 @@ resolve_tls_cert() {
   printf 'level=info msg="TLS enabled with self-signed certificate" certfile=%s fingerprint="%s"\n' \
     "$TLS_CERT_RUNTIME" "$(tls_cert_fingerprint "$TLS_CERT_RUNTIME")" >&2
 }
+
+# reconcile_tls_working_copies: remove whichever managed working copies the
+# current boot did not provision — always, even with an upsd.conf.user
+# override mounted (see the entrypoint call site for the full rationale).
+# set -u safe: $TLS_CERT_PATH is only read when API_TLS=true, where
+# resolve_tls_cert guarantees it is set.
+reconcile_tls_working_copies() {
+  if [ "$API_TLS" != "true" ]; then
+    rm -f "$TLS_CERT_MOUNTED_RUNTIME" "$TLS_CERT_RUNTIME"
+  elif [ "$TLS_CERT_PATH" = "$TLS_CERT_MOUNTED_RUNTIME" ]; then
+    rm -f "$TLS_CERT_RUNTIME"
+  else
+    rm -f "$TLS_CERT_MOUNTED_RUNTIME"
+  fi
+}

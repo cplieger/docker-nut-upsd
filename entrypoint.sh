@@ -168,13 +168,7 @@ fi
 # material; overrides naming the currently provisioned source keep working.
 # set -u safe: $TLS_CERT_PATH is only read on the API_TLS=true branch, where
 # resolve_tls_cert (above) guarantees it is set.
-if [ "$API_TLS" != "true" ]; then
-  rm -f "$TLS_CERT_MOUNTED_RUNTIME" "$TLS_CERT_RUNTIME"
-elif [ "$TLS_CERT_PATH" = "$TLS_CERT_MOUNTED_RUNTIME" ]; then
-  rm -f "$TLS_CERT_RUNTIME"
-else
-  rm -f "$TLS_CERT_MOUNTED_RUNTIME"
-fi
+reconcile_tls_working_copies
 
 # ---------------------------------------------------------------------------
 # Generate NUT config files (from generate-config.sh)
