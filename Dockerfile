@@ -88,6 +88,7 @@ RUN wget -qO nut.tar.gz \
        --with-user=nut --with-group=nut \
        CC=clang CXX=clang++ \
        --with-usb --with-snmp --with-modbus \
+       --with-ssl=openssl \
        --disable-shared --enable-static \
        --without-cgi --without-doc --without-avahi \
        --without-ipmi --without-neon --without-powerman \

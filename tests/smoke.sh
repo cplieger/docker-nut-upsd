@@ -669,6 +669,40 @@ if ! (
 fi
 rm -f /etc/nut/upsd.pem
 
+#    Non-regular mount refusal: a directory planted at /etc/nut/upsd.pem (what
+#    Docker auto-creates when a host bind source is missing) must make
+#    resolve_tls_cert fail fast with a clear error instead of hanging or
+#    failing later at ssl_init with a misleading perms error.
+mkdir /etc/nut/upsd.pem
+NONREG_ERR=$(mktemp)
+if (resolve_tls_cert) 2>"$NONREG_ERR"; then
+  err "FAIL: resolve_tls_cert accepted a directory at /etc/nut/upsd.pem"
+  fail=1
+fi
+if ! grep -q 'level=error msg="mounted TLS certificate path is not a regular file' "$NONREG_ERR"; then
+  err "FAIL: directory at /etc/nut/upsd.pem was not refused with the not-a-regular-file error"
+  fail=1
+fi
+rmdir /etc/nut/upsd.pem
+rm -f "$NONREG_ERR"
+
+#    Unparseable mounted PEM: warn-only — resolve_tls_cert must log the parse
+#    warning but still use the file verbatim (upsd stays authoritative).
+printf 'not a pem\n' >/etc/nut/upsd.pem
+BADPEM_ERR=$(mktemp)
+if ! (
+  resolve_tls_cert 2>"$BADPEM_ERR" || exit 1
+  [ "$TLS_CERT_PATH" = "/etc/nut/upsd.pem" ]
+); then
+  err "FAIL: unparseable mounted PEM was not used verbatim (warn-only gate regressed to fatal)"
+  fail=1
+fi
+if ! grep -q 'level=warn msg="mounted TLS certificate does not parse' "$BADPEM_ERR"; then
+  err "FAIL: unparseable mounted PEM did not log the parse/expiry warning"
+  fail=1
+fi
+rm -f /etc/nut/upsd.pem "$BADPEM_ERR"
+
 #    API_TLS=false: no TLS directives and no new cert — upsd.conf must be
 #    byte-identical to the pre-TLS-feature output.
 if ! (

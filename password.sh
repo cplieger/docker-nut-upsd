@@ -7,6 +7,11 @@ readonly PASSWORD_RAW_BYTES=36
 readonly PASSWORD_LENGTH=24
 readonly PASSWORD_MIN_LENGTH=12
 
+# Generated-credential cache paths (root-only /var/run/nut-secrets -- see
+# _resolve_cached_password).
+readonly ADMIN_PASSWORD_FILE=/var/run/nut-secrets/admin_password
+readonly LOCAL_UPSMON_PASSWORD_FILE=/var/run/nut-secrets/local_upsmon_password
+
 # _resolve_cached_password LABEL CACHE_FILE: shared engine for the credentials
 # this container generates itself. Prints the resolved password on stdout (all
 # logging goes to stderr); returns 1 when a strong password cannot be
@@ -71,7 +76,6 @@ _resolve_cached_password() {
 # across in-container restarts (see _resolve_cached_password). If the env var
 # is set, always use that value.
 resolve_admin_password() {
-  ADMIN_PASSWORD_FILE=/var/run/nut-secrets/admin_password
   if [ -z "${ADMIN_PASSWORD:-}" ]; then
     ADMIN_PASSWORD=$(_resolve_cached_password ADMIN_PASSWORD "$ADMIN_PASSWORD_FILE") || return 1
   fi
@@ -86,7 +90,6 @@ resolve_admin_password() {
 # env value is ignored and overwritten. Cached at
 # /var/run/nut-secrets/local_upsmon_password exactly like ADMIN_PASSWORD.
 resolve_local_upsmon_password() {
-  LOCAL_UPSMON_PASSWORD_FILE=/var/run/nut-secrets/local_upsmon_password
   # shellcheck disable=SC2034  # consumed by sourced generate-config.sh
   LOCAL_UPSMON_PASSWORD=$(_resolve_cached_password LOCAL_UPSMON_PASSWORD "$LOCAL_UPSMON_PASSWORD_FILE") || return 1
 }
@@ -209,6 +212,24 @@ _install_selfsigned_cert() {
 # cleartext).
 resolve_tls_cert() {
   if [ -e "$TLS_CERT_MOUNT" ]; then
+    # Refuse a non-regular mount (directory, FIFO, device node) up front: a
+    # writer-less FIFO would block nut_can_read/openssl forever and hang the
+    # boot with no log line, and a directory (Docker auto-creates one when a
+    # host bind source is missing) only fails later at ssl_init with a
+    # misleading perms error. A non-regular PEM has never worked, so failing
+    # fail-closed here is behavior-preserving (mirrors read_pidfile).
+    if [ ! -f "$TLS_CERT_MOUNT" ]; then
+      printf 'level=error msg="mounted TLS certificate path is not a regular file (a missing host bind source makes Docker create a directory here); mount an existing PEM file or unset the mount" path=%s\n' \
+        "$TLS_CERT_MOUNT" >&2
+      return 1
+    fi
+    # Warn-only parse/expiry gate: the mounted PEM is still used verbatim
+    # (upsd stays authoritative at ssl_init), but name the likely consequence
+    # now instead of leaving a later fatal exit or client rejection undiagnosed.
+    if ! tls_cert_valid "$TLS_CERT_MOUNT"; then
+      printf 'level=warn msg="mounted TLS certificate does not parse as cert+key or expires within a day; upsd may exit at startup or verifying clients may reject the handshake" path=%s\n' \
+        "$TLS_CERT_MOUNT" >&2
+    fi
     # Operator-mounted PEM: used verbatim. Perms are best-effort only — a
     # read-only bind mount rejects chown/chmod (and the entrypoint's blanket
     # /etc/nut sweep excludes this file for the same reason) — so probe

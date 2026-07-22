@@ -151,7 +151,11 @@ DBUS_PROBE_INTERVAL=$(strip_leading_zeros "$DBUS_PROBE_INTERVAL")
 if [ "$API_TLS" = "true" ]; then
   resolve_tls_cert || exit 1
 else
-  printf 'level=info msg="TLS disabled (API_TLS=false); upsd serves cleartext only"\n' >&2
+  if [ -e /etc/nut/upsd.conf.user ]; then
+    printf 'level=info msg="API_TLS=false: no certificate provisioned; mounted upsd.conf.user owns the TLS directives (an override referencing the self-signed PEM needs API_TLS=true)"\n' >&2
+  else
+    printf 'level=info msg="TLS disabled (API_TLS=false); upsd serves cleartext only"\n' >&2
+  fi
 fi
 
 # ---------------------------------------------------------------------------
@@ -167,7 +171,7 @@ generate_all_configs
 # with EROFS and would abort the boot under set -e. resolve_tls_cert
 # (password.sh) already handled its permissions best-effort.
 find /etc/nut ! -name '*.user' ! -name upsd.pem -exec chown root:nut {} +
-find /etc/nut -type d -exec chmod 750 {} +
+find /etc/nut -type d ! -name '*.user' ! -name upsd.pem -exec chmod 750 {} +
 find /etc/nut -type f ! -name '*.user' ! -name upsd.pem -exec chmod 640 {} +
 if usb_bus_required; then
   if chgrp -R nut /dev/bus/usb 2>/dev/null; then
