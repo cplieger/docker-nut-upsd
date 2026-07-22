@@ -188,6 +188,25 @@ if ! grep -q 'level=warn msg="upsmon.conf.user mounted without upsd.users.user' 
   fail=1
 fi
 rm -f /etc/nut/upsmon.conf.user "$FALLBACK_ERR"
+#    Non-regular override refusal (use_user_override): a FIFO planted at an
+#    override path passes a bare existence check and cp then blocks forever
+#    waiting for a writer, hanging config generation with no diagnostic. The
+#    regular-file gate must refuse it with an explicit error BEFORE cp — a
+#    timeout rc of 124 means cp blocked, i.e. the gate failed.
+mkfifo /etc/nut/ups.conf.user
+FIFO_ERR=$(mktemp)
+fifo_rc=0
+timeout 2 sh -c '. /usr/local/bin/generate-config.sh; generate_ups_conf' \
+  >/dev/null 2>"$FIFO_ERR" || fifo_rc=$?
+if [ "$fifo_rc" -eq 0 ] || [ "$fifo_rc" -eq 124 ]; then
+  err "FAIL: FIFO at /etc/nut/ups.conf.user was not refused before cp (rc=$fifo_rc; 124 = cp blocked until timeout)"
+  fail=1
+fi
+if ! grep -q 'level=error msg="mounted override path is not a regular file' "$FIFO_ERR"; then
+  err "FAIL: FIFO override was not refused with the not-a-regular-file error"
+  fail=1
+fi
+rm -f /etc/nut/ups.conf.user "$FIFO_ERR"
 
 # resolve_local_upsmon_password (password.sh): generates a PASSWORD_LENGTH-char
 # secret, caches it root-only, and reuses the cache on the next resolve

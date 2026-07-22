@@ -9,6 +9,13 @@
 # (caller skips generation). Return 1 otherwise.
 use_user_override() {
   [ -e "/etc/nut/$1.user" ] || return 1
+  # Refuse a non-regular mount (directory, FIFO, device node) up front: cp of
+  # a writer-less FIFO would block forever and hang config generation with no
+  # log line. Mirrors the resolve_tls_cert gate on /etc/nut/upsd.pem.
+  if [ ! -f "/etc/nut/$1.user" ]; then
+    printf 'level=error msg="mounted override path is not a regular file; aborting" file=%s.user\n' "$1" >&2
+    exit 1
+  fi
   if ! cp "/etc/nut/$1.user" "/etc/nut/$1"; then
     printf 'level=error msg="failed to apply mounted override; aborting" file=%s.user\n' "$1" >&2
     exit 1
