@@ -14,10 +14,13 @@ readonly SHELL_SAFE_INTEGER_MAX=999999999999999999
 
 # log_value: sanitize a rejected raw value before interpolating it into a
 # logfmt value="..." field — strip double quotes/backslashes and flatten
-# control characters so a malformed value cannot also corrupt or split the
-# error line that reports it.
+# everything outside printable ASCII to spaces so a malformed value cannot
+# also corrupt or split the error line that reports it. The octal RANGE
+# \040-\176 is deliberate: BusyBox tr treats a complemented character CLASS
+# (tr -c '[:print:]') as a literal set, mangling every value — do not
+# "simplify" this back to a class. LC_ALL=C pins the byte semantics.
 log_value() {
-  printf '%s' "$1" | tr -d '\\"' | tr -c '[:print:]' ' '
+  printf '%s' "$1" | tr -d '\\"' | LC_ALL=C tr -c '\040-\176' ' '
 }
 
 validate_no_newlines() {

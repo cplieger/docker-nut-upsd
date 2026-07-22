@@ -402,6 +402,15 @@ if (
   err "FAIL: trailing-LF snmp-ups with UPS_PORT=auto was accepted (canonicalization bypassed the transport check)"
   fail=1
 fi
+# log_value sanitizer contract: double quotes and backslashes are DELETED,
+# control bytes (tab, BEL) flatten to single spaces, and printable ASCII
+# survives byte-for-byte. Locks the BusyBox-safe octal-range pipeline —
+# BusyBox tr treats a complemented class ('[:print:]') as a literal set, so
+# a class-based sanitizer mangles every logged value on Alpine.
+if [ "$(log_value "$(printf 'val"with\\stuff\tand\007ctl')")" != 'valwithstuff and ctl' ]; then
+  err "FAIL: log_value did not delete quote/backslash and flatten control bytes (got '$(log_value "$(printf 'val"with\\stuff\tand\007ctl')")')"
+  fail=1
+fi
 
 # 4. Watchdog / transport / credential helpers are defined (sourced from
 #    validate.sh, generate-config.sh, lifecycle.sh, and password.sh).

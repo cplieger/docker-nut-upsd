@@ -11,10 +11,13 @@ readonly DBUS_RETRY_SLEEP=2
 readonly DBUS_REPLY_TIMEOUT_MS=3000
 
 # log_value: sanitize captured tool output for a logfmt detail="..." field —
-# strip quotes/backslashes, flatten control bytes (same pattern nut-notify.sh
-# uses standalone).
+# strip quotes/backslashes, flatten everything outside printable ASCII to
+# spaces (same pattern nut-notify.sh uses standalone). The octal RANGE
+# \040-\176 is deliberate: BusyBox tr treats a complemented character CLASS
+# (tr -c '[:print:]') as a literal set, mangling every value — do not
+# "simplify" this back to a class. LC_ALL=C pins the byte semantics.
 log_value() {
-  printf '%s' "$1" | tr -d '\\"' | tr -c '[:print:]' ' '
+  printf '%s' "$1" | tr -d '\\"' | LC_ALL=C tr -c '\040-\176' ' '
 }
 
 printf 'level=error msg="UPS forced shutdown triggered; powering off host"\n' >&2
