@@ -192,6 +192,16 @@ BusyBox-wget advisory (CVE-2025-60876) — the wget applet ships in
 the image's BusyBox multi-call binary but is never invoked by the
 runtime scripts (only the builder stage uses wget, to fetch sources).
 
+Because SBOM tooling inventories Alpine images from the APK database,
+the source-built components would otherwise be invisible to scanners:
+the image therefore embeds a CycloneDX SBOM fragment at
+`/usr/share/sbom/nut-upsd.cdx.json` covering NUT, libmodbus, and
+net-snmp — generated at build time from the same Renovate-tracked
+version ARGs the builds use, so version bumps keep it accurate — with
+purl/CPE identifiers for advisory matching and a VEX entry documenting
+the backported CVE-2026-54161 fix. Syft picks it up via its SBOM
+cataloger (`--select-catalogers "+sbom-cataloger"`).
+
 | Tool                                             | Result                                                                                            |
 | ------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
 | [shellcheck](https://www.shellcheck.net/)        | Clean                                                                                             |

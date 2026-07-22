@@ -921,6 +921,39 @@ if normalize_bool API_TLS banana >/dev/null 2>&1; then
   fail=1
 fi
 
+# 8. Embedded SBOM fragment (Dockerfile builder stage): the CycloneDX file
+#    covering the source-built components must ship in the image, name all
+#    three components with a version-shaped string each, and carry the
+#    CVE-2026-54161 VEX entry for the backport. BusyBox has no jq, so assert
+#    shape with grep: non-empty, starts with { and ends with }.
+SBOM=/usr/share/sbom/nut-upsd.cdx.json
+if [ ! -s "$SBOM" ]; then
+  err "FAIL: embedded SBOM fragment missing or empty: $SBOM"
+  fail=1
+else
+  if [ "$(head -c 1 "$SBOM")" != "{" ] || [ "$(tail -c 2 "$SBOM")" != "}" ]; then
+    err "FAIL: embedded SBOM fragment is not a JSON object (bad first/last byte)"
+    fail=1
+  fi
+  for comp in nut libmodbus net-snmp; do
+    grep -q "\"name\": \"$comp\"" "$SBOM" || {
+      err "FAIL: embedded SBOM fragment missing component: $comp"
+      fail=1
+    }
+  done
+  # Each component carries a version-shaped value (ARG-derived, leading v
+  # stripped): assert three "version": "X.Y..." occurrences.
+  versions=$(grep -c '"version": "[0-9][0-9.]*"' "$SBOM")
+  if [ "$versions" -ne 3 ]; then
+    err "FAIL: embedded SBOM fragment has $versions version-shaped component versions (want 3)"
+    fail=1
+  fi
+  grep -q '"CVE-2026-54161"' "$SBOM" || {
+    err "FAIL: embedded SBOM fragment missing the CVE-2026-54161 VEX entry"
+    fail=1
+  }
+fi
+
 # Restore the section-2 baseline configs for any future sections.
 generate_all_configs >/dev/null 2>&1
 

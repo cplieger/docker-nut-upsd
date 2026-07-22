@@ -113,6 +113,28 @@ RUN wget -qO nut.tar.gz \
     && cp /usr/lib/libmodbus.so* /out/usr/lib/ \
     && cp /usr/lib/libnetsnmp.so* /out/usr/lib/
 
+# ---------------------------------------------------------------------------
+# Embedded SBOM fragment. Syft inventories the final image from Alpine's APK
+# database only, so the three source-built payloads (NUT, libmodbus,
+# net-snmp) are invisible to the signed release SBOM and to vulnerability
+# scanners. Generate a CycloneDX fragment from the same Renovate-tracked
+# version ARGs the builds use — a Renovate bump keeps the SBOM correct with
+# zero extra maintenance — and ship it in the runtime image where Syft's
+# *.cdx.json cataloger picks it up (see the COPY in the runtime stage).
+# The VEX entry documents the CVE-2026-54161 backport applied above; remove
+# it together with the patch at NUT_VERSION >= v2.8.6.
+RUN { \
+      printf '{\n  "bomFormat": "CycloneDX",\n  "specVersion": "1.5",\n  "version": 1,\n  "components": [\n' \
+      && printf '    {\n      "bom-ref": "pkg:github/networkupstools/nut@%s",\n      "type": "application",\n      "name": "nut",\n      "version": "%s",\n      "purl": "pkg:github/networkupstools/nut@%s",\n      "cpe": "cpe:2.3:a:networkupstools:nut:%s:*:*:*:*:*:*:*"\n    },\n' \
+           "${NUT_VERSION}" "${NUT_VERSION#v}" "${NUT_VERSION}" "${NUT_VERSION#v}" \
+      && printf '    {\n      "bom-ref": "pkg:github/stephane/libmodbus@%s",\n      "type": "library",\n      "name": "libmodbus",\n      "version": "%s",\n      "purl": "pkg:github/stephane/libmodbus@%s",\n      "cpe": "cpe:2.3:a:libmodbus:libmodbus:%s:*:*:*:*:*:*:*"\n    },\n' \
+           "${LIBMODBUS_VERSION}" "${LIBMODBUS_VERSION#v}" "${LIBMODBUS_VERSION}" "${LIBMODBUS_VERSION#v}" \
+      && printf '    {\n      "bom-ref": "pkg:github/net-snmp/net-snmp@%s",\n      "type": "library",\n      "name": "net-snmp",\n      "version": "%s",\n      "purl": "pkg:github/net-snmp/net-snmp@%s",\n      "cpe": "cpe:2.3:a:net-snmp:net-snmp:%s:*:*:*:*:*:*:*"\n    }\n' \
+           "${NETSNMP_VERSION}" "${NETSNMP_VERSION#v}" "${NETSNMP_VERSION}" "${NETSNMP_VERSION#v}" \
+      && printf '  ],\n  "vulnerabilities": [\n    {\n      "id": "CVE-2026-54161",\n      "analysis": {\n        "state": "resolved",\n        "detail": "Built with the checked-in backport patches/cve-2026-54161-notifycmd-execvp.patch (upstream ecf98e7542e4ae2b62b211622ee26989274b2220) applied at build time; remove this entry with the patch at NUT_VERSION >= v2.8.6."\n      },\n      "affects": [\n        { "ref": "pkg:github/networkupstools/nut@%s" }\n      ]\n    }\n  ]\n}\n' \
+           "${NUT_VERSION}"; \
+    } > /out/nut-upsd.cdx.json
+
 FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS runtime
 
 # apk upgrade: the pinned base ships some packages (e.g. libssl3) at a stale,
@@ -139,6 +161,11 @@ COPY --from=builder /out/usr/bin/upsc /usr/bin/
 COPY --from=builder /out/usr/lib/nut/ /usr/lib/nut/
 COPY --from=builder /out/usr/share/nut/ /usr/share/nut/
 COPY --from=builder /out/usr/share/cmdvartab /usr/share/cmdvartab
+# CycloneDX SBOM fragment for the source-built components (generated in the
+# builder stage from the Renovate-tracked version ARGs). Placed where Syft's
+# *.cdx.json cataloger inventories it, so SBOMs and scanners see NUT,
+# libmodbus, and net-snmp alongside the APK packages.
+COPY --from=builder /out/nut-upsd.cdx.json /usr/share/sbom/nut-upsd.cdx.json
 
 ENV NUT_QUIET_INIT_UPSNOTIFY=true \
     NUT_QUIET_INIT_SSL=true
