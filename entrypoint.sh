@@ -16,7 +16,7 @@ set -eu
 # ---------------------------------------------------------------------------
 # Prior-lifecycle reclamation
 # ---------------------------------------------------------------------------
-# Both blocks below clear artifacts a crashed or force-killed previous run
+# The blocks below clear artifacts a crashed or force-killed previous run
 # left in the writable layer. They run FIRST — before password/TLS resolution
 # and config generation — so crash-leaked files are reclaimed before any new
 # temp or generated-config write could hit exhausted blocks or inodes (a late
@@ -37,11 +37,21 @@ set -eu
 # non-empty directory at a *.pid path survives the delete, so the re-scan
 # below enforces the pathname postcondition instead of trusting the exit
 # status — fail loud rather than booting past a surviving obstruction.
-if find /var/run/nut -maxdepth 1 -name '*.pid' 2>/dev/null | grep -q .; then
+# stale_nut_pid_paths [FIND_ACTION...]: list (or, with -delete, remove) every
+# reserved *.pid path in /var/run/nut. ONE shared predicate for the presence
+# scan, the delete, and the postcondition re-scan, so the three cannot drift
+# apart if the pattern or depth ever changes. || true: a find failure must
+# read as "nothing listed", not a set -e boot abort.
+stale_nut_pid_paths() {
+  find /var/run/nut -maxdepth 1 -name '*.pid' "$@" 2>/dev/null || true
+}
+if [ -n "$(stale_nut_pid_paths)" ]; then
   printf 'level=info msg="clearing stale NUT PID paths from previous lifecycle" path=/var/run/nut\n' >&2
-  find /var/run/nut -maxdepth 1 -name '*.pid' -delete 2>/dev/null || true
-  if find /var/run/nut -maxdepth 1 -name '*.pid' 2>/dev/null | grep -q .; then
-    printf 'level=error msg="failed to clear a stale NUT PID path; refusing to start" path=/var/run/nut\n' >&2
+  stale_nut_pid_paths -delete
+  _stale_pids=$(stale_nut_pid_paths)
+  if [ -n "$_stale_pids" ]; then
+    printf 'level=error msg="failed to clear a stale NUT PID path; refusing to start" path=/var/run/nut surviving="%s"\n' \
+      "$(log_value "$_stale_pids")" >&2
     exit 1
   fi
 fi
@@ -58,15 +68,28 @@ fi
 # stale artifact into an unannotated boot abort — the producers that later
 # need the space fail with their own structured errors if storage is still
 # unavailable.
-if ! rm -f "$WD_RESTART_CAPTURE_PREFIX".* "$STOP_CMD_CAPTURE_PREFIX".* \
+if ! _clt_err=$(rm -f "$WD_RESTART_CAPTURE_PREFIX".* "$STOP_CMD_CAPTURE_PREFIX".* \
   "${ADMIN_PASSWORD_FILE}.tmp."* \
   "${LOCAL_UPSMON_PASSWORD_FILE}.tmp."* \
   "${TLS_CERT_CACHE}.tmp."* \
   "${TLS_CERT_RUNTIME}.tmp."* \
   "${TLS_CERT_MOUNTED_RUNTIME}.tmp."* \
   /etc/nut/ups.conf.tmp.* /etc/nut/upsd.conf.tmp.* \
-  /etc/nut/upsd.users.tmp.* /etc/nut/upsmon.conf.tmp.*; then
-  printf 'level=warn msg="could not remove a crash-leaked temp file from a previous lifecycle; continuing" path_hint=/var/run/nut-secrets\n' >&2
+  /etc/nut/upsd.users.tmp.* /etc/nut/upsmon.conf.tmp.* 2>&1); then
+  printf 'level=warn msg="could not remove a crash-leaked temp file from a previous lifecycle; continuing" err="%s"\n' \
+    "$(log_value "$(printf '%s' "$_clt_err" | head -c 512)")" >&2
+fi
+
+# Clear a stale POWERDOWNFLAG (killpower) from a previous lifecycle. upsmon
+# creates it on FSD; /var/run/nut-secrets is the writable layer so it survives
+# a `docker restart`, and nothing in this container consumes it (host poweroff
+# is via D-Bus, not the NUT kill-power path). A latched flag would otherwise
+# make the comms watchdog stand down indefinitely (see restart_ups_driver), so
+# clear it at a fresh start. The flag lives in the root-only nut-secrets dir
+# so the nut user cannot plant it (see generate-config.sh).
+if [ -e /var/run/nut-secrets/killpower ]; then
+  printf 'level=info msg="clearing stale killpower flag from previous lifecycle" path=/var/run/nut-secrets/killpower\n' >&2
+  rm -f /var/run/nut-secrets/killpower
 fi
 
 # Canonicalize every validated env var BEFORE any raw-value interpretation —
@@ -313,18 +336,6 @@ trap graceful_shutdown TERM INT QUIT HUP
 
 printf 'level=info msg="starting NUT services" ups=%s driver=%s port=%s listen=%s:%s\n' \
   "$UPS_NAME" "$UPS_DRIVER" "$UPS_PORT" "$API_ADDRESS" "$API_PORT" >&2
-
-# Clear a stale POWERDOWNFLAG (killpower) from a previous lifecycle. upsmon
-# creates it on FSD; /var/run/nut-secrets is the writable layer so it survives
-# a `docker restart`, and nothing in this container consumes it (host poweroff
-# is via D-Bus, not the NUT kill-power path). A latched flag would otherwise
-# make the comms watchdog stand down indefinitely (see restart_ups_driver), so
-# clear it at a fresh start. The flag lives in the root-only nut-secrets dir
-# so the nut user cannot plant it (see generate-config.sh).
-if [ -e /var/run/nut-secrets/killpower ]; then
-  printf 'level=info msg="clearing stale killpower flag from previous lifecycle" path=/var/run/nut-secrets/killpower\n' >&2
-  rm -f /var/run/nut-secrets/killpower
-fi
 
 # start_nut_daemon LABEL TIMEOUT CMD...: start one NUT daemon bounded by
 # `timeout -k 5 TIMEOUT` (hard bound past NUT's own start delays; -k 5 hard-kills
