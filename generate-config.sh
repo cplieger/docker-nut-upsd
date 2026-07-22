@@ -25,7 +25,20 @@ use_user_override() {
     printf 'level=error msg="mounted override path is not a regular file; aborting" file=%s.user\n' "$1" >&2
     exit 1
   fi
-  if ! cp "/etc/nut/$1.user" "/etc/nut/$1"; then
+  # Staged install through _replace_file (password.sh; sourced alongside this
+  # module before any generator runs): plain cp treats an existing directory
+  # at the destination (e.g. an accidentally auto-created bind-mount target)
+  # as a container — it writes /etc/nut/<name>/<name>.user, returns success,
+  # and the override is logged as applied while /etc/nut/<name> is still a
+  # directory, so startup fails later with a misleading daemon/config error.
+  _uo_dst="/etc/nut/$1"
+  _uo_tmp=$(mktemp "${_uo_dst}.tmp.XXXXXX" 2>/dev/null) || {
+    printf 'level=error msg="failed to create mounted-override staging file; aborting" file=%s.user\n' "$1" >&2
+    exit 1
+  }
+  if ! cat "${_uo_dst}.user" >"$_uo_tmp" \
+    || ! _replace_file "$_uo_tmp" "$_uo_dst"; then
+    rm -f "$_uo_tmp"
     printf 'level=error msg="failed to apply mounted override; aborting" file=%s.user\n' "$1" >&2
     exit 1
   fi

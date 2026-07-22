@@ -54,9 +54,12 @@ places:
    function and wire it into `_dispatch_check`.
 
 Every value that lands in a NUT config file must reject embedded
-control characters (newline/CR/tab config injection), and identifiers/passwords additionally
-reject brackets (INI section injection) and double quotes (NUT quoting
-breakout). A value written **unquoted** into a config file (e.g.
+control characters (newline/CR/tab config injection). Values embedded
+in double-quoted NUT fields — including the passwords — additionally
+reject double quotes (NUT quoting breakout) and backslashes; identifiers
+used as section headers (e.g. `UPS_NAME`, written as `[$UPS_NAME]`)
+additionally reject bracket characters (INI section injection). A value
+written **unquoted** into a config file (e.g.
 `UPS_PORT` as `port = $UPS_PORT`, or `API_ADDRESS` in `LISTEN`) must
 also reject whitespace, since a space would split it into extra config
 tokens. When in doubt, copy the check set of the most similar existing

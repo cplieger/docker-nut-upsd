@@ -264,6 +264,35 @@ grep -q '^\[ups\]' /etc/nut/ups.conf || {
   err "FAIL: fallback generation did not write ups.conf"
   fail=1
 }
+#    Directory planted at the generated-config destination: plain cp would
+#    treat /etc/nut/ups.conf-as-a-directory as a container (POSIX cp
+#    destination-directory semantics), write ups.conf.user INSIDE it, return
+#    success, and log the override as applied while the config path is still
+#    a directory. The staged _replace_file install must refuse it promptly
+#    (non-zero, not a hang), log the structured apply failure, and leak
+#    nothing into the directory. password.sh is sourced in the subshell so
+#    _replace_file is in scope, as in the entrypoint.
+printf '[ups]\n    driver = usbhid-ups\n    port = auto\n' >/etc/nut/ups.conf.user
+rm -f /etc/nut/ups.conf
+mkdir /etc/nut/ups.conf
+DIRDST_ERR=$(mktemp)
+dirdst_rc=0
+timeout 2 sh -c '. /usr/local/bin/password.sh; . /usr/local/bin/generate-config.sh; generate_ups_conf' \
+  >/dev/null 2>"$DIRDST_ERR" || dirdst_rc=$?
+if [ "$dirdst_rc" -eq 0 ] || [ "$dirdst_rc" -eq 124 ]; then
+  err "FAIL: directory at /etc/nut/ups.conf was not refused promptly (rc=$dirdst_rc; 124 = install blocked until timeout)"
+  fail=1
+fi
+if ! grep -q 'level=error msg="failed to apply mounted override; aborting" file=ups.conf.user' "$DIRDST_ERR"; then
+  err "FAIL: directory at the generated-config destination was not refused with the apply-failure error"
+  fail=1
+fi
+if [ -n "$(ls -A /etc/nut/ups.conf)" ]; then
+  err "FAIL: file leaked inside the directory planted at the generated-config destination"
+  fail=1
+fi
+rmdir /etc/nut/ups.conf
+rm -f /etc/nut/ups.conf.user /etc/nut/ups.conf.tmp.* "$DIRDST_ERR"
 
 # resolve_local_upsmon_password (password.sh): generates a PASSWORD_LENGTH-char
 # secret, caches it root-only, and reuses the cache on the next resolve
