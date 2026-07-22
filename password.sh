@@ -150,6 +150,17 @@ tls_cert_fingerprint() {
   openssl x509 -in "$1" -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2
 }
 
+# _tls_mktemp PREFIX: mktemp PREFIX.tmp.XXXXXX with a structured failure
+# log. Every other failure exit in TLS provisioning logs level=error before
+# the boot aborts; a bare `mktemp || return 1` would exit the container with
+# only mktemp's own unstructured stderr as the diagnostic.
+_tls_mktemp() {
+  mktemp "$1.tmp.XXXXXX" || {
+    printf 'level=error msg="mktemp failed while provisioning the TLS certificate" prefix=%s\n' "$1" >&2
+    return 1
+  }
+}
+
 # _generate_selfsigned_cert: mint a fresh self-signed cert+key PEM into the
 # root-only cache. EC P-256 over RSA 2048: keygen completes in milliseconds
 # even on small ARM hosts (RSA 2048 keygen is slower and CPU-variable at
@@ -162,12 +173,12 @@ tls_cert_fingerprint() {
 # _resolve_cached_password); cert-then-key order is NUT's documented
 # CERTFILE layout (`cat upsd.crt upsd.key > upsd.pem`).
 _generate_selfsigned_cert() {
-  _gc_key=$(mktemp "${TLS_CERT_CACHE}.tmp.XXXXXX") || return 1
-  _gc_crt=$(mktemp "${TLS_CERT_CACHE}.tmp.XXXXXX") || {
+  _gc_key=$(_tls_mktemp "$TLS_CERT_CACHE") || return 1
+  _gc_crt=$(_tls_mktemp "$TLS_CERT_CACHE") || {
     rm -f "$_gc_key"
     return 1
   }
-  _gc_pem=$(mktemp "${TLS_CERT_CACHE}.tmp.XXXXXX") || {
+  _gc_pem=$(_tls_mktemp "$TLS_CERT_CACHE") || {
     rm -f "$_gc_key" "$_gc_crt"
     return 1
   }
@@ -197,7 +208,7 @@ _generate_selfsigned_cert() {
 _install_cert_working_copy() {
   _ic_src="$1"
   _ic_dst="$2"
-  _ic_tmp=$(mktemp "${_ic_dst}.tmp.XXXXXX") || return 1
+  _ic_tmp=$(_tls_mktemp "$_ic_dst") || return 1
   if cat "$_ic_src" >"$_ic_tmp" \
     && chown root:nut "$_ic_tmp" && chmod 640 "$_ic_tmp" \
     && mv "$_ic_tmp" "$_ic_dst"; then
@@ -279,10 +290,17 @@ resolve_tls_cert() {
 # resolve_tls_cert guarantees it is set.
 reconcile_tls_working_copies() {
   if [ "$API_TLS" != "true" ]; then
-    rm -f "$TLS_CERT_MOUNTED_RUNTIME" "$TLS_CERT_RUNTIME"
+    _rw_stale="$TLS_CERT_MOUNTED_RUNTIME $TLS_CERT_RUNTIME"
   elif [ "$TLS_CERT_PATH" = "$TLS_CERT_MOUNTED_RUNTIME" ]; then
-    rm -f "$TLS_CERT_RUNTIME"
+    _rw_stale="$TLS_CERT_RUNTIME"
   else
-    rm -f "$TLS_CERT_MOUNTED_RUNTIME"
+    _rw_stale="$TLS_CERT_MOUNTED_RUNTIME"
   fi
+  # Managed paths are space-free readonly constants, so the word split is safe.
+  for _rw_path in $_rw_stale; do
+    if ! rm -f "$_rw_path" 2>/dev/null; then
+      printf 'level=error msg="cannot remove unselected TLS working copy (something mounted over this internal path?); refusing to leave withdrawn key material in place" path=%s\n' "$_rw_path" >&2
+      return 1
+    fi
+  done
 }

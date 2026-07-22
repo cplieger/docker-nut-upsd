@@ -269,7 +269,7 @@ fi
 # Safe here: this run's own password and TLS temps were already renamed or
 # removed by the resolve_* calls above, and the capture temps are created
 # later.
-rm -f /var/run/nut-secrets/wd-restart.* /var/run/nut-secrets/stop-cmd.* \
+rm -f "$WD_RESTART_CAPTURE_PREFIX".* "$STOP_CMD_CAPTURE_PREFIX".* \
   "${ADMIN_PASSWORD_FILE}.tmp."* \
   "${LOCAL_UPSMON_PASSWORD_FILE}.tmp."* \
   "${TLS_CERT_CACHE}.tmp."* \

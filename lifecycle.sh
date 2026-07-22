@@ -14,9 +14,14 @@ readonly STOP_CMD_TIMEOUT=3
 # write end open past timeout's signal and block the reader forever; a
 # regular-file read never blocks. Files live in the root-only
 # /var/run/nut-secrets (symlink hardening); if mktemp fails the caller still
-# runs with output discarded to /dev/null.
+# runs with output discarded to /dev/null. The prefixes are constants because
+# the entrypoint's leaked-temp cleanup globs "$PREFIX".* — a literal respelled
+# there would silently stop matching if a label changed (same rationale as the
+# password.sh cache-path constants that cleanup already uses).
+readonly STOP_CMD_CAPTURE_PREFIX=/var/run/nut-secrets/stop-cmd
+readonly WD_RESTART_CAPTURE_PREFIX=/var/run/nut-secrets/wd-restart
 capture_tmpfile() {
-  mktemp "/var/run/nut-secrets/$1.XXXXXX" 2>/dev/null || printf '/dev/null'
+  mktemp "$1.XXXXXX" 2>/dev/null || printf '/dev/null'
 }
 capture_head() {
   head -c 512 "$1" 2>/dev/null || true
@@ -43,7 +48,7 @@ stop_nut_cmd() {
   # 10s SIGKILL as the only backstop). A regular-file read never blocks. Use
   # KILL at the deadline because timeout's default TERM can itself wait forever
   # for a TERM-ignoring client; this keeps the documented 3x3=9s budget hard.
-  _stop_out_file=$(capture_tmpfile stop-cmd)
+  _stop_out_file=$(capture_tmpfile "$STOP_CMD_CAPTURE_PREFIX")
   if timeout -s KILL "$STOP_CMD_TIMEOUT" "$@" >"$_stop_out_file" 2>&1; then
     :
   else
@@ -286,7 +291,7 @@ start_recovered_driver() {
   # blocks. -k 5 hard-kills a TERM-ignoring upsdrvctl like the boot path does.
   # The temp file lives in the root-only /var/run/nut-secrets, consistent with
   # the existing symlink-hardening rationale.
-  _srd_out_file=$(capture_tmpfile wd-restart)
+  _srd_out_file=$(capture_tmpfile "$WD_RESTART_CAPTURE_PREFIX")
   if timeout -k 5 90 /usr/sbin/upsdrvctl start "$UPS_NAME" >"$_srd_out_file" 2>&1; then
     printf 'level=info msg="comms watchdog driver restart issued" ups=%s\n' "$UPS_NAME" >&2
   else

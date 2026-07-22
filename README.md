@@ -184,14 +184,14 @@ Thresholds, `for:` windows, and the `severity` labels are starting points; adjus
 from patched upstream sources in native per-arch builds,
 eliminating all CVEs present in Alpine's older packages.
 
-| Tool                                             | Result                               |
-| ------------------------------------------------ | ------------------------------------ |
-| [shellcheck](https://www.shellcheck.net/)        | Clean                                |
-| [hadolint](https://github.com/hadolint/hadolint) | DL3018 (unpinned apk, accepted)      |
-| [gitleaks](https://github.com/gitleaks/gitleaks) | No secrets detected                  |
-| [trivy](https://trivy.dev/)                      | 0 dependency CVEs (Alpine base only) |
-| [grype](https://github.com/anchore/grype)        | 0 dependency CVEs (Alpine base only) |
-| [semgrep](https://semgrep.dev/)                  | 1 info (missing USER, expected)      |
+| Tool                                             | Result                                                                                     |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------ |
+| [shellcheck](https://www.shellcheck.net/)        | Clean                                                                                      |
+| [hadolint](https://github.com/hadolint/hadolint) | DL3018 (unpinned apk, accepted)                                                            |
+| [gitleaks](https://github.com/gitleaks/gitleaks) | No secrets detected                                                                        |
+| [trivy](https://trivy.dev/)                      | 0 dependency CVEs (Alpine base only)                                                       |
+| [grype](https://github.com/anchore/grype)        | 0 dependency CVEs (Alpine base only)                                                       |
+| [semgrep](https://semgrep.dev/)                  | 2 accepted (missing USER: root-by-design; IFS save/restore in validate.sh: false positive) |
 
 All source versions are tracked by Renovate. The
 multi-stage build compiles each platform natively on its own
