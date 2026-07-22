@@ -693,6 +693,10 @@ cp /var/run/nut-secrets/upsd-selfsigned.pem /etc/nut/upsd.pem
 chown root:root /etc/nut/upsd.pem
 chmod 600 /etc/nut/upsd.pem
 tls_fp_mounted=$(tls_cert_fingerprint /etc/nut/upsd.pem)
+# Exact-byte digest of the mount BEFORE resolution: the fingerprint above
+# hashes only the first parsed certificate, so it proves cert identity but
+# not that the private key / chain / trailing bytes survived untouched.
+tls_sha_mounted=$(sha256sum /etc/nut/upsd.pem | awk '{print $1}')
 if ! (
   resolve_tls_cert 2>/dev/null || exit 1
   [ "$TLS_CERT_PATH" = "/etc/nut/upsd-mounted.pem" ] || exit 1
@@ -709,7 +713,7 @@ if [ "$(stat -c '%U:%G %a' /etc/nut/upsd.pem)" != "root:root 600" ]; then
   err "FAIL: resolve_tls_cert mutated the mounted PEM's owner/mode (got '$(stat -c '%U:%G %a' /etc/nut/upsd.pem)', want the operator's root:root 600)"
   fail=1
 fi
-if [ "$(tls_cert_fingerprint /etc/nut/upsd.pem)" != "$tls_fp_mounted" ]; then
+if [ "$(sha256sum /etc/nut/upsd.pem | awk '{print $1}')" != "$tls_sha_mounted" ]; then
   err "FAIL: resolve_tls_cert rewrote the mounted PEM's content"
   fail=1
 fi
@@ -743,10 +747,14 @@ rm -f "$NONREG_ERR"
 #    Unparseable mounted PEM: warn-only — resolve_tls_cert must log the parse
 #    warning but still serve the mounted content (upsd stays authoritative).
 printf 'not a pem\n' >/etc/nut/upsd.pem
+# Pre-call digest: the post-call source-vs-copy cmp alone cannot prove the
+# SOURCE itself survived (both sides could have been rewritten identically).
+tls_sha_badpem=$(sha256sum /etc/nut/upsd.pem | awk '{print $1}')
 BADPEM_ERR=$(mktemp)
 if ! (
   resolve_tls_cert 2>"$BADPEM_ERR" || exit 1
   [ "$TLS_CERT_PATH" = "/etc/nut/upsd-mounted.pem" ] || exit 1
+  [ "$(sha256sum /etc/nut/upsd.pem | awk '{print $1}')" = "$tls_sha_badpem" ] || exit 1
   cmp -s /etc/nut/upsd.pem /etc/nut/upsd-mounted.pem
 ); then
   err "FAIL: unparseable mounted PEM was not served as-is (warn-only gate regressed to fatal)"
