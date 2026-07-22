@@ -255,7 +255,7 @@ kill_stale_driver_from_pidfile() {
     *)
       # All-zero PID: `kill -0 0` probes the caller's own process group instead
       # of a specific PID, so refuse it outright (mirrors wait_for_pidfile's
-      # zero-PID guard) rather than relying on the /proc/<pid>/exe check.
+      # zero-PID guard) rather than relying on the pid_matches_binary check.
       printf 'level=error msg="comms watchdog refusing all-zero PID from pidfile" ups=%s pidfile=%s\n' \
         "$UPS_NAME" "$_ksd_pf" >&2
       _ksd_pid=""
