@@ -297,10 +297,12 @@ reconcile_tls_working_copies() {
     _rw_stale="$TLS_CERT_MOUNTED_RUNTIME"
   fi
   # Managed paths are space-free readonly constants, so the word split is safe.
+  _rw_failed=0
   for _rw_path in $_rw_stale; do
     if ! rm -f "$_rw_path" 2>/dev/null; then
       printf 'level=error msg="cannot remove unselected TLS working copy (something mounted over this internal path?); refusing to leave withdrawn key material in place" path=%s\n' "$_rw_path" >&2
-      return 1
+      _rw_failed=1
     fi
   done
+  return "$_rw_failed"
 }
