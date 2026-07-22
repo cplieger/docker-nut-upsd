@@ -244,6 +244,32 @@ if ! (
 fi
 rm -f /var/run/nut-secrets/local_upsmon_password
 
+#    Directory planted at the password-cache path: plain mv would move the
+#    temp INSIDE the directory (POSIX mv destination-directory semantics) and
+#    falsely log the credential as cached, so every restart would mint a new
+#    password and leak another temp file. _replace_file must refuse it: the
+#    resolve still returns a full-length password (cache failure is warn-only)
+#    and nothing leaks into the directory.
+mkdir /var/run/nut-secrets/local_upsmon_password
+DIRCACHE_ERR=$(mktemp)
+if ! (
+  resolve_local_upsmon_password 2>"$DIRCACHE_ERR" || exit 1
+  [ "${#LOCAL_UPSMON_PASSWORD}" -eq "$PASSWORD_LENGTH" ]
+); then
+  err "FAIL: resolve_local_upsmon_password did not produce a full-length password with a directory at its cache path"
+  fail=1
+fi
+if ! grep -q 'level=warn msg="generated LOCAL_UPSMON_PASSWORD but failed to cache' "$DIRCACHE_ERR"; then
+  err "FAIL: directory at the password-cache path was not logged as a warn-level cache failure"
+  fail=1
+fi
+if [ -n "$(ls -A /var/run/nut-secrets/local_upsmon_password)" ]; then
+  err "FAIL: temp file leaked inside the directory planted at the password-cache path"
+  fail=1
+fi
+rmdir /var/run/nut-secrets/local_upsmon_password
+rm -f "$DIRCACHE_ERR"
+
 # Regenerate with the baseline env so later steps see the section-2 configs.
 generate_all_configs >/dev/null 2>&1
 
@@ -816,6 +842,53 @@ if [ -e /etc/nut/upsd-selfsigned.pem ] || [ -e /etc/nut/upsd-mounted.pem ]; then
   fail=1
 fi
 rm -f /etc/nut/upsd.conf.user /etc/nut/upsd-selfsigned.pem /etc/nut/upsd-mounted.pem
+
+#    Directory planted at the working-copy path (the cache above is still
+#    valid): plain mv would "install" the root:nut copy INSIDE the directory
+#    (POSIX mv destination-directory semantics) and report success while upsd
+#    later fails at ssl_init on a directory CERTFILE. _replace_file must
+#    refuse it: resolve_tls_cert fails with the structured install error and
+#    leaks no temp into the directory.
+mkdir /etc/nut/upsd-selfsigned.pem
+DIRDEST_ERR=$(mktemp)
+if (resolve_tls_cert) 2>"$DIRDEST_ERR"; then
+  err "FAIL: resolve_tls_cert reported success with a directory at the working-copy path"
+  fail=1
+fi
+if ! grep -q 'level=error msg="failed to install TLS certificate working copy' "$DIRDEST_ERR"; then
+  err "FAIL: directory at the working-copy path was not refused with the install error"
+  fail=1
+fi
+if [ -n "$(ls -A /etc/nut/upsd-selfsigned.pem)" ]; then
+  err "FAIL: temp file leaked inside the directory planted at the working-copy path"
+  fail=1
+fi
+rmdir /etc/nut/upsd-selfsigned.pem
+rm -f "$DIRDEST_ERR"
+
+#    Directory planted at the self-signed cache path: plain mv would drop the
+#    freshly assembled PEM INSIDE the directory and log generation success
+#    with no usable cache. _replace_file must refuse it: resolve_tls_cert
+#    fails with the structured generation error and leaks none of the three
+#    temp files into the directory.
+rm -f /var/run/nut-secrets/upsd-selfsigned.pem
+mkdir /var/run/nut-secrets/upsd-selfsigned.pem
+DIRDEST_ERR=$(mktemp)
+if (resolve_tls_cert) 2>"$DIRDEST_ERR"; then
+  err "FAIL: resolve_tls_cert reported success with a directory at the self-signed cache path"
+  fail=1
+fi
+if ! grep -q 'level=error msg="self-signed TLS certificate generation failed' "$DIRDEST_ERR"; then
+  err "FAIL: directory at the self-signed cache path was not refused with the generation error"
+  fail=1
+fi
+if [ -n "$(ls -A /var/run/nut-secrets/upsd-selfsigned.pem)" ]; then
+  err "FAIL: temp files leaked inside the directory planted at the self-signed cache path"
+  fail=1
+fi
+rmdir /var/run/nut-secrets/upsd-selfsigned.pem
+rm -f "$DIRDEST_ERR"
+
 # Restore the baseline self-signed working copy for any later sections.
 if ! resolve_tls_cert 2>/dev/null; then
   err "FAIL: could not restore the self-signed working copy after the reconcile cases"

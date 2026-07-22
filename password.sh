@@ -12,6 +12,21 @@ readonly PASSWORD_MIN_LENGTH=12
 readonly ADMIN_PASSWORD_FILE=/var/run/nut-secrets/admin_password
 readonly LOCAL_UPSMON_PASSWORD_FILE=/var/run/nut-secrets/local_upsmon_password
 
+# _replace_file SRC DST: atomic-install rename with a directory-destination
+# guard, shared by every mktemp + rename site below. Plain mv treats an
+# existing directory at DST as a container (POSIX mv destination-directory
+# semantics): the rename "succeeds" by placing SRC INSIDE the directory, so a
+# stale or Docker-created directory at a cache or working-copy path would
+# silently break the file-at-DST contract while the caller logs success.
+# Rejecting the directory up front routes such a boot through the caller's
+# existing cleanup/warn/error branch instead.
+_replace_file() {
+  _rf_src="$1"
+  _rf_dst="$2"
+  [ ! -d "$_rf_dst" ] || return 1
+  mv "$_rf_src" "$_rf_dst"
+}
+
 # _resolve_cached_password LABEL CACHE_FILE: shared engine for the credentials
 # this container generates itself. Prints the resolved password on stdout (all
 # logging goes to stderr); returns 1 when a strong password cannot be
@@ -61,7 +76,7 @@ _resolve_cached_password() {
   # mktemp in the root-only dir gives an O_EXCL, unpredictable temp name so
   # a compromised `nut` process cannot plant a symlink at the write target.
   if _rcp_tmp=$(mktemp "${_rcp_file}.tmp.XXXXXX" 2>/dev/null) \
-    && (umask 077 && printf '%s' "$_rcp_pw" >"$_rcp_tmp") && mv "$_rcp_tmp" "$_rcp_file"; then
+    && (umask 077 && printf '%s' "$_rcp_pw" >"$_rcp_tmp") && _replace_file "$_rcp_tmp" "$_rcp_file"; then
     printf 'level=info msg="generated %s; cached for intra-container restarts" path=%s\n' \
       "$_rcp_label" "$_rcp_file" >&2
   else
@@ -186,7 +201,7 @@ _generate_selfsigned_cert() {
     -keyout "$_gc_key" -out "$_gc_crt" -days "$TLS_CERT_DAYS" -nodes \
     -subj "/CN=nut-upsd" -addext "subjectAltName=DNS:nut-upsd" >/dev/null 2>&1 \
     && cat "$_gc_crt" "$_gc_key" >"$_gc_pem" \
-    && mv "$_gc_pem" "$TLS_CERT_CACHE"; then
+    && _replace_file "$_gc_pem" "$TLS_CERT_CACHE"; then
     rm -f "$_gc_key" "$_gc_crt"
     printf 'level=info msg="generated self-signed TLS certificate; cached for intra-container restarts (not persisted across recreations)" path=%s validity_days=%d\n' \
       "$TLS_CERT_CACHE" "$TLS_CERT_DAYS" >&2
@@ -211,7 +226,7 @@ _install_cert_working_copy() {
   _ic_tmp=$(_tls_mktemp "$_ic_dst") || return 1
   if cat "$_ic_src" >"$_ic_tmp" \
     && chown root:nut "$_ic_tmp" && chmod 640 "$_ic_tmp" \
-    && mv "$_ic_tmp" "$_ic_dst"; then
+    && _replace_file "$_ic_tmp" "$_ic_dst"; then
     return 0
   fi
   rm -f "$_ic_tmp"
