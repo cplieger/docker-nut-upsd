@@ -188,17 +188,18 @@ pull requests and on every release; the authoritative, current results
 live in the repository's Security workflow runs and Security tab, not
 in this README. As a point-in-time note: Trivy reports zero fixed
 actionable OS CVEs, while Grype additionally reports the unfixed
-BusyBox-wget advisory (CVE-2025-60876) — wget exists only for the
-builder stage and is never invoked by the runtime scripts.
+BusyBox-wget advisory (CVE-2025-60876) — the wget applet ships in
+the image's BusyBox multi-call binary but is never invoked by the
+runtime scripts (only the builder stage uses wget, to fetch sources).
 
-| Tool                                             | Result                                                                                         |
-| ------------------------------------------------ | ---------------------------------------------------------------------------------------------- |
-| [shellcheck](https://www.shellcheck.net/)        | Clean                                                                                          |
-| [hadolint](https://github.com/hadolint/hadolint) | DL3018 (unpinned apk, accepted)                                                                |
-| [gitleaks](https://github.com/gitleaks/gitleaks) | No secrets detected                                                                            |
-| [trivy](https://trivy.dev/)                      | Scanned on PRs/releases (see Security tab); currently 0 fixed actionable OS CVEs               |
-| [grype](https://github.com/anchore/grype)        | Scanned on PRs/releases; currently flags unfixed CVE-2025-60876 (BusyBox wget, builder-only)   |
-| [semgrep](https://semgrep.dev/)                  | 3 accepted (missing USER: root-by-design; IFS save/restore in validate.sh x2: false positives) |
+| Tool                                             | Result                                                                                            |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------- |
+| [shellcheck](https://www.shellcheck.net/)        | Clean                                                                                             |
+| [hadolint](https://github.com/hadolint/hadolint) | DL3018 (unpinned apk, accepted)                                                                   |
+| [gitleaks](https://github.com/gitleaks/gitleaks) | No secrets detected                                                                               |
+| [trivy](https://trivy.dev/)                      | Scanned on PRs/releases (see Security tab); currently 0 fixed actionable OS CVEs                  |
+| [grype](https://github.com/anchore/grype)        | Scanned on PRs/releases; currently flags unfixed CVE-2025-60876 (BusyBox wget, unused at runtime) |
+| [semgrep](https://semgrep.dev/)                  | 3 accepted (missing USER: root-by-design; IFS save/restore in validate.sh x2: false positives)    |
 
 All source versions are tracked by Renovate. The
 multi-stage build compiles each platform natively on its own
