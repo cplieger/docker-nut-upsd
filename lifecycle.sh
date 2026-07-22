@@ -95,10 +95,7 @@ read_pidfile() {
 # on success, 1 on timeout.
 wait_for_pidfile() {
   # $1 = label, $2 = absolute PID file path, $3 = expected daemon binary.
-  # Resolve the expected side once so driver symlinks compare canonically
-  # against /proc/<pid>/exe (which the kernel resolves).
   : "${3:?wait_for_pidfile requires an expected binary path}"
-  _wf_exe=$(readlink -f "$3" 2>/dev/null) || _wf_exe="$3"
   _wf_i=0
   while [ "$_wf_i" -lt "$PIDFILE_POLL_MAX" ]; do
     # Pidfiles live in the nut-writable /var/run/nut; only trust strictly
@@ -107,11 +104,11 @@ wait_for_pidfile() {
     case "$_wf_pid" in
       '' | *[!0-9]*) ;; # empty, partial write, or untrusted content: keep polling
       *[!0]*)
-        # Live PID whose /proc/<pid>/exe resolves to the expected daemon —
+        # Live PID verified as the expected daemon (pid_matches_binary) —
         # a planted PID of some unrelated live process must not satisfy the
         # startup gate (completes restart_ups_driver's trust boundary).
         if kill -0 "$_wf_pid" 2>/dev/null \
-          && [ "$(readlink -f "/proc/$_wf_pid/exe" 2>/dev/null)" = "$_wf_exe" ]; then
+          && pid_matches_binary "$_wf_pid" "$3"; then
           return 0
         fi
         ;;
@@ -193,11 +190,39 @@ driver_pidfile() {
 }
 
 # driver_binary: installed driver path (--with-drvpath=/usr/lib/nut in the
-# Dockerfile). Centralized like driver_pidfile: the /proc/<pid>/exe identity
+# Dockerfile). Centralized like driver_pidfile: the process-identity
 # checks in restart_ups_driver and the entrypoint's wait_for_pidfile gate must
 # compare against the same literal.
 driver_binary() {
   printf '/usr/lib/nut/%s' "$UPS_DRIVER"
+}
+
+# pid_matches_binary PID BINARY: verify the live process PID is an instance of
+# BINARY. Prefers the kernel-truth /proc/<pid>/exe symlink — but a NUT daemon
+# setuid()s from root to nut WITHOUT exec-ing afterwards, which clears its
+# dumpable flag, and reading a non-dumpable process's exe link requires
+# CAP_SYS_PTRACE, which Docker's default capability set does not grant (even
+# to root). So when exe is unreadable, fall back to the world-readable
+# /proc/<pid>/comm, compared against the kernel-truncated (TASK_COMM_LEN = 15
+# chars) basename of BINARY. comm is self-reported (prctl PR_SET_NAME), so
+# the fallback is deliberately weaker: it still shields every distinctly-named
+# process (upsd, upsmon, PID 1) from a planted-PID confused-deputy kill, and a
+# compromised nut process renaming itself to the driver's comm only marks the
+# attacker's OWN process for the kill — no privilege gained.
+pid_matches_binary() {
+  _pm_pid=$1
+  _pm_bin=$2
+  _pm_exe=$(readlink -f "/proc/$_pm_pid/exe" 2>/dev/null) || _pm_exe=""
+  if [ -n "$_pm_exe" ]; then
+    _pm_want=$(readlink -f "$_pm_bin" 2>/dev/null) || _pm_want="$_pm_bin"
+    [ "$_pm_exe" = "$_pm_want" ]
+    return
+  fi
+  # Bounded read (comm is <=16 bytes by contract; head caps a raced special
+  # file); $() strips the trailing newline.
+  _pm_comm=$(head -c 64 "/proc/$_pm_pid/comm" 2>/dev/null) || return 1
+  [ -n "$_pm_comm" ] || return 1
+  [ "$_pm_comm" = "$(printf '%.15s' "${_pm_bin##*/}")" ]
 }
 
 # kill_stale_driver_from_pidfile: hard-kill the wedged driver named by the
@@ -215,9 +240,9 @@ kill_stale_driver_from_pidfile() {
   # Confused-deputy guard: the pidfile lives in the nut-writable /var/run/nut,
   # so a compromised nut process can plant an arbitrary PID (1, upsmon, or
   # "-1" = every process) and turn this root SIGKILL into a kill of any
-  # container process. Only signal a strictly numeric PID whose
-  # /proc/<pid>/exe resolves to the expected driver binary
-  # (--with-drvpath=/usr/lib/nut in the Dockerfile); otherwise log, refuse to
+  # container process. Only signal a strictly numeric PID verified as an
+  # instance of the expected driver binary (pid_matches_binary;
+  # --with-drvpath=/usr/lib/nut in the Dockerfile); otherwise log, refuse to
   # signal, and let the unconditional rm below drop the untrusted pidfile.
   case "$_ksd_pid" in
     '') ;; # no pidfile: nothing to hard-kill
@@ -239,7 +264,7 @@ kill_stale_driver_from_pidfile() {
   if [ -n "$_ksd_pid" ] && kill -0 "$_ksd_pid" 2>/dev/null; then
     # Verify identity, then re-check existence immediately before signaling
     # to narrow the PID-reuse window as far as plain sh allows.
-    if [ "$(readlink -f "/proc/$_ksd_pid/exe" 2>/dev/null)" = "$(driver_binary)" ] \
+    if pid_matches_binary "$_ksd_pid" "$(driver_binary)" \
       && kill -0 "$_ksd_pid" 2>/dev/null; then
       kill -9 "$_ksd_pid" 2>/dev/null || true
     else

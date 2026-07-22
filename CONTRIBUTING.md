@@ -11,12 +11,12 @@ a single file.
 point. It sources the helper modules and orchestrates startup; the
 helpers are libraries, not programs:
 
-| Script               | Role                                                                                        |
-| -------------------- | ------------------------------------------------------------------------------------------- |
-| `validate.sh`        | Env-var validation functions + table-driven dispatch                                        |
-| `generate-config.sh` | Generates `ups.conf` / `upsd.conf` / `upsd.users` / `upsmon.conf`                           |
-| `lifecycle.sh`       | `stop_services`, `wait_for_pidfile`, USB comms-recovery watchdog, D-Bus poweroff-path probe |
-| `password.sh`        | `ADMIN_PASSWORD` generation/caching, weak-password warning                                  |
+| Script               | Role                                                                                                      |
+| -------------------- | --------------------------------------------------------------------------------------------------------- |
+| `validate.sh`        | Env-var validation functions + table-driven dispatch                                                      |
+| `generate-config.sh` | Generates `ups.conf` / `upsd.conf` / `upsd.users` / `upsmon.conf`                                         |
+| `lifecycle.sh`       | `stop_services`, `wait_for_pidfile`, USB comms-recovery watchdog, D-Bus poweroff-path probe               |
+| `password.sh`        | Generated-credential caching (`ADMIN_PASSWORD`, internal `local_upsmon`, TLS cert), weak-password warning |
 
 More scripts are invoked by NUT at runtime (not sourced):
 
@@ -83,6 +83,15 @@ new generated file should respect that same override hook.
 - **PID-file polling, not `pgrep`.** `wait_for_pidfile` waits on the
   daemon's PID file (the signal upstream relies on) to dodge BusyBox
   `pgrep` quirks with daemonized processes.
+- **`/proc/<pid>/exe` is unreadable for the NUT daemons.** They
+  `setuid()` from root to `nut` without exec-ing afterwards, which
+  clears the process's dumpable flag — and reading a non-dumpable
+  process's `exe` link needs `CAP_SYS_PTRACE`, which Docker's default
+  capability set does not grant (not even to root). Any PID-identity
+  check must go through `pid_matches_binary` (lifecycle.sh), which
+  falls back to the world-readable `/proc/<pid>/comm`; comparing `exe`
+  directly works in build-stage tests (dumpable shell) and then fails
+  every real boot.
 - **Runs as root by design.** USB access (`upsdrvctl`) and config
   ownership need it; `upsd` drops to user `nut` internally via configure
   flags. The Trivy AVD-DS-0002 finding is suppressed in `.trivyignore`.
@@ -95,14 +104,37 @@ new generated file should respect that same override hook.
   node from the container. The restart re-opens the device while still
   root, which is why the driver must not be started already-dropped to
   `nut`. Keep the watchdog's restart path root-capable.
-- **Admin-password cache is root-only.** The generated `ADMIN_PASSWORD`
-  is cached at `/var/run/nut-secrets/admin_password`, in a `root:root`
-  mode-700 directory created in the Dockerfile, not in the
+- **Password caches are root-only.** The generated credentials
+  (`ADMIN_PASSWORD` at `/var/run/nut-secrets/admin_password`, the
+  internal `local_upsmon` password beside it) are cached in a
+  `root:root` mode-700 directory created in the Dockerfile, not in the
   `nut`-writable `/var/run/nut` that holds PID files. The entrypoint
-  writes it as root via `mktemp` + atomic rename, so a compromised
+  writes them as root via `mktemp` + atomic rename, so a compromised
   `nut`-user process cannot pre-plant a symlink at the cache path. Don't
-  move it back to a `nut`-writable location or use a predictable `.$$`
+  move them back to a `nut`-writable location or use a predictable `.$$`
   temp name.
+- **The generated `upsd.users`/`upsmon.conf` pair links via
+  `[local_upsmon]`.** The bundled `upsmon` authenticates with the
+  reserved internal account (`upsmon primary`); the network-facing
+  `[$API_USER]` is written `upsmon secondary`. That cross-file contract
+  only holds when BOTH files are generated — with a `*.user` override
+  mounted for exactly one of them, the generated half falls back to the
+  legacy `API_USER`/`API_PASSWORD` pair and logs a `level=warn`. See the
+  credential-topology comment block in `generate-config.sh` before
+  touching either generator.
+- **upsd reads `CERTFILE` as the `nut` user, not root.** `ssl_init()`
+  runs _after_ `become_user()` (see the "keyfile must be readable by nut
+  user" comment in NUT's `server/upsd.c`), so the STARTTLS PEM must be
+  readable post-privilege-drop or upsd exits fatally at startup. That is
+  why the self-signed cert is _cached_ in the root-only
+  `/var/run/nut-secrets` (same hardening as the password caches) but
+  _installed_ as a `root:nut` 640 working copy at
+  `/etc/nut/upsd-selfsigned.pem` for upsd to serve — and why the
+  operator-mounted `/etc/nut/upsd.pem` is excluded from the entrypoint's
+  blanket `/etc/nut` chown/chmod sweep (a read-only bind mount would
+  EROFS the sweep and abort boot under `set -e`; `resolve_tls_cert`
+  handles that file's perms best-effort instead). Keep all three pieces
+  aligned when touching the TLS path.
 - **`chgrp` on the USB bus is best-effort.** Both the startup and the
   watchdog `chgrp -R nut /dev/bus/usb` are guarded (warn-only), so the
   container still starts on a host where the chgrp EPERMs (user-namespace

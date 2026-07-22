@@ -20,6 +20,8 @@ set -eu
 . /usr/local/bin/generate-config.sh
 # shellcheck source=/dev/null
 . /usr/local/bin/lifecycle.sh
+# shellcheck source=/dev/null
+. /usr/local/bin/password.sh
 
 fail=0
 log() { printf '%s\n' "$*"; }
@@ -36,7 +38,9 @@ done
 # 2. Valid env passes validation and generates all four config files.
 export UPS_NAME=ups UPS_DESC="Test UPS" UPS_DRIVER=usbhid-ups UPS_PORT=auto \
   API_USER=monuser API_PASSWORD=secret API_ADDRESS=0.0.0.0 API_PORT=3493 \
-  ADMIN_PASSWORD=adminpass SHUTDOWN_CMD=/usr/local/bin/nut-shutdown-noop.sh \
+  API_TLS=true \
+  ADMIN_PASSWORD=adminpass LOCAL_UPSMON_PASSWORD=localmonpass \
+  SHUTDOWN_CMD=/usr/local/bin/nut-shutdown-noop.sh \
   POLLFREQ=5 POLLFREQALERT=5 DEADTIME=15 FINALDELAY=5 HOSTSYNC=15 \
   NOCOMMWARNTIME=300 RBWARNTIME=43200 \
   COMMS_WATCHDOG=true COMMS_CHECK_INTERVAL=15 COMMS_RECOVERY_TIMEOUT=90 \
@@ -45,6 +49,14 @@ export UPS_NAME=ups UPS_DESC="Test UPS" UPS_DRIVER=usbhid-ups UPS_PORT=auto \
 if ! out=$( (run_validations) 2>&1); then
   err "FAIL: run_validations rejected a valid environment"
   err "$out"
+  fail=1
+fi
+
+# TLS is on in the baseline env (the production default), so provision the
+# cert exactly like the entrypoint does before generating configs; the
+# provisioning behavior itself is exercised in section 7.
+if ! resolve_tls_cert 2>/dev/null; then
+  err "FAIL: resolve_tls_cert could not provision the self-signed certificate"
   fail=1
 fi
 
@@ -69,6 +81,44 @@ grep -q 'pollonly' /etc/nut/ups.conf || {
 }
 grep -q 'LISTEN 0.0.0.0 3493' /etc/nut/upsd.conf || {
   err "FAIL: upsd.conf missing LISTEN directive"
+  fail=1
+}
+grep -q '^CERTFILE /etc/nut/upsd-selfsigned.pem$' /etc/nut/upsd.conf || {
+  err "FAIL: upsd.conf missing CERTFILE with API_TLS=true"
+  fail=1
+}
+grep -q '^DISABLE_WEAK_SSL true$' /etc/nut/upsd.conf || {
+  err "FAIL: upsd.conf missing DISABLE_WEAK_SSL with API_TLS=true"
+  fail=1
+}
+
+# Credential topology (generate-config.sh): with no *.user overrides (the
+# test-stage default), the generated pair links via the reserved internal
+# [local_upsmon] account — the bundled upsmon holds the one `upsmon primary`
+# slot — and the network-facing [$API_USER] account is a plain secondary.
+# upsd_users_role SECTION: print the `upsmon <role>` role of one upsd.users
+# section (empty when the section or its role line is absent).
+upsd_users_role() {
+  awk -v want="[$1]" '
+    $0 == want { insec = 1; next }
+    /^\[/ { insec = 0 }
+    insec && $1 == "upsmon" { print $2 }
+  ' /etc/nut/upsd.users
+}
+grep -q '^\[local_upsmon\]$' /etc/nut/upsd.users || {
+  err "FAIL: generated upsd.users missing the reserved [local_upsmon] section"
+  fail=1
+}
+if [ "$(upsd_users_role local_upsmon)" != "primary" ]; then
+  err "FAIL: [local_upsmon] does not carry 'upsmon primary'"
+  fail=1
+fi
+if [ "$(upsd_users_role monuser)" != "secondary" ]; then
+  err "FAIL: [monuser] must carry 'upsmon secondary' and not primary (got '$(upsd_users_role monuser)')"
+  fail=1
+fi
+grep -q '^MONITOR ups@127.0.0.1:3493 1 "local_upsmon" "localmonpass" primary$' /etc/nut/upsmon.conf || {
+  err "FAIL: generated upsmon.conf MONITOR does not authenticate with the internal local_upsmon credential"
   fail=1
 }
 
@@ -97,11 +147,66 @@ if ! (
   canonicalize_validated_values
   run_validations >/dev/null 2>&1 || exit 1
   generate_all_configs >/dev/null 2>&1
-  grep -q '^MONITOR ups@127.0.0.1:3493 1 "monuser" "secret" primary$' /etc/nut/upsmon.conf
+  grep -q '^MONITOR ups@127.0.0.1:3493 1 "local_upsmon" "localmonpass" primary$' /etc/nut/upsmon.conf
 ); then
   err "FAIL: trailing-LF API_PORT did not canonicalize to a one-line MONITOR directive"
   fail=1
 fi
+
+# Partial-override fallback (generate-config.sh credential topology): with
+# upsd.users.user mounted and upsmon.conf still generated, the internal
+# cross-file credential is unusable, so the generated MONITOR must fall back
+# to the legacy API pair and the fallback must be logged at level=warn.
+printf '# override fixture\n' >/etc/nut/upsd.users.user
+FALLBACK_ERR=$(mktemp)
+generate_all_configs >/dev/null 2>"$FALLBACK_ERR"
+if ! grep -q '^MONITOR ups@127.0.0.1:3493 1 "monuser" "secret" primary$' /etc/nut/upsmon.conf; then
+  err "FAIL: with upsd.users.user mounted, generated MONITOR did not fall back to the API user/password pair"
+  fail=1
+fi
+if ! grep -q 'level=warn msg="upsd.users.user mounted without upsmon.conf.user' "$FALLBACK_ERR"; then
+  err "FAIL: MONITOR API-pair fallback was not logged at level=warn"
+  fail=1
+fi
+rm -f /etc/nut/upsd.users.user "$FALLBACK_ERR"
+#    Mirror direction: with upsmon.conf.user mounted and upsd.users generated,
+#    [$API_USER] must keep `upsmon primary` (the mounted MONITOR line
+#    authenticates with the API pair) and no [local_upsmon] stanza may exist.
+printf '# override fixture\n' >/etc/nut/upsmon.conf.user
+FALLBACK_ERR=$(mktemp)
+generate_all_configs >/dev/null 2>"$FALLBACK_ERR"
+if [ "$(upsd_users_role monuser)" != "primary" ]; then
+  err "FAIL: with upsmon.conf.user mounted, generated [monuser] did not keep 'upsmon primary'"
+  fail=1
+fi
+if grep -q '^\[local_upsmon\]$' /etc/nut/upsd.users; then
+  err "FAIL: with upsmon.conf.user mounted, generated upsd.users still defines [local_upsmon]"
+  fail=1
+fi
+if ! grep -q 'level=warn msg="upsmon.conf.user mounted without upsd.users.user' "$FALLBACK_ERR"; then
+  err "FAIL: upsd.users API-pair fallback was not logged at level=warn"
+  fail=1
+fi
+rm -f /etc/nut/upsmon.conf.user "$FALLBACK_ERR"
+
+# resolve_local_upsmon_password (password.sh): generates a PASSWORD_LENGTH-char
+# secret, caches it root-only, and reuses the cache on the next resolve
+# (stable across in-container restarts) — and ignores any inherited env value
+# (the exported 12-char test value must NOT survive a resolve). Subshell keeps
+# the fixed test LOCAL_UPSMON_PASSWORD in place for the config assertions.
+rm -f /var/run/nut-secrets/local_upsmon_password
+if ! (
+  resolve_local_upsmon_password 2>/dev/null
+  _first="$LOCAL_UPSMON_PASSWORD"
+  [ "${#_first}" -eq "$PASSWORD_LENGTH" ] || exit 1
+  resolve_local_upsmon_password 2>/dev/null
+  [ "$LOCAL_UPSMON_PASSWORD" = "$_first" ]
+); then
+  err "FAIL: resolve_local_upsmon_password did not generate and reuse a cached ${PASSWORD_LENGTH}-char secret"
+  fail=1
+fi
+rm -f /var/run/nut-secrets/local_upsmon_password
+
 # Regenerate with the baseline env so later steps see the section-2 configs.
 generate_all_configs >/dev/null 2>&1
 
@@ -112,6 +217,16 @@ if (
   run_validations
 ) >/dev/null 2>&1; then
   err "FAIL: bracket-injection UPS_NAME was accepted"
+  fail=1
+fi
+# Bracketed IPv6 must be rejected: bare IPv6 (::1) is the accepted spelling,
+# because upsd_probe_host brackets colon-bearing hosts itself — accepting
+# [::1] would double-bracket the probe ([[::1]]) and break the healthcheck.
+if (
+  API_ADDRESS='[::1]'
+  run_validations
+) >/dev/null 2>&1; then
+  err "FAIL: bracketed-IPv6 API_ADDRESS was accepted"
   fail=1
 fi
 # A dash-leading UPS_NAME must fail fast at boot: every CLI consumer passes
@@ -201,6 +316,24 @@ if (
   err "FAIL: whitespace API_USER was accepted"
   fail=1
 fi
+# API_USER must not shadow a reserved generated account: a [$API_USER] section
+# named like one would merge into the reserved stanza and clobber its
+# credential ([admin] = set/FSD authority; [local_upsmon] = the bundled
+# upsmon's `upsmon primary` credential).
+if (
+  API_USER='admin'
+  run_validations
+) >/dev/null 2>&1; then
+  err "FAIL: API_USER=admin was accepted (reserved internal admin account)"
+  fail=1
+fi
+if (
+  API_USER='local_upsmon'
+  run_validations
+) >/dev/null 2>&1; then
+  err "FAIL: API_USER=local_upsmon was accepted (reserved internal monitor account)"
+  fail=1
+fi
 # snmp-ups takes a network endpoint: a host must pass, USB auto-detection must not.
 if ! (
   UPS_DRIVER='snmp-ups'
@@ -233,11 +366,14 @@ if (
   fail=1
 fi
 
-# 4. Watchdog / transport helpers are defined (sourced from validate.sh and
-#    lifecycle.sh). stop_watchdog and stop_dbus_probe live in entrypoint.sh
-#    and are not asserted here.
+# 4. Watchdog / transport / credential helpers are defined (sourced from
+#    validate.sh, generate-config.sh, lifecycle.sh, and password.sh).
+#    stop_watchdog and stop_dbus_probe live in entrypoint.sh and are not
+#    asserted here.
 for fn in upsd_probe_host comms_fresh upsd_responsive restart_ups_driver comms_watchdog watchdog_epoch \
-  driver_transport usb_bus_required dbus_poweroff_path_ok dbus_liveness_probe read_pidfile; do
+  driver_transport usb_bus_required dbus_poweroff_path_ok dbus_liveness_probe read_pidfile \
+  local_upsmon_credential_active resolve_admin_password resolve_local_upsmon_password \
+  resolve_tls_cert pid_matches_binary; do
   if ! command -v "$fn" >/dev/null 2>&1; then
     err "FAIL: helper function missing: $fn"
     fail=1
@@ -270,6 +406,21 @@ if [ -n "$(read_pidfile /var/run/nut/rp-fifo.pid)" ]; then
 fi
 rm -f /var/run/nut/rp-regular.pid /var/run/nut/rp-symlink.pid \
   /var/run/nut/rp-fifo.pid /var/run/nut-secrets/rp-secret
+
+#    pid_matches_binary: kernel-truth identity match for a live PID whose exe
+#    link is readable (this build-stage shell is dumpable, so it is); a
+#    mismatched binary must be refused. The comm fallback branch (exe
+#    unreadable for the non-dumpable setuid NUT daemons under default Docker
+#    caps) needs a real daemon boot and is exercised by the runtime
+#    healthcheck/watchdog paths, not at build time.
+if ! pid_matches_binary $$ /bin/busybox; then
+  err "FAIL: pid_matches_binary rejected this shell as a /bin/busybox instance"
+  fail=1
+fi
+if pid_matches_binary $$ /usr/sbin/upsd; then
+  err "FAIL: pid_matches_binary accepted a binary this shell is not"
+  fail=1
+fi
 
 #    upsd_probe_host maps ONLY the wildcard binds (and localhost) to loopback;
 #    specific IPv4 binds — including 127.0.0.2-style loopback addresses that a
@@ -441,6 +592,111 @@ if dbus_poweroff_path_ok; then
   err "FAIL: dbus_poweroff_path_ok returned success without a mounted D-Bus socket"
   fail=1
 fi
+
+# 7. TLS (STARTTLS) support — resolve_tls_cert / generate_upsd_conf
+#    (password.sh, generate-config.sh). Section 2 already provisioned the
+#    self-signed cert and asserted the CERTFILE/DISABLE_WEAK_SSL directives.
+#
+#    The self-signed PEM: cache and nut-readable working copy both exist, the
+#    cert parses, and cert + private key live in the ONE file NUT's OpenSSL
+#    backend expects (docs/security.txt layout: certificate first, then key).
+for pem in /var/run/nut-secrets/upsd-selfsigned.pem /etc/nut/upsd-selfsigned.pem; do
+  if ! openssl x509 -in "$pem" -noout 2>/dev/null; then
+    err "FAIL: self-signed PEM missing or certificate does not parse: $pem"
+    fail=1
+  fi
+  if ! openssl pkey -in "$pem" -noout 2>/dev/null; then
+    err "FAIL: self-signed PEM missing the private key: $pem"
+    fail=1
+  fi
+done
+# upsd reads CERTFILE as the dropped nut user (ssl_init runs after
+# become_user), so the working copy must be root:nut 640 — and the root-only
+# cache must NOT be group-readable.
+if [ "$(stat -c '%U:%G %a' /etc/nut/upsd-selfsigned.pem)" != "root:nut 640" ]; then
+  err "FAIL: /etc/nut/upsd-selfsigned.pem is not root:nut 640 (got '$(stat -c '%U:%G %a' /etc/nut/upsd-selfsigned.pem)')"
+  fail=1
+fi
+if [ "$(stat -c '%U:%G %a' /var/run/nut-secrets/upsd-selfsigned.pem)" != "root:root 600" ]; then
+  err "FAIL: cached self-signed PEM is not root:root 600 (got '$(stat -c '%U:%G %a' /var/run/nut-secrets/upsd-selfsigned.pem)')"
+  fail=1
+fi
+
+#    Cache reuse: a second resolve must serve the SAME certificate (stable
+#    across in-container restarts), not mint a new one.
+tls_fp_first=$(tls_cert_fingerprint /var/run/nut-secrets/upsd-selfsigned.pem)
+if ! resolve_tls_cert 2>/dev/null; then
+  err "FAIL: resolve_tls_cert failed on a warm cache"
+  fail=1
+fi
+if [ -z "$tls_fp_first" ] || [ "$(tls_cert_fingerprint /var/run/nut-secrets/upsd-selfsigned.pem)" != "$tls_fp_first" ]; then
+  err "FAIL: resolve_tls_cert did not reuse the cached certificate (fingerprint changed)"
+  fail=1
+fi
+
+#    Invalid cache: corrupt it and resolve again — must regenerate a parsing
+#    PEM with a NEW fingerprint rather than serve the corrupted file.
+printf 'not a pem\n' >/var/run/nut-secrets/upsd-selfsigned.pem
+if ! resolve_tls_cert 2>/dev/null; then
+  err "FAIL: resolve_tls_cert failed to regenerate over a corrupted cache"
+  fail=1
+fi
+tls_fp_regen=$(tls_cert_fingerprint /var/run/nut-secrets/upsd-selfsigned.pem)
+if [ -z "$tls_fp_regen" ] || [ "$tls_fp_regen" = "$tls_fp_first" ]; then
+  err "FAIL: corrupted TLS cache was not regenerated (fingerprint '$tls_fp_regen')"
+  fail=1
+fi
+
+#    Operator-mounted PEM (/etc/nut/upsd.pem): used verbatim — TLS_CERT_PATH
+#    points at it and the file is never rewritten or regenerated.
+cp /var/run/nut-secrets/upsd-selfsigned.pem /etc/nut/upsd.pem
+tls_fp_mounted=$(tls_cert_fingerprint /etc/nut/upsd.pem)
+if ! (
+  resolve_tls_cert 2>/dev/null || exit 1
+  [ "$TLS_CERT_PATH" = "/etc/nut/upsd.pem" ] || exit 1
+  [ "$(tls_cert_fingerprint /etc/nut/upsd.pem)" = "$tls_fp_mounted" ]
+); then
+  err "FAIL: mounted /etc/nut/upsd.pem was not used verbatim as TLS_CERT_PATH"
+  fail=1
+fi
+if ! (
+  resolve_tls_cert >/dev/null 2>&1
+  generate_all_configs >/dev/null 2>&1
+  grep -q '^CERTFILE /etc/nut/upsd.pem$' /etc/nut/upsd.conf
+); then
+  err "FAIL: generated upsd.conf does not reference the mounted PEM"
+  fail=1
+fi
+rm -f /etc/nut/upsd.pem
+
+#    API_TLS=false: no TLS directives and no new cert — upsd.conf must be
+#    byte-identical to the pre-TLS-feature output.
+if ! (
+  API_TLS=false
+  generate_all_configs >/dev/null 2>&1
+  printf 'LISTEN 0.0.0.0 3493\n' | cmp -s - /etc/nut/upsd.conf
+); then
+  err "FAIL: API_TLS=false upsd.conf is not byte-identical to the pre-TLS output"
+  fail=1
+fi
+
+#    Boolean rejection: the table row guards injection (newlines), and the
+#    entrypoint's normalize_bool — same convention as COMMS_WATCHDOG — refuses
+#    unrecognized spellings so a security toggle cannot silently degrade.
+if (
+  API_TLS="$(printf 'true\ninjected')"
+  run_validations
+) >/dev/null 2>&1; then
+  err "FAIL: newline-injection API_TLS was accepted"
+  fail=1
+fi
+if normalize_bool API_TLS banana >/dev/null 2>&1; then
+  err "FAIL: API_TLS=banana was accepted by normalize_bool"
+  fail=1
+fi
+
+# Restore the section-2 baseline configs for any future sections.
+generate_all_configs >/dev/null 2>&1
 
 [ "$fail" -eq 0 ] && log "nut-upsd smoke: ok"
 exit "$fail"

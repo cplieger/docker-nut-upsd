@@ -24,6 +24,11 @@ set -eu
 : "${API_PASSWORD:=secret}"
 : "${API_ADDRESS:=0.0.0.0}"
 : "${API_PORT:=3493}"
+# STARTTLS on the upsd listener (opportunistic: clients that never request it
+# keep talking cleartext, so legacy clients are unaffected). Serves an
+# operator-mounted /etc/nut/upsd.pem, else a boot-generated self-signed cert
+# — see resolve_tls_cert (password.sh).
+: "${API_TLS:=true}"
 : "${POLLFREQ:=5}"
 : "${POLLFREQALERT:=5}"
 : "${DEADTIME:=15}"
@@ -59,6 +64,13 @@ set -eu
 # Password resolution (from password.sh)
 # ---------------------------------------------------------------------------
 resolve_admin_password
+# The internal upsmon credential only exists when both upsd.users and
+# upsmon.conf are generated (see the credential-topology block in
+# generate-config.sh); with an override mounted for either file, the
+# generated half uses the legacy API pair and no internal secret is needed.
+if local_upsmon_credential_active; then
+  resolve_local_upsmon_password
+fi
 
 # Canonicalize every validated env var BEFORE validation and any raw-value
 # interpretation: $() strips trailing newlines, so a value with a trailing LF
@@ -115,6 +127,11 @@ fi
 # unrecognized value rather than silently disabling the watchdog.
 COMMS_WATCHDOG=$(normalize_bool COMMS_WATCHDOG "$COMMS_WATCHDOG") || exit 1
 
+# Normalize API_TLS the same way. Fail loud on an unrecognized value: a
+# security toggle that quietly fell back to either mode would betray whichever
+# posture the operator thought they configured.
+API_TLS=$(normalize_bool API_TLS "$API_TLS") || exit 1
+
 # Canonicalize watchdog integers to base-10 before they reach $(( )) in lifecycle.sh
 # (leading zeros are otherwise parsed as octal — see strip_leading_zeros).
 COMMS_CHECK_INTERVAL=$(strip_leading_zeros "$COMMS_CHECK_INTERVAL")
@@ -124,6 +141,20 @@ COMMS_BACKOFF_FACTOR=$(strip_leading_zeros "$COMMS_BACKOFF_FACTOR")
 DBUS_PROBE_INTERVAL=$(strip_leading_zeros "$DBUS_PROBE_INTERVAL")
 
 # ---------------------------------------------------------------------------
+# TLS certificate provisioning (from password.sh)
+# ---------------------------------------------------------------------------
+# Runs whenever API_TLS=true, even when a mounted upsd.conf.user will skip
+# upsd.conf generation: the override owns the TLS directives, and its author
+# may point CERTFILE at either the mounted or the self-signed path (README),
+# so the cert must exist either way. Must precede generate_all_configs, which
+# writes the resolved TLS_CERT_PATH into upsd.conf.
+if [ "$API_TLS" = "true" ]; then
+  resolve_tls_cert || exit 1
+else
+  printf 'level=info msg="TLS disabled (API_TLS=false); upsd serves cleartext only"\n' >&2
+fi
+
+# ---------------------------------------------------------------------------
 # Generate NUT config files (from generate-config.sh)
 # ---------------------------------------------------------------------------
 generate_all_configs
@@ -131,9 +162,13 @@ generate_all_configs
 # ---------------------------------------------------------------------------
 # Permissions
 # ---------------------------------------------------------------------------
-find /etc/nut ! -name '*.user' -exec chown root:nut {} +
+# upsd.pem (the operator-mounted TLS PEM) is excluded like the *.user
+# overrides: it is typically a read-only bind mount, where chown/chmod fail
+# with EROFS and would abort the boot under set -e. resolve_tls_cert
+# (password.sh) already handled its permissions best-effort.
+find /etc/nut ! -name '*.user' ! -name upsd.pem -exec chown root:nut {} +
 find /etc/nut -type d -exec chmod 750 {} +
-find /etc/nut -type f ! -name '*.user' -exec chmod 640 {} +
+find /etc/nut -type f ! -name '*.user' ! -name upsd.pem -exec chmod 640 {} +
 if usb_bus_required; then
   if chgrp -R nut /dev/bus/usb 2>/dev/null; then
     printf 'level=info msg="chgrp nut:/dev/bus/usb applied (host device nodes)"\n' >&2
@@ -211,12 +246,16 @@ fi
 
 # Clear temp files leaked by a kill that landed between mktemp and rm -f/mv
 # in lifecycle.sh's capture helpers (start_recovered_driver, stop_nut_cmd) or
-# resolve_admin_password (password.sh); they live in the writable layer and
-# would otherwise accumulate across container restarts. Safe here: this run's
-# own admin-password temp was already renamed or removed by
-# resolve_admin_password above, and the capture temps are created later.
+# the password/TLS-certificate resolvers (password.sh); they live in the
+# writable layer and would otherwise accumulate across container restarts.
+# Safe here: this run's own password and TLS temps were already renamed or
+# removed by the resolve_* calls above, and the capture temps are created
+# later.
 rm -f /var/run/nut-secrets/wd-restart.* /var/run/nut-secrets/stop-cmd.* \
-  /var/run/nut-secrets/admin_password.tmp.*
+  /var/run/nut-secrets/admin_password.tmp.* \
+  /var/run/nut-secrets/local_upsmon_password.tmp.* \
+  /var/run/nut-secrets/upsd-selfsigned.pem.tmp.* \
+  /etc/nut/upsd-selfsigned.pem.tmp.*
 
 # Clear a stale POWERDOWNFLAG (killpower) from a previous lifecycle. upsmon
 # creates it on FSD; /var/run/nut-secrets is the writable layer so it survives

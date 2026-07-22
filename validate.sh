@@ -212,8 +212,9 @@ UPS_DRIVER:newlines,identifier
 UPS_PORT:newlines,backslash
 API_USER:newlines,identifier
 API_PASSWORD:newlines,quotes,backslash
-API_ADDRESS:newlines,quotes,backslash
+API_ADDRESS:newlines,quotes,backslash,brackets
 API_PORT:newlines,port
+API_TLS:newlines
 ADMIN_PASSWORD:newlines,quotes,backslash
 SHUTDOWN_ON_BATTERY_CRITICAL:newlines
 DBUS_PROBE_INTERVAL:numeric
@@ -272,6 +273,7 @@ _resolve_var() {
     API_PASSWORD) printf '%s' "${API_PASSWORD:-}" ;;
     API_ADDRESS) printf '%s' "${API_ADDRESS:-}" ;;
     API_PORT) printf '%s' "${API_PORT:-}" ;;
+    API_TLS) printf '%s' "${API_TLS:-}" ;;
     ADMIN_PASSWORD) printf '%s' "${ADMIN_PASSWORD:-}" ;;
     SHUTDOWN_ON_BATTERY_CRITICAL) printf '%s' "${SHUTDOWN_ON_BATTERY_CRITICAL:-}" ;;
     DBUS_PROBE_INTERVAL) printf '%s' "${DBUS_PROBE_INTERVAL:-}" ;;
@@ -346,6 +348,7 @@ canonicalize_validated_values() {
   API_PASSWORD=$(printf '%s' "${API_PASSWORD:-}")
   API_ADDRESS=$(printf '%s' "${API_ADDRESS:-}")
   API_PORT=$(printf '%s' "${API_PORT:-}")
+  API_TLS=$(printf '%s' "${API_TLS:-}")
   ADMIN_PASSWORD=$(printf '%s' "${ADMIN_PASSWORD:-}")
   SHUTDOWN_ON_BATTERY_CRITICAL=$(printf '%s' "${SHUTDOWN_ON_BATTERY_CRITICAL:-}")
   DBUS_PROBE_INTERVAL=$(printf '%s' "${DBUS_PROBE_INTERVAL:-}")
@@ -438,12 +441,20 @@ run_validations() {
       ;;
   esac
 
-  # API_USER must not be "admin": upsd.users already defines a hardcoded [admin]
-  # user (granted set/fsd/instcmds=all). A second [admin] section generated from
-  # API_USER=admin would merge into it and clobber the admin credential with
-  # API_PASSWORD, exposing the FSD/set-capable account under the weaker password.
+  # API_USER must not shadow a reserved generated account: upsd.users defines
+  # a hardcoded [admin] (the FSD/set-capable account) and — when both
+  # upsd.users and upsmon.conf are generated — the reserved internal monitor
+  # account [local_upsmon] (the bundled upsmon's `upsmon primary` credential;
+  # see generate-config.sh). A second section generated from API_USER with
+  # either name would merge into the reserved stanza and clobber its
+  # credential with API_PASSWORD, exposing that account's authority under the
+  # weaker network-facing password.
   if [ "$API_USER" = "admin" ]; then
     printf 'level=error msg="API_USER must not be admin (reserved for the internal NUT admin user)"\n' >&2
+    exit 1
+  fi
+  if [ "$API_USER" = "local_upsmon" ]; then
+    printf 'level=error msg="API_USER must not be local_upsmon (reserved for the internal upsmon monitor account)"\n' >&2
     exit 1
   fi
 }

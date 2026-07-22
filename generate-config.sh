@@ -61,11 +61,57 @@ UPSEOF
 }
 
 # --- upsd.conf — skipped if user-mounted ---
+# STARTTLS (API_TLS=true, the default): CERTFILE names the cert+key PEM
+# resolved by resolve_tls_cert (password.sh), and DISABLE_WEAK_SSL true pins
+# the handshake to TLS 1.2+ (upsd otherwise accepts TLS 1.0 and logs a
+# warning). STARTTLS is opportunistic in the NUT protocol — clients that
+# never request it keep talking cleartext — so enabling it breaks no legacy
+# client. With API_TLS=false the output stays byte-identical to the
+# pre-TLS-feature config.
 generate_upsd_conf() {
   use_user_override upsd.conf && return 0
   cat >/etc/nut/upsd.conf <<UPSDEOF
 LISTEN $API_ADDRESS $API_PORT
 UPSDEOF
+  if [ "$API_TLS" = "true" ]; then
+    cat >>/etc/nut/upsd.conf <<UPSDEOF
+CERTFILE $TLS_CERT_PATH
+DISABLE_WEAK_SSL true
+UPSDEOF
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Credential topology: which account links upsd.users to upsmon.conf
+# ---------------------------------------------------------------------------
+# The generated pair separates NUT's monitor roles the canonical way: the box
+# that owns the UPS (this container's bundled upsmon) runs the ONE `upsmon
+# primary`, and remote network clients are secondaries. So the bundled upsmon
+# authenticates with a reserved internal account — [local_upsmon], secret
+# auto-generated and cached root-only (resolve_local_upsmon_password,
+# password.sh) — that carries `upsmon primary` (the FSD-request authority),
+# while the network-facing [$API_USER] account is written `upsmon secondary`
+# (status-following only). validate.sh rejects API_USER=local_upsmon (and
+# =admin) so a generated [$API_USER] section can never merge with a reserved
+# stanza and clobber its credential.
+#
+# The internal credential is a contract BETWEEN two generated files (the
+# [local_upsmon] stanza in upsd.users and the MONITOR credential in
+# upsmon.conf), so it is only used when BOTH files are generated. When a
+# *.user override is mounted for exactly ONE of them, the generated half
+# falls back to the legacy shared API-pair contract — the only credential a
+# mounted half written against the documented env vars can be assumed to
+# know — and logs a level=warn naming the fallback:
+#   - upsd.users.user mounted, upsmon.conf generated: MONITOR authenticates
+#     with $API_USER/$API_PASSWORD (primary — the mounted users file decides
+#     what that account may do).
+#   - upsd.users generated, upsmon.conf.user mounted: [$API_USER] keeps
+#     `upsmon primary` so a mounted MONITOR line using the API pair keeps its
+#     primary slot; no [local_upsmon] stanza is generated (nothing would
+#     authenticate with it).
+# Both mounted: nothing is generated and no decision is needed.
+local_upsmon_credential_active() {
+  [ ! -e /etc/nut/upsd.users.user ] && [ ! -e /etc/nut/upsmon.conf.user ]
 }
 
 # --- upsd.users — skipped if user-mounted ---
@@ -77,11 +123,29 @@ generate_upsd_users() {
     actions = set
     actions = fsd
     instcmds = all
+USERSEOF
+  if local_upsmon_credential_active; then
+    cat >>/etc/nut/upsd.users <<USERSEOF
+
+[local_upsmon]
+    password = "$LOCAL_UPSMON_PASSWORD"
+    upsmon primary
+
+[$API_USER]
+    password = "$API_PASSWORD"
+    upsmon secondary
+USERSEOF
+  else
+    # Legacy fallback — see the credential-topology block above.
+    printf 'level=warn msg="upsmon.conf.user mounted without upsd.users.user; generated upsd.users keeps the API user as upsmon primary (cross-file credential contract with a mounted override)" user=%s\n' \
+      "$API_USER" >&2
+    cat >>/etc/nut/upsd.users <<USERSEOF
 
 [$API_USER]
     password = "$API_PASSWORD"
     upsmon primary
 USERSEOF
+  fi
 }
 
 # --- upsmon.conf — skipped if user-mounted ---
@@ -96,10 +160,24 @@ USERSEOF
 # this runs): upsd binds ONLY the LISTEN address generated from API_ADDRESS,
 # so upsmon must connect where upsd actually listens — the same mapping the
 # comms watchdog probe and the Dockerfile HEALTHCHECK apply.
+# The MONITOR credential is the internal [local_upsmon] account when both
+# upsd.users and upsmon.conf are generated, and falls back to the legacy
+# API pair when upsd.users is user-mounted — see the credential-topology
+# block above generate_upsd_users.
 generate_upsmon_conf() {
   use_user_override upsmon.conf && return 0
+  if local_upsmon_credential_active; then
+    _mon_user=local_upsmon
+    _mon_password="$LOCAL_UPSMON_PASSWORD"
+  else
+    # Legacy fallback — see the credential-topology block above.
+    printf 'level=warn msg="upsd.users.user mounted without upsmon.conf.user; generated upsmon.conf MONITOR falls back to the API user/password pair (cross-file credential contract with a mounted override)" user=%s\n' \
+      "$API_USER" >&2
+    _mon_user="$API_USER"
+    _mon_password="$API_PASSWORD"
+  fi
   cat >/etc/nut/upsmon.conf <<MONEOF
-MONITOR $UPS_NAME@$(upsd_probe_host):$API_PORT 1 "$API_USER" "$API_PASSWORD" primary
+MONITOR $UPS_NAME@$(upsd_probe_host):$API_PORT 1 "$_mon_user" "$_mon_password" primary
 SHUTDOWNCMD "$SHUTDOWN_CMD"
 POWERDOWNFLAG /var/run/nut-secrets/killpower
 NOTIFYCMD /usr/local/bin/nut-notify.sh
@@ -130,8 +208,18 @@ generate_all_configs() {
   : "${UPS_PORT:?generate_all_configs requires UPS_PORT}"
   : "${API_USER:?generate_all_configs requires API_USER}"
   : "${API_PASSWORD:?generate_all_configs requires API_PASSWORD}"
+  # Only required when the internal cross-file credential is in play (both
+  # upsd.users and upsmon.conf generated — see the credential-topology block).
+  if local_upsmon_credential_active; then
+    : "${LOCAL_UPSMON_PASSWORD:?generate_all_configs requires LOCAL_UPSMON_PASSWORD when upsd.users and upsmon.conf are both generated}"
+  fi
   : "${API_ADDRESS:?generate_all_configs requires API_ADDRESS}"
   : "${API_PORT:?generate_all_configs requires API_PORT}"
+  : "${API_TLS:?generate_all_configs requires API_TLS}"
+  # Only required when TLS is on (resolve_tls_cert sets it before this runs).
+  if [ "$API_TLS" = "true" ]; then
+    : "${TLS_CERT_PATH:?generate_all_configs requires TLS_CERT_PATH when API_TLS=true}"
+  fi
   : "${ADMIN_PASSWORD:?generate_all_configs requires ADMIN_PASSWORD}"
   : "${SHUTDOWN_CMD:?generate_all_configs requires SHUTDOWN_CMD}"
   : "${POLLFREQ:?generate_all_configs requires POLLFREQ}"
