@@ -172,6 +172,25 @@ if ! (
   fail=1
 fi
 rm -f /var/run/nut-secrets/admin_password
+# Canonicalize-then-default contract (entrypoint boot order): the := defaults
+# are a raw-value interpretation (an LF-only value is non-empty raw), so an
+# LF-only UPS_NAME (env-file artifact) must canonicalize to empty FIRST and
+# then take the documented default — without canonicalize-first the raw LF
+# dodges the default and fails validation (control characters) instead of
+# booting as "ups". This pins canonicalize_validated_values composed with the
+# := default in the documented order; the entrypoint's literal top-level call
+# ordering is inline flow and is NOT exercised here.
+if ! (
+  UPS_NAME="$(printf '\nx')"
+  UPS_NAME=${UPS_NAME%x}
+  canonicalize_validated_values
+  : "${UPS_NAME:=ups}"
+  [ "$UPS_NAME" = "ups" ] || exit 1
+  run_validations >/dev/null 2>&1
+); then
+  err "FAIL: LF-only UPS_NAME did not canonicalize to empty and take the documented default"
+  fail=1
+fi
 
 # Partial-override fallback (generate-config.sh credential topology): with
 # upsd.users.user mounted and upsmon.conf still generated, the internal

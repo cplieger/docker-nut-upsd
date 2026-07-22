@@ -13,6 +13,20 @@ set -eu
 # shellcheck source-path=SCRIPTDIR source=password.sh
 . /usr/local/bin/password.sh
 
+# Canonicalize every validated env var BEFORE any raw-value interpretation —
+# including the := defaults right below: an LF-only value (env-file artifact)
+# is non-empty raw, so it would dodge the documented default and then fail
+# validation (or reach generate_all_configs' bare :? abort) instead of
+# defaulting. $() strips trailing newlines, so a value with a trailing LF is
+# defaulted, checked, classified (driver_transport reads the raw value), and
+# written as the same byte sequence. Must also precede password resolution:
+# resolve_admin_password's emptiness test is a raw-value interpretation, and
+# an LF-only ADMIN_PASSWORD must canonicalize to empty (auto-generate) rather
+# than dodge generation and abort later at generate_all_configs' :? guard.
+# set -u safe here (before defaults exist): every assignment in it uses
+# ${VAR:-}. See validate.sh canonicalize_validated_values.
+canonicalize_validated_values
+
 # ---------------------------------------------------------------------------
 # Default configuration
 # ---------------------------------------------------------------------------
@@ -59,16 +73,6 @@ set -eu
 # Poweroff-path liveness probe cadence in seconds (0 disables). Only runs when
 # SHUTDOWN_ON_BATTERY_CRITICAL=true — see lifecycle.sh dbus_liveness_probe.
 : "${DBUS_PROBE_INTERVAL:=300}"
-
-# Canonicalize every validated env var BEFORE validation and any raw-value
-# interpretation: $() strips trailing newlines, so a value with a trailing LF
-# (env-file artifact) is checked, classified (driver_transport reads the raw
-# value), and written as the same byte sequence. Must precede password
-# resolution too: resolve_admin_password's emptiness test is a raw-value
-# interpretation, and an LF-only ADMIN_PASSWORD must canonicalize to empty
-# (auto-generate) rather than dodge generation and abort later at
-# generate_all_configs' :? guard. See validate.sh canonicalize_validated_values.
-canonicalize_validated_values
 
 # ---------------------------------------------------------------------------
 # Password resolution (from password.sh)

@@ -248,10 +248,13 @@ COPY --from=test /tests-passed /tests-passed
 # $(printf '%s' ...) — dockerd execs this probe with the RAW container env,
 # not the entrypoint's canonicalize_validated_values copy, so a trailing-LF
 # UPS_NAME/API_PORT/API_ADDRESS that boots fine would otherwise fail every probe.
+# Canonicalize FIRST, default SECOND (mirroring the entrypoint's order): an
+# LF-only value is non-empty raw, so defaulting from the raw value would pick
+# the LF over the documented default and probe an empty name/address/port.
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=15s \
     CMD . /usr/local/bin/lifecycle.sh; \
-        UPS_NAME=$(printf '%s' "${UPS_NAME:-ups}"); \
-        API_PORT=$(printf '%s' "${API_PORT:-3493}"); \
-        API_ADDRESS=$(printf '%s' "${API_ADDRESS:-0.0.0.0}"); \
+        UPS_NAME=$(printf '%s' "${UPS_NAME:-}"); : "${UPS_NAME:=ups}"; \
+        API_PORT=$(printf '%s' "${API_PORT:-}"); : "${API_PORT:=3493}"; \
+        API_ADDRESS=$(printf '%s' "${API_ADDRESS:-}"); : "${API_ADDRESS:=0.0.0.0}"; \
         timeout 3 upsc "${UPS_NAME}@$(upsd_probe_host):${API_PORT}" | grep -q 'ups.status' || exit 1
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
