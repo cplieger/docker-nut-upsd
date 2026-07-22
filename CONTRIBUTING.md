@@ -38,8 +38,8 @@ env var that reaches a config file means touching `validate.sh` in four
 places:
 
 1. Add a row to `VALIDATION_TABLE` (or `VALIDATION_TABLE_OPTIONAL` for
-   vars only checked when non-empty), e.g. `MY_VAR:newlines,quotes`.
-   Supported checks: `newlines`, `quotes`, `backslash`, `brackets`,
+   vars only checked when non-empty), e.g. `MY_VAR:control,quotes`.
+   Supported checks: `control`, `quotes`, `backslash`, `brackets`,
    `identifier`, `numeric`, `positive`, `port`, `percent`.
 2. Add a `case` arm to `_resolve_var` returning `"${MY_VAR:-}"`. The
    resolver is an explicit lookup table on purpose — there is no
@@ -54,7 +54,7 @@ places:
    function and wire it into `_dispatch_check`.
 
 Every value that lands in a NUT config file must reject embedded
-newlines (config injection), and identifiers/passwords additionally
+control characters (newline/CR/tab config injection), and identifiers/passwords additionally
 reject brackets (INI section injection) and double quotes (NUT quoting
 breakout). A value written **unquoted** into a config file (e.g.
 `UPS_PORT` as `port = $UPS_PORT`, or `API_ADDRESS` in `LISTEN`) must

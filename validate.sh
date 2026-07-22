@@ -23,7 +23,7 @@ log_value() {
   printf '%s' "$1" | tr -d '\\"' | LC_ALL=C tr -c '\040-\176' ' '
 }
 
-validate_no_newlines() {
+validate_no_control_chars() {
   # Control characters (CR, LF, tab, ...) inject or alter NUT config
   # directives. Trailing-newline tolerance is owned by
   # canonicalize_validated_values, which the entrypoint runs BEFORE
@@ -207,19 +207,19 @@ usb_bus_required() {
 # ---------------------------------------------------------------------------
 
 # Each line: VAR_NAME:check1,check2,...
-# Supported checks: newlines, quotes, backslash, brackets, identifier, numeric, positive, port, percent
+# Supported checks: control, quotes, backslash, brackets, identifier, numeric, positive, port, percent
 VALIDATION_TABLE='
-UPS_NAME:newlines,quotes,brackets,identifier
-UPS_DESC:newlines,quotes,backslash
-UPS_DRIVER:newlines,identifier
-UPS_PORT:newlines,backslash
-API_USER:newlines,identifier
-API_PASSWORD:newlines,quotes,backslash
-API_ADDRESS:newlines,quotes,backslash,brackets
-API_PORT:newlines,port
-API_TLS:newlines
-ADMIN_PASSWORD:newlines,quotes,backslash
-SHUTDOWN_ON_BATTERY_CRITICAL:newlines
+UPS_NAME:control,quotes,brackets,identifier
+UPS_DESC:control,quotes,backslash
+UPS_DRIVER:control,identifier
+UPS_PORT:control,backslash
+API_USER:control,identifier
+API_PASSWORD:control,quotes,backslash
+API_ADDRESS:control,quotes,backslash,brackets
+API_PORT:control,port
+API_TLS:control
+ADMIN_PASSWORD:control,quotes,backslash
+SHUTDOWN_ON_BATTERY_CRITICAL:control
 DBUS_PROBE_INTERVAL:numeric
 POLLFREQ:numeric
 POLLFREQALERT:numeric
@@ -228,7 +228,7 @@ FINALDELAY:numeric
 HOSTSYNC:numeric
 NOCOMMWARNTIME:numeric
 RBWARNTIME:numeric
-COMMS_WATCHDOG:newlines
+COMMS_WATCHDOG:control
 COMMS_CHECK_INTERVAL:numeric
 COMMS_RECOVERY_TIMEOUT:positive
 COMMS_FAST_RETRIES:positive
@@ -237,10 +237,10 @@ COMMS_BACKOFF_FACTOR:positive
 
 # Optional vars: only validated when non-empty.
 VALIDATION_TABLE_OPTIONAL='
-LOWBATT_PERCENT:newlines,percent
-LOWBATT_RUNTIME:newlines,numeric
-CRITBATT_PERCENT:newlines,percent
-CRITBATT_RUNTIME:newlines,numeric
+LOWBATT_PERCENT:control,percent
+LOWBATT_RUNTIME:control,numeric
+CRITBATT_PERCENT:control,percent
+CRITBATT_RUNTIME:control,numeric
 '
 
 # Dispatch a single check for a variable.
@@ -249,7 +249,7 @@ _dispatch_check() {
   _val="$2"
   _check="$3"
   case "$_check" in
-    newlines) validate_no_newlines "$_var" "$_val" ;;
+    control) validate_no_control_chars "$_var" "$_val" ;;
     quotes) validate_no_quotes "$_var" "$_val" ;;
     backslash) validate_no_backslash "$_var" "$_val" ;;
     brackets) validate_no_brackets "$_var" "$_val" ;;

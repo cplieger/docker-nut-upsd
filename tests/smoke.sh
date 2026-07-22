@@ -945,7 +945,7 @@ if ! (
   fail=1
 fi
 
-#    Boolean rejection: the table row guards injection (newlines), and the
+#    Boolean rejection: the table row guards injection (control chars), and the
 #    entrypoint's normalize_bool — same convention as COMMS_WATCHDOG — refuses
 #    unrecognized spellings so a security toggle cannot silently degrade.
 if (
