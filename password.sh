@@ -60,7 +60,7 @@ _resolve_cached_password() {
   fi
   # mktemp in the root-only dir gives an O_EXCL, unpredictable temp name so
   # a compromised `nut` process cannot plant a symlink at the write target.
-  if _rcp_tmp=$(mktemp "${_rcp_file}.tmp.XXXXXX") \
+  if _rcp_tmp=$(mktemp "${_rcp_file}.tmp.XXXXXX" 2>/dev/null) \
     && (umask 077 && printf '%s' "$_rcp_pw" >"$_rcp_tmp") && mv "$_rcp_tmp" "$_rcp_file"; then
     printf 'level=info msg="generated %s; cached for intra-container restarts" path=%s\n' \
       "$_rcp_label" "$_rcp_file" >&2
@@ -299,8 +299,8 @@ reconcile_tls_working_copies() {
   # Managed paths are space-free readonly constants, so the word split is safe.
   _rw_failed=0
   for _rw_path in $_rw_stale; do
-    if ! rm -f "$_rw_path" 2>/dev/null; then
-      printf 'level=error msg="cannot remove unselected TLS working copy (something mounted over this internal path?); refusing to leave withdrawn key material in place" path=%s\n' "$_rw_path" >&2
+    if ! _rw_err=$(rm -f "$_rw_path" 2>&1); then
+      printf 'level=error msg="cannot remove unselected TLS working copy (something mounted over this internal path?); refusing to leave withdrawn key material in place" path=%s err="%s"\n' "$_rw_path" "$(log_value "$_rw_err")" >&2
       _rw_failed=1
     fi
   done
