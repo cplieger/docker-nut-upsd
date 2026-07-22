@@ -152,7 +152,7 @@ normalize_bool() {
     true | 1 | yes | on) printf 'true' ;;
     false | 0 | no | off) printf 'false' ;;
     *)
-      printf 'level=error msg="%s must be a boolean (true/false/1/0/yes/no/on/off)" value="%s"\n' "$1" "$(log_value "$2")" >&2
+      printf 'level=error msg="env var must be a boolean (true/false/1/0/yes/no/on/off)" var=%s value="%s"\n' "$1" "$(log_value "$2")" >&2
       return 1
       ;;
   esac

@@ -152,6 +152,26 @@ if ! (
   err "FAIL: trailing-LF API_PORT did not canonicalize to a one-line MONITOR directive"
   fail=1
 fi
+# Canonicalize-then-resolve contract (entrypoint boot order): the emptiness
+# test in resolve_admin_password is a raw-value interpretation, so an LF-only
+# ADMIN_PASSWORD (env-file artifact) must canonicalize to empty FIRST and then
+# auto-generate a full-length password — without canonicalize-first the raw LF
+# is non-empty, dodges generation, strips to empty, and the boot later aborts
+# at generate_all_configs' :? guard. This pins the two functions composed in
+# the documented order; the entrypoint's literal top-level call ordering is
+# inline flow and is NOT exercised here.
+rm -f /var/run/nut-secrets/admin_password
+if ! (
+  ADMIN_PASSWORD="$(printf '\nx')"
+  ADMIN_PASSWORD=${ADMIN_PASSWORD%x}
+  canonicalize_validated_values
+  resolve_admin_password 2>/dev/null
+  [ "${#ADMIN_PASSWORD}" -eq "$PASSWORD_LENGTH" ]
+); then
+  err "FAIL: LF-only ADMIN_PASSWORD did not canonicalize to empty and auto-generate a ${PASSWORD_LENGTH}-char password"
+  fail=1
+fi
+rm -f /var/run/nut-secrets/admin_password
 
 # Partial-override fallback (generate-config.sh credential topology): with
 # upsd.users.user mounted and upsmon.conf still generated, the internal

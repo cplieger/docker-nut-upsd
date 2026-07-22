@@ -60,6 +60,16 @@ set -eu
 # SHUTDOWN_ON_BATTERY_CRITICAL=true — see lifecycle.sh dbus_liveness_probe.
 : "${DBUS_PROBE_INTERVAL:=300}"
 
+# Canonicalize every validated env var BEFORE validation and any raw-value
+# interpretation: $() strips trailing newlines, so a value with a trailing LF
+# (env-file artifact) is checked, classified (driver_transport reads the raw
+# value), and written as the same byte sequence. Must precede password
+# resolution too: resolve_admin_password's emptiness test is a raw-value
+# interpretation, and an LF-only ADMIN_PASSWORD must canonicalize to empty
+# (auto-generate) rather than dodge generation and abort later at
+# generate_all_configs' :? guard. See validate.sh canonicalize_validated_values.
+canonicalize_validated_values
+
 # ---------------------------------------------------------------------------
 # Password resolution (from password.sh)
 # ---------------------------------------------------------------------------
@@ -71,13 +81,6 @@ resolve_admin_password
 if local_upsmon_credential_active; then
   resolve_local_upsmon_password
 fi
-
-# Canonicalize every validated env var BEFORE validation and any raw-value
-# interpretation: $() strips trailing newlines, so a value with a trailing LF
-# (env-file artifact) is checked, classified (driver_transport reads the raw
-# value), and written as the same byte sequence. See validate.sh
-# canonicalize_validated_values.
-canonicalize_validated_values
 
 warn_weak_api_password
 

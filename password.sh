@@ -23,7 +23,11 @@ readonly LOCAL_UPSMON_PASSWORD_FILE=/var/run/nut-secrets/local_upsmon_password
 _replace_file() {
   _rf_src="$1"
   _rf_dst="$2"
-  [ ! -d "$_rf_dst" ] || return 1
+  if [ -d "$_rf_dst" ]; then
+    printf 'level=warn msg="destination is a directory; refusing to install file into it" dst=%s\n' \
+      "$_rf_dst" >&2
+    return 1
+  fi
   if ! _rf_err=$(mv "$_rf_src" "$_rf_dst" 2>&1); then
     printf 'level=warn msg="rename failed while installing file" dst=%s err="%s"\n' \
       "$_rf_dst" "$(log_value "$_rf_err")" >&2
