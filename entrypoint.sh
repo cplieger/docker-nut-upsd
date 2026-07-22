@@ -167,9 +167,11 @@ generate_all_configs
 # Permissions
 # ---------------------------------------------------------------------------
 # upsd.pem (the operator-mounted TLS PEM) is excluded like the *.user
-# overrides: it is typically a read-only bind mount, where chown/chmod fail
-# with EROFS and would abort the boot under set -e. resolve_tls_cert
-# (password.sh) already handled its permissions best-effort.
+# overrides: it is a bind mount the container must never mutate (chown/chmod
+# on a rw mount would rewrite the HOST file's perms; on a read-only mount
+# they fail with EROFS and would abort the boot under set -e).
+# resolve_tls_cert (password.sh) serves a root:nut 640 working copy inside
+# /etc/nut instead, which this sweep normalizes like any generated file.
 find /etc/nut ! -name '*.user' ! -name upsd.pem -exec chown root:nut {} +
 find /etc/nut -type d ! -name '*.user' ! -name upsd.pem -exec chmod 750 {} +
 find /etc/nut -type f ! -name '*.user' ! -name upsd.pem -exec chmod 640 {} +
@@ -259,7 +261,8 @@ rm -f /var/run/nut-secrets/wd-restart.* /var/run/nut-secrets/stop-cmd.* \
   /var/run/nut-secrets/admin_password.tmp.* \
   /var/run/nut-secrets/local_upsmon_password.tmp.* \
   /var/run/nut-secrets/upsd-selfsigned.pem.tmp.* \
-  /etc/nut/upsd-selfsigned.pem.tmp.*
+  /etc/nut/upsd-selfsigned.pem.tmp.* \
+  /etc/nut/upsd-mounted.pem.tmp.*
 
 # Clear a stale POWERDOWNFLAG (killpower) from a previous lifecycle. upsmon
 # creates it on FSD; /var/run/nut-secrets is the writable layer so it survives

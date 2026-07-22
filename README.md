@@ -122,12 +122,12 @@ If you mount exactly one of `upsd.users.user` / `upsmon.conf.user`, the generate
 
 ### Volumes
 
-| Mount                         | Description                                                                      |
-| ----------------------------- | -------------------------------------------------------------------------------- |
-| `/dev/bus/usb`                | USB bus, bound live (not `devices:`) — USB drivers only; see hotplug notes       |
-| `/run/dbus/system_bus_socket` | Host D-Bus socket (required only if `SHUTDOWN_ON_BATTERY_CRITICAL=true`)         |
-| `/etc/nut/*.user`             | Custom NUT config overrides (e.g. `ups.conf.user`) — bypasses env-var generation |
-| `/etc/nut/upsd.pem`           | Your own TLS certificate + private key (one PEM) — replaces the self-signed one  |
+| Mount                         | Description                                                                                                            |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `/dev/bus/usb`                | USB bus, bound live (not `devices:`) — USB drivers only; see hotplug notes                                             |
+| `/run/dbus/system_bus_socket` | Host D-Bus socket (required only if `SHUTDOWN_ON_BATTERY_CRITICAL=true`)                                               |
+| `/etc/nut/*.user`             | Custom NUT config overrides (e.g. `ups.conf.user`) — bypasses env-var generation                                       |
+| `/etc/nut/upsd.pem`           | Your own TLS certificate + private key (one PEM) — replaces the self-signed one; never modified, so mount it read-only |
 
 > For a USB UPS, pair the live `/dev/bus/usb` bind with `device_cgroup_rules: ["c 189:* rmw"]` (USB major 189). A static `devices:` mapping is **not** sufficient — see [USB hotplug & comms recovery](#usb-hotplug--comms-recovery).
 
@@ -141,12 +141,12 @@ upsd offers TLS on its listener by default (`API_TLS=true`) via the NUT protocol
 
 The certificate, in order of precedence:
 
-1. **Your own certificate** — mount a single PEM containing the certificate followed by its private key at `/etc/nut/upsd.pem`. It is used verbatim and never rewritten. upsd reads it _after_ dropping to the `nut` user, so it must be readable by the container's `nut` group: the entrypoint applies `root:nut` 640 automatically where it can, but on a read-only mount set permissions host-side first (group- or world-readable).
+1. **Your own certificate** — mount a single PEM containing the certificate followed by its private key at `/etc/nut/upsd.pem`. The mount itself is never modified — no chown, no chmod, no rewrite — so a `600 root:root` read-only (`:ro`) mount works as-is. At every boot the entrypoint copies it to an internal `root:nut` 640 working copy at `/etc/nut/upsd-mounted.pem` (upsd reads the PEM _after_ dropping to the `nut` user) and points `CERTFILE` there; a certificate rotated on the host is picked up at the next restart.
 2. **Self-signed fallback** — with nothing mounted, the entrypoint generates an EC P-256 certificate (`CN=nut-upsd`, 825-day validity) at first boot and logs its path and SHA-256 fingerprint. It is cached in the container's writable layer, so it survives restarts but not a container recreation (a fresh one is minted and logged).
 
 Client-side verification is the client's choice: NUT's `upsmon` only encrypts-and-verifies when configured with `FORCESSL 1` / `CERTVERIFY 1` plus a `CERTPATH` trust store. A verifying client must trust the serving certificate — with the self-signed fallback that means importing it (grab it from the startup log / `docker cp`), or mounting your own CA-issued pair at `/etc/nut/upsd.pem`. Clients that skip verification (the default for `upsc` and `upsmon`) still get opportunistic encryption against passive sniffing, but no protection from an active man-in-the-middle.
 
-Set `API_TLS=false` to serve cleartext only: no certificate is provisioned, `STARTTLS` is answered with an error, and the generated `upsd.conf` is byte-identical to pre-TLS releases. If you mount `upsd.conf.user`, your file owns the TLS directives entirely — the certificate is still provisioned whenever `API_TLS=true`, so your override may reference either `/etc/nut/upsd.pem` or the self-signed `/etc/nut/upsd-selfsigned.pem`.
+Set `API_TLS=false` to serve cleartext only: no certificate is provisioned, `STARTTLS` is answered with an error, and the generated `upsd.conf` is byte-identical to pre-TLS releases. If you mount `upsd.conf.user`, your file owns the TLS directives entirely — the certificate is still provisioned whenever `API_TLS=true`, so your override should reference the working copies: `/etc/nut/upsd-mounted.pem` (your mounted PEM) or `/etc/nut/upsd-selfsigned.pem` (the self-signed one). Pointing `CERTFILE` directly at `/etc/nut/upsd.pem` also works, but then the `nut`-group readability is yours to manage host-side.
 
 ## USB hotplug & comms recovery
 

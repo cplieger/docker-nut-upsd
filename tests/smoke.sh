@@ -684,27 +684,44 @@ if [ -z "$tls_fp_regen" ] || [ "$tls_fp_regen" = "$tls_fp_first" ]; then
   fail=1
 fi
 
-#    Operator-mounted PEM (/etc/nut/upsd.pem): used verbatim — TLS_CERT_PATH
-#    points at it and the file is never rewritten or regenerated.
+#    Operator-mounted PEM (/etc/nut/upsd.pem): served via a root:nut 640
+#    working copy at /etc/nut/upsd-mounted.pem — TLS_CERT_PATH points at the
+#    copy (same content), and the MOUNT file itself is never touched: owner,
+#    mode, and content stay exactly as the operator set them (the point of
+#    the working-copy design — a 600 root:root read-only mount must work).
 cp /var/run/nut-secrets/upsd-selfsigned.pem /etc/nut/upsd.pem
+chown root:root /etc/nut/upsd.pem
+chmod 600 /etc/nut/upsd.pem
 tls_fp_mounted=$(tls_cert_fingerprint /etc/nut/upsd.pem)
 if ! (
   resolve_tls_cert 2>/dev/null || exit 1
-  [ "$TLS_CERT_PATH" = "/etc/nut/upsd.pem" ] || exit 1
-  [ "$(tls_cert_fingerprint /etc/nut/upsd.pem)" = "$tls_fp_mounted" ]
+  [ "$TLS_CERT_PATH" = "/etc/nut/upsd-mounted.pem" ] || exit 1
+  [ "$(tls_cert_fingerprint /etc/nut/upsd-mounted.pem)" = "$tls_fp_mounted" ]
 ); then
-  err "FAIL: mounted /etc/nut/upsd.pem was not used verbatim as TLS_CERT_PATH"
+  err "FAIL: mounted /etc/nut/upsd.pem was not served via the /etc/nut/upsd-mounted.pem working copy"
+  fail=1
+fi
+if [ "$(stat -c '%U:%G %a' /etc/nut/upsd-mounted.pem)" != "root:nut 640" ]; then
+  err "FAIL: mounted-PEM working copy is not root:nut 640 (got '$(stat -c '%U:%G %a' /etc/nut/upsd-mounted.pem)')"
+  fail=1
+fi
+if [ "$(stat -c '%U:%G %a' /etc/nut/upsd.pem)" != "root:root 600" ]; then
+  err "FAIL: resolve_tls_cert mutated the mounted PEM's owner/mode (got '$(stat -c '%U:%G %a' /etc/nut/upsd.pem)', want the operator's root:root 600)"
+  fail=1
+fi
+if [ "$(tls_cert_fingerprint /etc/nut/upsd.pem)" != "$tls_fp_mounted" ]; then
+  err "FAIL: resolve_tls_cert rewrote the mounted PEM's content"
   fail=1
 fi
 if ! (
   resolve_tls_cert >/dev/null 2>&1
   generate_all_configs >/dev/null 2>&1
-  grep -q '^CERTFILE /etc/nut/upsd.pem$' /etc/nut/upsd.conf
+  grep -q '^CERTFILE /etc/nut/upsd-mounted.pem$' /etc/nut/upsd.conf
 ); then
-  err "FAIL: generated upsd.conf does not reference the mounted PEM"
+  err "FAIL: generated upsd.conf does not reference the mounted-PEM working copy"
   fail=1
 fi
-rm -f /etc/nut/upsd.pem
+rm -f /etc/nut/upsd.pem /etc/nut/upsd-mounted.pem
 
 #    Non-regular mount refusal: a directory planted at /etc/nut/upsd.pem (what
 #    Docker auto-creates when a host bind source is missing) must make
@@ -724,21 +741,22 @@ rmdir /etc/nut/upsd.pem
 rm -f "$NONREG_ERR"
 
 #    Unparseable mounted PEM: warn-only — resolve_tls_cert must log the parse
-#    warning but still use the file verbatim (upsd stays authoritative).
+#    warning but still serve the mounted content (upsd stays authoritative).
 printf 'not a pem\n' >/etc/nut/upsd.pem
 BADPEM_ERR=$(mktemp)
 if ! (
   resolve_tls_cert 2>"$BADPEM_ERR" || exit 1
-  [ "$TLS_CERT_PATH" = "/etc/nut/upsd.pem" ]
+  [ "$TLS_CERT_PATH" = "/etc/nut/upsd-mounted.pem" ] || exit 1
+  cmp -s /etc/nut/upsd.pem /etc/nut/upsd-mounted.pem
 ); then
-  err "FAIL: unparseable mounted PEM was not used verbatim (warn-only gate regressed to fatal)"
+  err "FAIL: unparseable mounted PEM was not served as-is (warn-only gate regressed to fatal)"
   fail=1
 fi
 if ! grep -q 'level=warn msg="mounted TLS certificate does not parse' "$BADPEM_ERR"; then
   err "FAIL: unparseable mounted PEM did not log the parse/expiry warning"
   fail=1
 fi
-rm -f /etc/nut/upsd.pem "$BADPEM_ERR"
+rm -f /etc/nut/upsd.pem /etc/nut/upsd-mounted.pem "$BADPEM_ERR"
 
 #    API_TLS=false: no TLS directives and no new cert — upsd.conf must be
 #    byte-identical to the pre-TLS-feature output.

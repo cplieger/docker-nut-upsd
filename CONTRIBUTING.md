@@ -126,14 +126,17 @@ new generated file should respect that same override hook.
   runs _after_ `become_user()` (see the "keyfile must be readable by nut
   user" comment in NUT's `server/upsd.c`), so the STARTTLS PEM must be
   readable post-privilege-drop or upsd exits fatally at startup. That is
-  why the self-signed cert is _cached_ in the root-only
-  `/var/run/nut-secrets` (same hardening as the password caches) but
-  _installed_ as a `root:nut` 640 working copy at
-  `/etc/nut/upsd-selfsigned.pem` for upsd to serve — and why the
-  operator-mounted `/etc/nut/upsd.pem` is excluded from the entrypoint's
-  blanket `/etc/nut` chown/chmod sweep (a read-only bind mount would
-  EROFS the sweep and abort boot under `set -e`; `resolve_tls_cert`
-  handles that file's perms best-effort instead). Keep all three pieces
+  why BOTH certificate sources are served through a `root:nut` 640
+  working copy inside `/etc/nut`: the self-signed cert is _cached_ in
+  the root-only `/var/run/nut-secrets` (same hardening as the password
+  caches) and installed at `/etc/nut/upsd-selfsigned.pem`; the
+  operator-mounted `/etc/nut/upsd.pem` is copied at every boot to
+  `/etc/nut/upsd-mounted.pem`. Never chown/chmod the mount in place: on
+  a rw bind mount that mutates the HOST file (handing the private key
+  to whatever host group the container's `nut` GID maps to), and it is
+  also why `upsd.pem` is excluded from the entrypoint's blanket
+  `/etc/nut` chown/chmod sweep (a read-only mount would additionally
+  EROFS the sweep and abort boot under `set -e`). Keep all these pieces
   aligned when touching the TLS path.
 - **`chgrp` on the USB bus is best-effort.** Both the startup and the
   watchdog `chgrp -R nut /dev/bus/usb` are guarded (warn-only), so the

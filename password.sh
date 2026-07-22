@@ -112,21 +112,28 @@ warn_weak_api_password() {
 # upsd's CERTFILE is ONE PEM containing the server certificate followed by
 # its private key (NUT docs/security.txt; the v2.8.x OpenSSL backend loads
 # both from the same file). Precedence: an operator-mounted PEM at
-# TLS_CERT_MOUNT is used verbatim (never regenerated or rewritten); otherwise
-# a self-signed PEM is generated at boot and cached at TLS_CERT_CACHE with
-# the same hardening as the password caches above (root-only dir, mktemp +
-# atomic rename), so it stays stable across in-container restarts.
+# TLS_CERT_MOUNT wins (its content is authoritative and never regenerated or
+# rewritten; it is copied to an internal working copy on every boot, so a
+# rotated cert is picked up at restart); otherwise a self-signed PEM is
+# generated at boot and cached at TLS_CERT_CACHE with the same hardening as
+# the password caches above (root-only dir, mktemp + atomic rename), so it
+# stays stable across in-container restarts.
 #
 # Placement subtlety: upsd reads CERTFILE as the dropped nut user, NOT root —
 # ssl_init() runs after become_user() ("keyfile must be readable by nut
 # user", server/upsd.c; docs/security.txt mandates root:nut 0640). The
-# root-only /var/run/nut-secrets is therefore unreadable to upsd by design,
-# so the cached PEM is installed as a root:nut 640 working copy at
-# TLS_CERT_RUNTIME (inside /etc/nut, 750 root:nut — the generated-config
-# perms) and CERTFILE points there.
+# root-only /var/run/nut-secrets is unreadable to upsd by design, and the
+# operator's mount must never be chowned/chmodded in place: on a rw bind
+# mount that mutates the HOST file, handing the private key to whatever host
+# group the container's nut GID happens to map to. So BOTH sources are
+# installed as a root:nut 640 working copy inside /etc/nut (750 root:nut —
+# the generated-config perms) and CERTFILE points at the copy: the
+# self-signed cache at TLS_CERT_RUNTIME, the mounted PEM at
+# TLS_CERT_MOUNTED_RUNTIME.
 readonly TLS_CERT_MOUNT=/etc/nut/upsd.pem
 readonly TLS_CERT_CACHE=/var/run/nut-secrets/upsd-selfsigned.pem
 readonly TLS_CERT_RUNTIME=/etc/nut/upsd-selfsigned.pem
+readonly TLS_CERT_MOUNTED_RUNTIME=/etc/nut/upsd-mounted.pem
 readonly TLS_CERT_DAYS=825
 
 # tls_cert_valid FILE: the first certificate parses and is not expiring
@@ -141,13 +148,6 @@ tls_cert_valid() {
 # FILE (empty output when it does not parse).
 tls_cert_fingerprint() {
   openssl x509 -in "$1" -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2
-}
-
-# nut_can_read FILE: verify the unprivileged nut user can open FILE (upsd
-# loads CERTFILE only after dropping privileges). Same BusyBox `su` drop as
-# read_pidfile (lifecycle.sh); the path travels as a positional parameter.
-nut_can_read() {
-  su -s /bin/sh -c "exec head -c 1 \"\$1\" >/dev/null" nut sh "$1" 2>/dev/null
 }
 
 # _generate_selfsigned_cert: mint a fresh self-signed cert+key PEM into the
@@ -187,20 +187,25 @@ _generate_selfsigned_cert() {
   return 1
 }
 
-# _install_selfsigned_cert: root:nut 640 working copy of the cache at
-# TLS_CERT_RUNTIME (nut-readable — see the placement subtlety above). /etc/nut
-# has no unprivileged writer (750 root:nut), but mktemp + rename keeps the
-# install atomic anyway.
-_install_selfsigned_cert() {
-  _ic_tmp=$(mktemp "${TLS_CERT_RUNTIME}.tmp.XXXXXX") || return 1
-  if cat "$TLS_CERT_CACHE" >"$_ic_tmp" \
+# _install_cert_working_copy SRC DST: root:nut 640 working copy of SRC at DST
+# (nut-readable — see the placement subtlety above). Shared by the self-signed
+# path (cache -> TLS_CERT_RUNTIME) and the mounted-PEM path (mount ->
+# TLS_CERT_MOUNTED_RUNTIME); only the copy is ever chowned, so the source —
+# in particular an operator's bind mount — is never mutated. /etc/nut has no
+# unprivileged writer (750 root:nut), but mktemp + rename keeps the install
+# atomic anyway.
+_install_cert_working_copy() {
+  _ic_src="$1"
+  _ic_dst="$2"
+  _ic_tmp=$(mktemp "${_ic_dst}.tmp.XXXXXX") || return 1
+  if cat "$_ic_src" >"$_ic_tmp" \
     && chown root:nut "$_ic_tmp" && chmod 640 "$_ic_tmp" \
-    && mv "$_ic_tmp" "$TLS_CERT_RUNTIME"; then
+    && mv "$_ic_tmp" "$_ic_dst"; then
     return 0
   fi
   rm -f "$_ic_tmp"
-  printf 'level=error msg="failed to install self-signed TLS certificate for upsd" path=%s\n' \
-    "$TLS_CERT_RUNTIME" >&2
+  printf 'level=error msg="failed to install TLS certificate working copy for upsd" source=%s path=%s\n' \
+    "$_ic_src" "$_ic_dst" >&2
   return 1
 }
 
@@ -219,7 +224,7 @@ resolve_tls_cert() {
   fi
   if [ -e "$TLS_CERT_MOUNT" ]; then
     # Refuse a non-regular mount (directory, FIFO, device node) up front: a
-    # writer-less FIFO would block nut_can_read/openssl forever and hang the
+    # writer-less FIFO would block openssl/the working-copy cat forever and hang the
     # boot with no log line, and a directory (Docker auto-creates one when a
     # host bind source is missing) only fails later at ssl_init with a
     # misleading perms error. A non-regular PEM has never worked, so failing
@@ -229,27 +234,25 @@ resolve_tls_cert() {
         "$TLS_CERT_MOUNT" >&2
       return 1
     fi
-    # Warn-only parse/expiry gate: the mounted PEM is still used verbatim
-    # (upsd stays authoritative at ssl_init), but name the likely consequence
-    # now instead of leaving a later fatal exit or client rejection undiagnosed.
+    # Warn-only parse/expiry gate: the mounted PEM's content is still served
+    # as-is (upsd stays authoritative at ssl_init), but name the likely
+    # consequence now instead of leaving a later fatal exit or client
+    # rejection undiagnosed.
     if ! tls_cert_valid "$TLS_CERT_MOUNT"; then
       printf 'level=warn msg="mounted TLS certificate does not parse as cert+key or expires within a day; upsd may exit at startup or verifying clients may reject the handshake" path=%s\n' \
         "$TLS_CERT_MOUNT" >&2
     fi
-    # Operator-mounted PEM: used verbatim. Perms are best-effort only — a
-    # read-only bind mount rejects chown/chmod (and the entrypoint's blanket
-    # /etc/nut sweep excludes this file for the same reason) — so probe
-    # nut-readability and name the consequence instead of failing the boot on
-    # a probe that upsd itself re-checks authoritatively at ssl_init.
-    chown root:nut "$TLS_CERT_MOUNT" 2>/dev/null || true
-    chmod 640 "$TLS_CERT_MOUNT" 2>/dev/null || true
-    if ! nut_can_read "$TLS_CERT_MOUNT"; then
-      printf 'level=error msg="mounted TLS certificate is not readable by the nut user; upsd reads CERTFILE after dropping privileges and will exit at startup" path=%s\n' \
-        "$TLS_CERT_MOUNT" >&2
-    fi
-    TLS_CERT_PATH="$TLS_CERT_MOUNT"
-    printf 'level=info msg="TLS enabled with operator-mounted certificate" certfile=%s fingerprint="%s"\n' \
-      "$TLS_CERT_MOUNT" "$(tls_cert_fingerprint "$TLS_CERT_MOUNT")" >&2
+    # Operator-mounted PEM: copied on every boot to a root:nut 640 working
+    # copy inside /etc/nut, never chowned/chmodded in place (on a rw bind
+    # mount that would mutate the HOST file — see the placement subtlety
+    # above). Root always reads the mount regardless of its perms, so a
+    # 600 root:root read-only mount works; the copy is nut-readable by
+    # construction, and a cert rotated on the host is picked up at the next
+    # restart.
+    _install_cert_working_copy "$TLS_CERT_MOUNT" "$TLS_CERT_MOUNTED_RUNTIME" || return 1
+    TLS_CERT_PATH="$TLS_CERT_MOUNTED_RUNTIME"
+    printf 'level=info msg="TLS enabled with operator-mounted certificate (working copy; mount is never modified, a 600 root:root read-only mount is fine)" certfile=%s source=%s fingerprint="%s"\n' \
+      "$TLS_CERT_MOUNTED_RUNTIME" "$TLS_CERT_MOUNT" "$(tls_cert_fingerprint "$TLS_CERT_MOUNT")" >&2
     return 0
   fi
   if tls_cert_valid "$TLS_CERT_CACHE"; then
@@ -262,7 +265,7 @@ resolve_tls_cert() {
     fi
     _generate_selfsigned_cert || return 1
   fi
-  _install_selfsigned_cert || return 1
+  _install_cert_working_copy "$TLS_CERT_CACHE" "$TLS_CERT_RUNTIME" || return 1
   # shellcheck disable=SC2034  # consumed by sourced generate-config.sh
   TLS_CERT_PATH="$TLS_CERT_RUNTIME"
   printf 'level=info msg="TLS enabled with self-signed certificate" certfile=%s fingerprint="%s"\n' \
