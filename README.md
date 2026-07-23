@@ -199,14 +199,18 @@ the image therefore embeds a CycloneDX SBOM fragment at
 net-snmp — generated at build time from the same Renovate-tracked
 version ARGs the builds use, so version bumps keep it accurate — with
 purl/CPE identifiers for advisory matching and a VEX entry documenting
-the backported CVE-2026-54161 fix. Syft imports the component
-inventory into this repo's signed release SBOM via its SBOM cataloger
-(`--select-catalogers "+sbom-cataloger"`), which the committed
-`.syft.yaml` enables. The VEX entry lives in the embedded fragment
-itself (in-image, for anyone scanning the shipped file); the signed
-release SBOM is Syft's SPDX 2.3 output. Syft does not propagate
-CycloneDX vulnerability analysis into that output, so it carries only
-the component inventory.
+the backported CVE-2026-54161 fix. The release pipeline enables
+Syft's SBOM cataloger centrally (`sbom-cataloger`), so the fragment's
+component inventory is imported into this repo's signed release SBOM
+with no per-repo Syft configuration. The VEX entry lives in the
+embedded fragment itself (in-image, for anyone scanning the shipped
+file); the signed release SBOM is Syft's SPDX 2.3 output. Syft does
+not propagate CycloneDX vulnerability analysis into that output, so
+it carries only the component inventory. The repo therefore also
+ships an OpenVEX document ([`vex/`](vex/)) that the release pipeline
+attests alongside the image, documenting the CVE-2026-54161
+remediation so registry-level scanners see the resolved state the
+SPDX SBOM cannot carry.
 
 | Tool                                             | Result                                                                                            |
 | ------------------------------------------------ | ------------------------------------------------------------------------------------------------- |

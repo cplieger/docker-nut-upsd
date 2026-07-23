@@ -125,8 +125,9 @@ RUN wget -qO nut.tar.gz \
 # applied above for anyone scanning the embedded fragment; the SIGNED
 # release SBOM (Syft's SPDX 2.3 output) carries the component inventory
 # only — Syft does not propagate CycloneDX vulnerability analysis into
-# that output, so the resolved state never reaches the signed attestation
-# (a dedicated VEX attestation is pipeline-side future work).
+# that output, so the resolved state reaches the registry through the
+# OpenVEX document at vex/cve-2026-54161.openvex.json instead, which the
+# release pipeline attests alongside the image.
 # Remove the entry together with the patch at NUT_VERSION >= v2.8.6.
 RUN cat > /out/nut-upsd.cdx.json <<EOF
 {
