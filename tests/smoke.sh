@@ -1026,11 +1026,17 @@ else
   # purl the ARG-generated fragment carries, so a NUT bump that forgets the
   # OpenVEX doc fails the build loudly (CONTRIBUTING patch-removal checklist).
   VEXDOC=/tmp/vex/cve-2026-54161.openvex.json
-  if [ -s "$VEXDOC" ]; then
+  if [ ! -s "$VEXDOC" ]; then
+    err "FAIL: OpenVEX document missing or empty: $VEXDOC"
+    fail=1
+  else
     nut_purl=$(grep -o '"purl": "pkg:github/networkupstools/nut@[^"]*"' "$SBOM" | head -n 1)
     nut_purl=${nut_purl#*: \"}
     nut_purl=${nut_purl%\"}
-    if ! grep -q "$nut_purl" "$VEXDOC"; then
+    if [ -z "$nut_purl" ]; then
+      err "FAIL: embedded SBOM fragment has no nut purl for OpenVEX parity"
+      fail=1
+    elif ! grep -Fq "\"@id\": \"$nut_purl\"" "$VEXDOC"; then
       err "FAIL: OpenVEX nut subcomponent does not match the built NUT_VERSION ($nut_purl); update vex/cve-2026-54161.openvex.json"
       fail=1
     fi
