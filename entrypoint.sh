@@ -42,13 +42,20 @@ set -eu
 # scan, the delete, and the postcondition re-scan, so the three cannot drift
 # apart if the pattern or depth ever changes. || true: a find failure must
 # read as "nothing listed", not a set -e boot abort.
+# The capture sites below bound the listing with `head -c`: /var/run/nut is
+# nut-writable, so a compromised daemon could plant an arbitrarily large set
+# of *.pid names — an unbounded command substitution would materialize all of
+# it in PID 1 memory (and one giant log record) at every restart (CWE-400).
+# head's early exit SIGPIPEs the find; the || true inside the function absorbs
+# that (and pipefail is not set), so the bound never aborts the block. Only
+# the CAPTURES are bounded — -delete still walks the full set, as it must.
 stale_nut_pid_paths() {
   find /var/run/nut -maxdepth 1 -name '*.pid' "$@" 2>/dev/null || true
 }
-if [ -n "$(stale_nut_pid_paths)" ]; then
+if [ -n "$(stale_nut_pid_paths | head -c 1)" ]; then
   printf 'level=info msg="clearing stale NUT PID paths from previous lifecycle" path=/var/run/nut\n' >&2
   stale_nut_pid_paths -delete
-  _stale_pids=$(stale_nut_pid_paths)
+  _stale_pids=$(stale_nut_pid_paths | head -c 512)
   if [ -n "$_stale_pids" ]; then
     printf 'level=error msg="failed to clear a stale NUT PID path; refusing to start" path=/var/run/nut surviving="%s"\n' \
       "$(log_value "$_stale_pids")" >&2
