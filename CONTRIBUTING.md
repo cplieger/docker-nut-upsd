@@ -102,15 +102,20 @@ new generated file should respect that same override hook.
   backports applied to the NUT source in the Dockerfile with
   `patch -p1 --fuzz=0` (strict, so source drift on a version bump fails
   the build loudly instead of silently shipping unpatched binaries).
-  Each patch header names its upstream commit and removal condition -
+  Each patch header names its upstream commit and removal condition —
   e.g. the CVE-2026-54161 NOTIFYCMD/execvp backport is removed once
-  `NUT_VERSION` reaches v2.8.6 — five coupled sites go together: the
+  `NUT_VERSION` reaches v2.8.6 — six coupled sites go together: the
   patch file, the Dockerfile COPY/apply step, the CVE's VEX entry in the
   Dockerfile's SBOM-fragment RUN, the smoke test's section-8
-  `CVE-2026-54161` assertion, and the OpenVEX document at
-  `vex/cve-2026-54161.openvex.json` that the release pipeline attests
-  (and refresh the README Security paragraph that describes the VEX
-  entry). Unlike the ARG-generated embedded fragment, the OpenVEX
+  `CVE-2026-54161` assertion, the OpenVEX document at
+  `vex/cve-2026-54161.openvex.json` that the release pipeline attests,
+  plus the test stage's `COPY vex/` line and the smoke test's
+  OpenVEX/NUT_VERSION parity assertion that guard it
+  (and refresh the two README paragraphs that describe the backport:
+  the Security section's VEX-entry description, and the Alerting
+  section's "NOTIFYCMD is executed directly" note, which then
+  describes stock v2.8.6 behavior rather than a backport). Unlike the
+  ARG-generated embedded fragment, the OpenVEX
   document is a static committed file: its nut subcomponent version
   string is hardcoded and must track `NUT_VERSION` on every bump while
   the patch remains applied. A failing `patch` step on a NUT version

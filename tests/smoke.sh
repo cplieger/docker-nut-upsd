@@ -1022,6 +1022,19 @@ else
     err "FAIL: embedded SBOM fragment missing the CVE-2026-54161 VEX entry"
     fail=1
   }
+  # OpenVEX/NUT_VERSION parity: the static vex doc must name the same nut
+  # purl the ARG-generated fragment carries, so a NUT bump that forgets the
+  # OpenVEX doc fails the build loudly (CONTRIBUTING patch-removal checklist).
+  VEXDOC=/tmp/vex/cve-2026-54161.openvex.json
+  if [ -s "$VEXDOC" ]; then
+    nut_purl=$(grep -o '"purl": "pkg:github/networkupstools/nut@[^"]*"' "$SBOM" | head -n 1)
+    nut_purl=${nut_purl#*: \"}
+    nut_purl=${nut_purl%\"}
+    if ! grep -q "$nut_purl" "$VEXDOC"; then
+      err "FAIL: OpenVEX nut subcomponent does not match the built NUT_VERSION ($nut_purl); update vex/cve-2026-54161.openvex.json"
+      fail=1
+    fi
+  fi
 fi
 
 # Restore the section-2 baseline configs for any future sections.

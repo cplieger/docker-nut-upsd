@@ -227,6 +227,9 @@ EXPOSE 3493
 # ---------------------------------------------------------------------------
 FROM runtime AS test
 COPY tests/ /tmp/tests/
+# The OpenVEX doc is static while the embedded fragment is ARG-generated;
+# copied in so smoke.sh section 8 can assert their nut versions agree.
+COPY vex/ /tmp/vex/
 RUN sh /tmp/tests/smoke.sh && touch /tests-passed
 
 # ---------------------------------------------------------------------------
