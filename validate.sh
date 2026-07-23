@@ -2,22 +2,34 @@
 # validate.sh — validation functions and table-driven dispatch for NUT env vars.
 # Sourced by entrypoint.sh; not executed directly.
 
+# Largest value safely representable in shell integer arithmetic and test(1)
+# comparisons (18 nines fits a signed 64-bit long). validate_numeric bounds
+# every numeric env var to 18 normalized digits, and run_validations bounds
+# the one multiplied pair so its product stays under this ceiling.
+readonly SHELL_SAFE_INTEGER_MAX=999999999999999999
+
 # ---------------------------------------------------------------------------
 # Validation functions
 # ---------------------------------------------------------------------------
-validate_no_newlines() {
-  # Strip one trailing newline before scanning for control bytes: a single
-  # trailing newline is harmless (env files and $() pipelines often
-  # preserve one), but embedded control characters (CR, LF, tab, etc.)
-  # remain rejected because they inject or alter NUT config directives.
-  _val=$(
-    printf '%s' "$2"
-    printf x
-  )
-  _val=${_val%x}
-  _val=${_val%"
-"}
-  case "$_val" in
+
+# log_value: sanitize a rejected raw value before interpolating it into a
+# logfmt value="..." field — strip double quotes/backslashes and flatten
+# everything outside printable ASCII to spaces so a malformed value cannot
+# also corrupt or split the error line that reports it. The octal RANGE
+# \040-\176 is deliberate: BusyBox tr treats a complemented character CLASS
+# (tr -c '[:print:]') as a literal set, mangling every value — do not
+# "simplify" this back to a class. LC_ALL=C pins the byte semantics.
+log_value() {
+  printf '%s' "$1" | tr -d '\\"' | LC_ALL=C tr -c '\040-\176' ' '
+}
+
+validate_no_control_chars() {
+  # Control characters (CR, LF, tab, ...) inject or alter NUT config
+  # directives. Trailing-newline tolerance is owned by
+  # canonicalize_validated_values, which the entrypoint runs BEFORE
+  # validation — so a trailing LF that reaches this check un-stripped is
+  # rejected fail-closed rather than silently tolerated.
+  case "$2" in
     *[[:cntrl:]]*)
       printf 'level=error msg="env var contains control characters" var=%s\n' "$1" >&2
       return 1
@@ -28,32 +40,44 @@ validate_no_newlines() {
 validate_numeric() {
   case "$2" in
     '' | *[!0-9]*)
-      printf 'level=error msg="env var must be a non-negative integer" var=%s value="%s"\n' "$1" "$2" >&2
+      printf 'level=error msg="env var must be a non-negative integer" var=%s value="%s"\n' "$1" "$(log_value "$2")" >&2
       return 1
       ;;
   esac
+  # Reject normalized values too long to compare as shell integers: beyond
+  # LONG_MAX, BusyBox test(1) errors with status 2 — which an enclosing `if`
+  # swallows, so the range validators below would silently accept the value
+  # and unbounded numbers would reach lifecycle.sh arithmetic.
+  _numeric=$(strip_leading_zeros "$2")
+  if [ "${#_numeric}" -gt "${#SHELL_SAFE_INTEGER_MAX}" ]; then
+    printf 'level=error msg="env var numeric value too large" var=%s length=%d\n' "$1" "${#_numeric}" >&2
+    return 1
+  fi
 }
 
 validate_positive() {
   validate_numeric "$1" "$2" || return 1
-  if [ "$2" -lt 1 ]; then
-    printf 'level=error msg="env var must be a positive integer (>= 1)" var=%s value="%s"\n' "$1" "$2" >&2
+  _numeric=$(strip_leading_zeros "$2")
+  if [ "$_numeric" -lt 1 ]; then
+    printf 'level=error msg="env var must be a positive integer (>= 1)" var=%s value="%s"\n' "$1" "$(log_value "$2")" >&2
     return 1
   fi
 }
 
 validate_port() {
   validate_numeric "$1" "$2" || return 1
-  if [ "$2" -lt 1 ] || [ "$2" -gt 65535 ]; then
-    printf 'level=error msg="env var must be 1-65535" var=%s value="%s"\n' "$1" "$2" >&2
+  _numeric=$(strip_leading_zeros "$2")
+  if [ "$_numeric" -lt 1 ] || [ "$_numeric" -gt 65535 ]; then
+    printf 'level=error msg="env var must be 1-65535" var=%s value="%s"\n' "$1" "$(log_value "$2")" >&2
     return 1
   fi
 }
 
 validate_percent() {
   validate_numeric "$1" "$2" || return 1
-  if [ "$2" -gt 100 ]; then
-    printf 'level=error msg="env var must be 0-100" var=%s value="%s"\n' "$1" "$2" >&2
+  _numeric=$(strip_leading_zeros "$2")
+  if [ "$_numeric" -gt 100 ]; then
+    printf 'level=error msg="env var must be 0-100" var=%s value="%s"\n' "$1" "$(log_value "$2")" >&2
     return 1
   fi
 }
@@ -88,7 +112,22 @@ validate_no_backslash() {
 validate_identifier() {
   case "$2" in
     '' | *[!a-zA-Z0-9_-]*)
-      printf 'level=error msg="env var is not a valid identifier" var=%s value="%s"\n' "$1" "$2" >&2
+      printf 'level=error msg="env var is not a valid identifier" var=%s value="%s"\n' "$1" "$(log_value "$2")" >&2
+      return 1
+      ;;
+  esac
+  # Position rule: reject a leading dash for every identifier this check
+  # covers (UPS_NAME, UPS_DRIVER, API_USER). CLI consumers pass UPS_NAME as
+  # the FIRST getopt-parsed argument (the HEALTHCHECK's `upsc $UPS_NAME@...`,
+  # the watchdog's comms probe, `upsdrvctl stop $UPS_NAME`), so a dash-leading
+  # name parses as options and fails every one of them while boot succeeds.
+  # UPS_DRIVER and API_USER have no getopt-positional exposure (API_USER is
+  # written as an unquoted [$API_USER] section header and a quoted MONITOR
+  # credential), but a leading dash is not a meaningful identifier for either,
+  # so the shared check stays uniform.
+  case "$2" in
+    -*)
+      printf 'level=error msg="env var must not start with a dash" var=%s value="%s"\n' "$1" "$(log_value "$2")" >&2
       return 1
       ;;
   esac
@@ -113,7 +152,7 @@ normalize_bool() {
     true | 1 | yes | on) printf 'true' ;;
     false | 0 | no | off) printf 'false' ;;
     *)
-      printf 'level=error msg="%s must be a boolean (true/false/1/0/yes/no/on/off)" value="%s"\n' "$1" "$2" >&2
+      printf 'level=error msg="env var must be a boolean (true/false/1/0/yes/no/on/off)" var=%s value="%s"\n' "$1" "$(log_value "$2")" >&2
       return 1
       ;;
   esac
@@ -168,18 +207,19 @@ usb_bus_required() {
 # ---------------------------------------------------------------------------
 
 # Each line: VAR_NAME:check1,check2,...
-# Supported checks: newlines, quotes, brackets, identifier, numeric, positive, port, percent
+# Supported checks: control, quotes, backslash, brackets, identifier, numeric, positive, port, percent
 VALIDATION_TABLE='
-UPS_NAME:newlines,quotes,brackets,identifier
-UPS_DESC:newlines,quotes,backslash
-UPS_DRIVER:newlines,identifier
-UPS_PORT:newlines,backslash
-API_USER:newlines,identifier
-API_PASSWORD:newlines,quotes,backslash
-API_ADDRESS:newlines,quotes,backslash
-API_PORT:newlines,numeric,port
-ADMIN_PASSWORD:newlines,quotes,backslash
-SHUTDOWN_ON_BATTERY_CRITICAL:newlines
+UPS_NAME:control,quotes,brackets,identifier
+UPS_DESC:control,quotes,backslash
+UPS_DRIVER:control,identifier
+UPS_PORT:control,backslash
+API_USER:control,identifier
+API_PASSWORD:control,quotes,backslash
+API_ADDRESS:control,quotes,backslash,brackets
+API_PORT:control,port
+API_TLS:control
+ADMIN_PASSWORD:control,quotes,backslash
+SHUTDOWN_ON_BATTERY_CRITICAL:control
 DBUS_PROBE_INTERVAL:numeric
 POLLFREQ:numeric
 POLLFREQALERT:numeric
@@ -188,7 +228,7 @@ FINALDELAY:numeric
 HOSTSYNC:numeric
 NOCOMMWARNTIME:numeric
 RBWARNTIME:numeric
-COMMS_WATCHDOG:newlines
+COMMS_WATCHDOG:control
 COMMS_CHECK_INTERVAL:numeric
 COMMS_RECOVERY_TIMEOUT:positive
 COMMS_FAST_RETRIES:positive
@@ -197,10 +237,10 @@ COMMS_BACKOFF_FACTOR:positive
 
 # Optional vars: only validated when non-empty.
 VALIDATION_TABLE_OPTIONAL='
-LOWBATT_PERCENT:newlines,numeric,percent
-LOWBATT_RUNTIME:newlines,numeric
-CRITBATT_PERCENT:newlines,numeric,percent
-CRITBATT_RUNTIME:newlines,numeric
+LOWBATT_PERCENT:control,percent
+LOWBATT_RUNTIME:control,numeric
+CRITBATT_PERCENT:control,percent
+CRITBATT_RUNTIME:control,numeric
 '
 
 # Dispatch a single check for a variable.
@@ -209,7 +249,7 @@ _dispatch_check() {
   _val="$2"
   _check="$3"
   case "$_check" in
-    newlines) validate_no_newlines "$_var" "$_val" ;;
+    control) validate_no_control_chars "$_var" "$_val" ;;
     quotes) validate_no_quotes "$_var" "$_val" ;;
     backslash) validate_no_backslash "$_var" "$_val" ;;
     brackets) validate_no_brackets "$_var" "$_val" ;;
@@ -236,6 +276,7 @@ _resolve_var() {
     API_PASSWORD) printf '%s' "${API_PASSWORD:-}" ;;
     API_ADDRESS) printf '%s' "${API_ADDRESS:-}" ;;
     API_PORT) printf '%s' "${API_PORT:-}" ;;
+    API_TLS) printf '%s' "${API_TLS:-}" ;;
     ADMIN_PASSWORD) printf '%s' "${ADMIN_PASSWORD:-}" ;;
     SHUTDOWN_ON_BATTERY_CRITICAL) printf '%s' "${SHUTDOWN_ON_BATTERY_CRITICAL:-}" ;;
     DBUS_PROBE_INTERVAL) printf '%s' "${DBUS_PROBE_INTERVAL:-}" ;;
@@ -267,9 +308,12 @@ _run_table() {
   _table="$1"
   _optional="$2"
   printf '%s\n' "$_table" | while IFS= read -r _line; do
-    # Skip blank lines
+    # Skip the empty first/last lines of the table literal. Deliberately ONLY
+    # the empty string: an accidentally indented row must fail loudly through
+    # _resolve_var's unknown-variable error (fail-closed), never be skipped
+    # silently (fail-open) -- this loop dispatches the security validations.
     case "$_line" in
-      '' | ' '*) continue ;;
+      '') continue ;;
     esac
     _var="${_line%%:*}"
     _checks="${_line#*:}"
@@ -290,9 +334,64 @@ _run_table() {
   done || exit 1
 }
 
+# canonicalize_validated_values: strip trailing newline bytes (env-file
+# artifacts) from every env var the validation tables cover, by assigning each
+# through $() (which strips trailing LFs). MUST run BEFORE run_validations and
+# before any raw-value interpretation: the table resolver's own $() already
+# strips trailing LFs, so validation would otherwise pass a value whose raw
+# form still carries the LF — breaking mid-line config writes (upsmon.conf's
+# MONITOR host:$API_PORT) and raw-value cross-field checks (driver_transport
+# matches ${UPS_DRIVER} literally, so "snmp-ups<LF>" would classify as
+# "other" and dodge the network-transport UPS_PORT restrictions). Covers every
+# _resolve_var entry so the validated, classified, and written bytes are
+# identical. A no-op for every value with no trailing LF.
+canonicalize_validated_values() {
+  UPS_NAME=$(printf '%s' "${UPS_NAME:-}")
+  UPS_DESC=$(printf '%s' "${UPS_DESC:-}")
+  UPS_DRIVER=$(printf '%s' "${UPS_DRIVER:-}")
+  UPS_PORT=$(printf '%s' "${UPS_PORT:-}")
+  API_USER=$(printf '%s' "${API_USER:-}")
+  API_PASSWORD=$(printf '%s' "${API_PASSWORD:-}")
+  API_ADDRESS=$(printf '%s' "${API_ADDRESS:-}")
+  API_PORT=$(printf '%s' "${API_PORT:-}")
+  API_TLS=$(printf '%s' "${API_TLS:-}")
+  ADMIN_PASSWORD=$(printf '%s' "${ADMIN_PASSWORD:-}")
+  SHUTDOWN_ON_BATTERY_CRITICAL=$(printf '%s' "${SHUTDOWN_ON_BATTERY_CRITICAL:-}")
+  DBUS_PROBE_INTERVAL=$(printf '%s' "${DBUS_PROBE_INTERVAL:-}")
+  POLLFREQ=$(printf '%s' "${POLLFREQ:-}")
+  POLLFREQALERT=$(printf '%s' "${POLLFREQALERT:-}")
+  DEADTIME=$(printf '%s' "${DEADTIME:-}")
+  FINALDELAY=$(printf '%s' "${FINALDELAY:-}")
+  HOSTSYNC=$(printf '%s' "${HOSTSYNC:-}")
+  NOCOMMWARNTIME=$(printf '%s' "${NOCOMMWARNTIME:-}")
+  RBWARNTIME=$(printf '%s' "${RBWARNTIME:-}")
+  COMMS_WATCHDOG=$(printf '%s' "${COMMS_WATCHDOG:-}")
+  COMMS_CHECK_INTERVAL=$(printf '%s' "${COMMS_CHECK_INTERVAL:-}")
+  COMMS_RECOVERY_TIMEOUT=$(printf '%s' "${COMMS_RECOVERY_TIMEOUT:-}")
+  COMMS_FAST_RETRIES=$(printf '%s' "${COMMS_FAST_RETRIES:-}")
+  COMMS_BACKOFF_FACTOR=$(printf '%s' "${COMMS_BACKOFF_FACTOR:-}")
+  LOWBATT_PERCENT=$(printf '%s' "${LOWBATT_PERCENT:-}")
+  LOWBATT_RUNTIME=$(printf '%s' "${LOWBATT_RUNTIME:-}")
+  CRITBATT_PERCENT=$(printf '%s' "${CRITBATT_PERCENT:-}")
+  CRITBATT_RUNTIME=$(printf '%s' "${CRITBATT_RUNTIME:-}")
+}
+
 run_validations() {
   _run_table "$VALIDATION_TABLE" 0
   _run_table "$VALIDATION_TABLE_OPTIONAL" 1
+
+  # COMMS_RECOVERY_TIMEOUT and COMMS_BACKOFF_FACTOR are the one validated pair
+  # that gets MULTIPLIED in shell arithmetic (lifecycle.sh's stage-2 backoff
+  # threshold). Each is individually bounded to 18 digits by validate_numeric,
+  # but their product can still overflow $(( )); bound the pair so the product
+  # stays representable. Both are validated `positive` above, so _backoff >= 1
+  # and the division is safe.
+  _recovery=$(strip_leading_zeros "$COMMS_RECOVERY_TIMEOUT")
+  _backoff=$(strip_leading_zeros "$COMMS_BACKOFF_FACTOR")
+  if [ "$_recovery" -gt $((SHELL_SAFE_INTEGER_MAX / _backoff)) ]; then
+    printf 'level=error msg="watchdog recovery interval product is too large" recovery_timeout=%s backoff_factor=%s\n' "$_recovery" "$_backoff" >&2
+    exit 1
+  fi
 
   # UPS_PORT shape depends on the driver's transport (see driver_transport):
   #   usb   — "auto" (USB auto-detection) or an explicit /dev/* node
@@ -305,7 +404,7 @@ run_validations() {
       case "$UPS_PORT" in
         auto | /dev/*) : ;;
         *)
-          printf 'level=error msg="UPS_PORT must be auto or /dev/* for a USB driver" driver=%s value="%s"\n' "$UPS_DRIVER" "$UPS_PORT" >&2
+          printf 'level=error msg="UPS_PORT must be auto or /dev/* for a USB driver" driver=%s value="%s"\n' "$UPS_DRIVER" "$(log_value "$UPS_PORT")" >&2
           exit 1
           ;;
       esac
@@ -313,7 +412,7 @@ run_validations() {
     net)
       case "$UPS_PORT" in
         auto | /dev/*)
-          printf 'level=error msg="UPS_PORT must be a host or host:port endpoint for a network driver" driver=%s value="%s"\n' "$UPS_DRIVER" "$UPS_PORT" >&2
+          printf 'level=error msg="UPS_PORT must be a host or host:port endpoint for a network driver" driver=%s value="%s"\n' "$UPS_DRIVER" "$(log_value "$UPS_PORT")" >&2
           exit 1
           ;;
       esac
@@ -325,7 +424,7 @@ run_validations() {
   # The `/dev/*` glob above matches whitespace/quotes, so guard them explicitly.
   case "$UPS_PORT" in
     *[[:space:]]* | *'"'*)
-      printf 'level=error msg="UPS_PORT must not contain whitespace or quotes" value="%s"\n' "$UPS_PORT" >&2
+      printf 'level=error msg="UPS_PORT must not contain whitespace or quotes" value="%s"\n' "$(log_value "$UPS_PORT")" >&2
       exit 1
       ;;
   esac
@@ -348,12 +447,20 @@ run_validations() {
       ;;
   esac
 
-  # API_USER must not be "admin": upsd.users already defines a hardcoded [admin]
-  # user (granted set/fsd/instcmds=all). A second [admin] section generated from
-  # API_USER=admin would merge into it and clobber the admin credential with
-  # API_PASSWORD, exposing the FSD/set-capable account under the weaker password.
+  # API_USER must not shadow a reserved generated account: upsd.users defines
+  # a hardcoded [admin] (the FSD/set-capable account) and — when both
+  # upsd.users and upsmon.conf are generated — the reserved internal monitor
+  # account [local_upsmon] (the bundled upsmon's `upsmon primary` credential;
+  # see generate-config.sh). A second section generated from API_USER with
+  # either name would merge into the reserved stanza and clobber its
+  # credential with API_PASSWORD, exposing that account's authority under the
+  # weaker network-facing password.
   if [ "$API_USER" = "admin" ]; then
     printf 'level=error msg="API_USER must not be admin (reserved for the internal NUT admin user)"\n' >&2
+    exit 1
+  fi
+  if [ "$API_USER" = "local_upsmon" ]; then
+    printf 'level=error msg="API_USER must not be local_upsmon (reserved for the internal upsmon monitor account)"\n' >&2
     exit 1
   fi
 }

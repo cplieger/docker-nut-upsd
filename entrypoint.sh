@@ -14,6 +14,106 @@ set -eu
 . /usr/local/bin/password.sh
 
 # ---------------------------------------------------------------------------
+# Prior-lifecycle reclamation
+# ---------------------------------------------------------------------------
+# The blocks below clear artifacts a crashed or force-killed previous run
+# left in the writable layer. They run FIRST — before password/TLS resolution
+# and config generation — so crash-leaked files are reclaimed before any new
+# temp or generated-config write could hit exhausted blocks or inodes (a late
+# cleanup is unreachable under set -e exactly when it is needed most). Every
+# path constant used here is a readonly top-level definition in the helpers
+# sourced above, and no current-run temp can exist yet.
+
+# Clear stale driver/daemon PID paths from the nut-writable /var/run/nut.
+# PID files from a crashed previous run survive a `docker restart` and cause
+# upsdrvctl to trigger its "Duplicate driver instance detected" path, which
+# kills the freshly started driver seconds after launch. Match EVERY object
+# type at a reserved *.pid pathname, not just regular files: a symlink, FIFO,
+# socket, or directory planted there by the nut user survives a -type f
+# filter and obstructs — or, for a followed symlink, redirects — the root
+# daemon's later pidfile write. We own this directory and no other process
+# can legitimately hold these paths at boot. -delete unlinks every type and
+# rmdirs an empty directory, but BusyBox find's exit code stays 0 when a
+# non-empty directory at a *.pid path survives the delete, so the re-scan
+# below enforces the pathname postcondition instead of trusting the exit
+# status — fail loud rather than booting past a surviving obstruction.
+# stale_nut_pid_paths [FIND_ACTION...]: list (or, with -delete, remove) every
+# reserved *.pid path in /var/run/nut. ONE shared predicate for the presence
+# scan, the delete, and the postcondition re-scan, so the three cannot drift
+# apart if the pattern or depth ever changes. || true: a find failure must
+# read as "nothing listed", not a set -e boot abort.
+# The capture sites below bound the listing with `head -c`: /var/run/nut is
+# nut-writable, so a compromised daemon could plant an arbitrarily large set
+# of *.pid names — an unbounded command substitution would materialize all of
+# it in PID 1 memory (and one giant log record) at every restart (CWE-400).
+# head's early exit SIGPIPEs the find; the || true inside the function absorbs
+# that (and pipefail is not set), so the bound never aborts the block. Only
+# the CAPTURES are bounded — -delete still walks the full set, as it must.
+stale_nut_pid_paths() {
+  find /var/run/nut -maxdepth 1 -name '*.pid' "$@" 2>/dev/null || true
+}
+if [ -n "$(stale_nut_pid_paths | head -c 1)" ]; then
+  printf 'level=info msg="clearing stale NUT PID paths from previous lifecycle" path=/var/run/nut\n' >&2
+  stale_nut_pid_paths -delete
+  _stale_pids=$(stale_nut_pid_paths | head -c 512)
+  if [ -n "$_stale_pids" ]; then
+    printf 'level=error msg="failed to clear a stale NUT PID path; refusing to start" path=/var/run/nut surviving="%s"\n' \
+      "$(log_value "$_stale_pids")" >&2
+    exit 1
+  fi
+fi
+
+# Clear temp files leaked by a kill that landed between mktemp and rm -f/mv
+# in lifecycle.sh's capture helpers (start_recovered_driver, stop_nut_cmd),
+# the password/TLS-certificate resolvers (password.sh), or the
+# mounted-override staging install (generate-config.sh use_user_override).
+# Root-owned paths, unlike /var/run/nut above. Everything matched is
+# crash-leaked: every producer runs later in this boot. The override globs
+# are literals because use_user_override builds its destination dynamically
+# from its argument; the four names below are the four generate_* callers'
+# destinations. Warn-only on failure: set -e must not turn one undeletable
+# stale artifact into an unannotated boot abort — the producers that later
+# need the space fail with their own structured errors if storage is still
+# unavailable.
+if ! _clt_err=$(rm -f "$WD_RESTART_CAPTURE_PREFIX".* "$STOP_CMD_CAPTURE_PREFIX".* \
+  "${ADMIN_PASSWORD_FILE}.tmp."* \
+  "${LOCAL_UPSMON_PASSWORD_FILE}.tmp."* \
+  "${TLS_CERT_CACHE}.tmp."* \
+  "${TLS_CERT_RUNTIME}.tmp."* \
+  "${TLS_CERT_MOUNTED_RUNTIME}.tmp."* \
+  /etc/nut/ups.conf.tmp.* /etc/nut/upsd.conf.tmp.* \
+  /etc/nut/upsd.users.tmp.* /etc/nut/upsmon.conf.tmp.* 2>&1); then
+  printf 'level=warn msg="could not remove a crash-leaked temp file from a previous lifecycle; continuing" err="%s"\n' \
+    "$(log_value "$(printf '%s' "$_clt_err" | head -c 512)")" >&2
+fi
+
+# Clear a stale POWERDOWNFLAG (killpower) from a previous lifecycle. upsmon
+# creates it on FSD; /var/run/nut-secrets is the writable layer so it survives
+# a `docker restart`, and nothing in this container consumes it (host poweroff
+# is via D-Bus, not the NUT kill-power path). A latched flag would otherwise
+# make the comms watchdog stand down indefinitely (see restart_ups_driver), so
+# clear it at a fresh start. The flag lives in the root-only nut-secrets dir
+# so the nut user cannot plant it (see generate-config.sh).
+if [ -e /var/run/nut-secrets/killpower ]; then
+  printf 'level=info msg="clearing stale killpower flag from previous lifecycle" path=/var/run/nut-secrets/killpower\n' >&2
+  rm -f /var/run/nut-secrets/killpower
+fi
+
+# Canonicalize every validated env var BEFORE any raw-value interpretation —
+# including the := defaults right below: an LF-only value (env-file artifact)
+# is non-empty raw, so it would dodge the documented default and then fail
+# validation (or reach generate_all_configs' bare :? abort) instead of
+# defaulting. $() strips trailing newlines, so a value with a trailing LF is
+# defaulted, checked, classified (driver_transport reads the raw value), and
+# written as the same byte sequence. Must also precede password resolution:
+# resolve_admin_password's emptiness test is a raw-value interpretation, and
+# an LF-only ADMIN_PASSWORD must canonicalize to empty (auto-generate) rather
+# than dodge generation and abort later at generate_all_configs' :? guard.
+# set -u safe here (before defaults exist): every assignment in it uses
+# ${VAR:-}. See validate.sh canonicalize_validated_values.
+canonicalize_validated_values
+
+# ---------------------------------------------------------------------------
 # Default configuration
 # ---------------------------------------------------------------------------
 : "${UPS_NAME:=ups}"
@@ -24,6 +124,11 @@ set -eu
 : "${API_PASSWORD:=secret}"
 : "${API_ADDRESS:=0.0.0.0}"
 : "${API_PORT:=3493}"
+# STARTTLS on the upsd listener (opportunistic: clients that never request it
+# keep talking cleartext, so legacy clients are unaffected). Serves an
+# operator-mounted /etc/nut/upsd.pem, else a boot-generated self-signed cert
+# — see resolve_tls_cert (password.sh).
+: "${API_TLS:=true}"
 : "${POLLFREQ:=5}"
 : "${POLLFREQALERT:=5}"
 : "${DEADTIME:=15}"
@@ -59,6 +164,14 @@ set -eu
 # Password resolution (from password.sh)
 # ---------------------------------------------------------------------------
 resolve_admin_password
+# The internal upsmon credential only exists when both upsd.users and
+# upsmon.conf are generated (see the credential-topology block in
+# generate-config.sh); with an override mounted for either file, the
+# generated half uses the legacy API pair and no internal secret is needed.
+if local_upsmon_credential_active; then
+  resolve_local_upsmon_password
+fi
+
 warn_weak_api_password
 
 # ---------------------------------------------------------------------------
@@ -107,12 +220,48 @@ fi
 # unrecognized value rather than silently disabling the watchdog.
 COMMS_WATCHDOG=$(normalize_bool COMMS_WATCHDOG "$COMMS_WATCHDOG") || exit 1
 
+# Normalize API_TLS the same way. Fail loud on an unrecognized value: a
+# security toggle that quietly fell back to either mode would betray whichever
+# posture the operator thought they configured.
+API_TLS=$(normalize_bool API_TLS "$API_TLS") || exit 1
+
 # Canonicalize watchdog integers to base-10 before they reach $(( )) in lifecycle.sh
 # (leading zeros are otherwise parsed as octal — see strip_leading_zeros).
 COMMS_CHECK_INTERVAL=$(strip_leading_zeros "$COMMS_CHECK_INTERVAL")
 COMMS_RECOVERY_TIMEOUT=$(strip_leading_zeros "$COMMS_RECOVERY_TIMEOUT")
+COMMS_FAST_RETRIES=$(strip_leading_zeros "$COMMS_FAST_RETRIES")
 COMMS_BACKOFF_FACTOR=$(strip_leading_zeros "$COMMS_BACKOFF_FACTOR")
 DBUS_PROBE_INTERVAL=$(strip_leading_zeros "$DBUS_PROBE_INTERVAL")
+
+# ---------------------------------------------------------------------------
+# TLS certificate provisioning (from password.sh)
+# ---------------------------------------------------------------------------
+# Runs whenever API_TLS=true, even when a mounted upsd.conf.user will skip
+# upsd.conf generation: the override owns the TLS directives, and its author
+# may point CERTFILE at either the mounted or the self-signed path (README),
+# so the cert must exist either way. Must precede generate_all_configs, which
+# writes the resolved TLS_CERT_PATH into upsd.conf.
+if [ "$API_TLS" = "true" ]; then
+  resolve_tls_cert || exit 1
+else
+  if [ -e /etc/nut/upsd.conf.user ]; then
+    printf 'level=info msg="API_TLS=false: no certificate provisioned; mounted upsd.conf.user owns the TLS directives (an override referencing the self-signed PEM needs API_TLS=true)"\n' >&2
+  else
+    printf 'level=info msg="TLS disabled (API_TLS=false); upsd serves cleartext only"\n' >&2
+  fi
+fi
+
+# Reconcile the two managed TLS working copies to the current selection —
+# always, even with an upsd.conf.user override mounted. resolve_tls_cert
+# provisions exactly one source per boot (mounted-PEM precedence, README 'TLS
+# (STARTTLS)'), so any unselected copy is withdrawn private-key material from
+# a previous lifecycle (mount removed or API_TLS toggled off) persisting
+# nut-readable in the writable layer. An override naming a withdrawn source
+# now fails visibly at upsd startup instead of silently serving stale key
+# material; overrides naming the currently provisioned source keep working.
+# set -u safe: $TLS_CERT_PATH is only read on the API_TLS=true branch, where
+# resolve_tls_cert (above) guarantees it is set.
+reconcile_tls_working_copies
 
 # ---------------------------------------------------------------------------
 # Generate NUT config files (from generate-config.sh)
@@ -122,9 +271,15 @@ generate_all_configs
 # ---------------------------------------------------------------------------
 # Permissions
 # ---------------------------------------------------------------------------
-chown -R root:nut /etc/nut
-find /etc/nut -type d -exec chmod 750 {} +
-find /etc/nut -type f -exec chmod 640 {} +
+# upsd.pem (the operator-mounted TLS PEM) is excluded like the *.user
+# overrides: it is a bind mount the container must never mutate (chown/chmod
+# on a rw mount would rewrite the HOST file's perms; on a read-only mount
+# they fail with EROFS and would abort the boot under set -e).
+# resolve_tls_cert (password.sh) serves a root:nut 640 working copy inside
+# /etc/nut instead, which this sweep normalizes like any generated file.
+find /etc/nut ! -name '*.user' ! -name upsd.pem -exec chown root:nut {} +
+find /etc/nut -type d ! -name '*.user' ! -name upsd.pem -exec chmod 750 {} +
+find /etc/nut -type f ! -name '*.user' ! -name upsd.pem -exec chmod 640 {} +
 if usb_bus_required; then
   if chgrp -R nut /dev/bus/usb 2>/dev/null; then
     printf 'level=info msg="chgrp nut:/dev/bus/usb applied (host device nodes)"\n' >&2
@@ -139,18 +294,24 @@ fi
 # Start NUT services with signal handling
 # ---------------------------------------------------------------------------
 
+# stop_bg_pid: kill and reap one background loop by PID; no-op for an empty
+# PID (not started / already stopped).
+stop_bg_pid() {
+  [ -n "$1" ] || return 0
+  kill "$1" 2>/dev/null || true
+  wait "$1" 2>/dev/null || true
+}
+
 # Background comms-watchdog PID (empty until started below). stop_watchdog is
 # safe to call before the watchdog starts and after it has exited.
 WATCHDOG_PID=""
 stop_watchdog() {
-  [ -n "${WATCHDOG_PID:-}" ] || return 0
-  kill "$WATCHDOG_PID" 2>/dev/null || true
   # Reap the watchdog subshell before the caller runs stop_services. Note: a SIGTERM
   # that lands while the subshell is mid-`upsdrvctl start` kills the subshell
   # immediately and orphans that child, so `wait` reaps the subshell but the orphan
   # may briefly race stop_services' `upsdrvctl stop`. Harmless at teardown —
   # next boot clears stale pidfiles.
-  wait "$WATCHDOG_PID" 2>/dev/null || true
+  stop_bg_pid "${WATCHDOG_PID:-}"
   WATCHDOG_PID=""
 }
 
@@ -158,19 +319,24 @@ stop_watchdog() {
 # enabled). Same lifecycle contract as stop_watchdog above.
 DBUS_PROBE_PID=""
 stop_dbus_probe() {
-  [ -n "${DBUS_PROBE_PID:-}" ] || return 0
-  kill "$DBUS_PROBE_PID" 2>/dev/null || true
-  wait "$DBUS_PROBE_PID" 2>/dev/null || true
+  stop_bg_pid "${DBUS_PROBE_PID:-}"
   DBUS_PROBE_PID=""
+}
+
+# teardown_all: the one teardown sequence every exit path shares (signal
+# trap, upsd-unresponsive exit, upsmon-exit path) - reap both background
+# loops, then stop the NUT daemons. Exit codes stay with the callers.
+teardown_all() {
+  stop_watchdog
+  stop_dbus_probe
+  stop_services
 }
 
 # Signal handler: clean up, then exit 0 (signal-initiated stop).
 # shellcheck disable=SC2317,SC2329 # invoked via trap; shellcheck cannot see the call site
 graceful_shutdown() {
   printf 'level=info msg="received shutdown signal"\n' >&2
-  stop_watchdog
-  stop_dbus_probe
-  stop_services
+  teardown_all
   exit 0
 }
 trap graceful_shutdown TERM INT QUIT HUP
@@ -178,39 +344,40 @@ trap graceful_shutdown TERM INT QUIT HUP
 printf 'level=info msg="starting NUT services" ups=%s driver=%s port=%s listen=%s:%s\n' \
   "$UPS_NAME" "$UPS_DRIVER" "$UPS_PORT" "$API_ADDRESS" "$API_PORT" >&2
 
-# Clear stale driver/daemon PID files from a previous container lifecycle.
-# /var/run/nut lives in the container's writable layer, so PID files from a
-# crashed or force-killed previous run survive a `docker restart` and cause
-# upsdrvctl to trigger its "Duplicate driver instance detected" path, which
-# kills the freshly started driver seconds after launch. We own this
-# directory and no other process can legitimately hold these PIDs at boot.
-if find /var/run/nut -maxdepth 1 -name '*.pid' -type f 2>/dev/null | grep -q .; then
-  printf 'level=info msg="clearing stale NUT PID files from previous lifecycle" path=/var/run/nut\n' >&2
-  find /var/run/nut -maxdepth 1 -name '*.pid' -type f -delete
-fi
+# start_nut_daemon LABEL TIMEOUT CMD...: start one NUT daemon bounded by
+# `timeout -k 5 TIMEOUT` (hard bound past NUT's own start delays; -k 5 hard-kills
+# a child that ignores TERM at expiry). Background + wait (mirroring the
+# supervision loop's sleep) so a SIGTERM during boot interrupts `wait` and runs
+# graceful_shutdown at once instead of being deferred for up to the full
+# timeout — past Docker's 10s stop budget. On failure: log, stop services,
+# exit 1.
+start_nut_daemon() {
+  _sd_label="$1"
+  _sd_timeout="$2"
+  shift 2
+  printf 'level=info msg="starting %s"\n' "$_sd_label" >&2
+  timeout -k 5 "$_sd_timeout" "$@" &
+  if wait $!; then
+    :
+  else
+    _sd_rc=$?
+    printf 'level=error msg="%s start failed or timed out at boot" rc=%d\n' "$_sd_label" "$_sd_rc" >&2
+    stop_services
+    exit 1
+  fi
+}
 
-# Clear a stale POWERDOWNFLAG (killpower) from a previous lifecycle. upsmon
-# creates it on FSD; /var/run/nut is the writable layer so it survives a
-# `docker restart`, and nothing in this container consumes it (host poweroff is
-# via D-Bus, not the NUT kill-power path). A latched flag would otherwise make
-# the comms watchdog stand down indefinitely (see restart_ups_driver), so clear
-# it at a fresh start.
-if [ -e /var/run/nut/killpower ]; then
-  printf 'level=info msg="clearing stale killpower flag from previous lifecycle" path=/var/run/nut/killpower\n' >&2
-  rm -f /var/run/nut/killpower
-fi
-
-printf 'level=info msg="starting upsdrvctl"\n' >&2
-/usr/sbin/upsdrvctl start
+# timeout 90 > NUT's 75s default maxstartdelay (matches the watchdog's restart
+# path), so it only fires on a genuine wedge.
+start_nut_daemon "upsdrvctl" 90 /usr/sbin/upsdrvctl start
 # NUT drivers write /var/run/nut/<driver>-<ups>.pid on successful start.
-wait_for_pidfile "UPS driver" "$(driver_pidfile)" || {
+wait_for_pidfile "UPS driver" "$(driver_pidfile)" "$(driver_binary)" || {
   stop_services
   exit 1
 }
 
-printf 'level=info msg="starting upsd"\n' >&2
-/usr/sbin/upsd
-wait_for_pidfile "upsd" "/var/run/nut/upsd.pid" || {
+start_nut_daemon "upsd" 30 /usr/sbin/upsd
+wait_for_pidfile "upsd" "/var/run/nut/upsd.pid" /usr/sbin/upsd || {
   stop_services
   exit 1
 }
@@ -246,7 +413,53 @@ if [ "$SHUTDOWN_ON_BATTERY_CRITICAL" = "true" ]; then
   fi
 fi
 
-# Wait for upsmon — propagate its exit code so Docker restart policies and
+# ---------------------------------------------------------------------------
+# Supervise upsmon and upsd
+# ---------------------------------------------------------------------------
+# upsd responsiveness probe cadence and consecutive-failure threshold. The
+# probe (`upsc -l`) only asks upsd to list its configured UPSes, so it
+# succeeds even while driver data is stale — it isolates upsd protocol
+# failure from the data-freshness signal the comms watchdog acts on.
+# 4 x 15s ~= 60s of sustained failure exits BEFORE the comms watchdog's first
+# driver bounce (COMMS_RECOVERY_TIMEOUT, default 90s), so a dead upsd cannot
+# strand the container in endless driver-restart churn that never repairs
+# the actual failed dependency.
+readonly UPSD_PROBE_INTERVAL=15
+readonly UPSD_PROBE_MAX_FAILURES=4
+
+# Wait for upsmon while probing upsd. upsmon exiting remains the fatal-child
+# signal (loop breaks, exit code propagated below). A sustained upsd failure
+# is ALSO fatal: upsmon survives it (reporting NOCOMM) and the comms watchdog
+# can only bounce the driver, which cannot repair upsd — without this exit
+# the container would stay running-but-unhealthy indefinitely. Exiting
+# non-zero hands recovery to the container restart policy, which rebuilds
+# the full stack.
+upsd_failures=0
+while kill -0 "$UPSMON_PID" 2>/dev/null; do
+  # Sleep in the background and `wait` on it: `wait` is the one place POSIX
+  # guarantees a trapped signal interrupts immediately, so `docker stop`'s
+  # SIGTERM runs graceful_shutdown at once instead of after up to 15s of
+  # foreground sleep (past Docker's default 10s stop budget). `|| true`: the
+  # signal-interrupted wait must not kill PID 1 under set -e.
+  sleep "$UPSD_PROBE_INTERVAL" &
+  wait $! || true
+  kill -0 "$UPSMON_PID" 2>/dev/null || break
+  if upsd_responsive; then
+    upsd_failures=0
+  else
+    upsd_failures=$((upsd_failures + 1))
+    if [ "$upsd_failures" -ge "$UPSD_PROBE_MAX_FAILURES" ]; then
+      printf 'level=error msg="upsd unresponsive; stopping services and exiting so the restart policy rebuilds the stack" consecutive_failures=%d probe_interval=%ss\n' \
+        "$upsd_failures" "$UPSD_PROBE_INTERVAL" >&2
+      teardown_all
+      exit 1
+    fi
+    printf 'level=warn msg="upsd not responding to protocol probe" consecutive_failures=%d threshold=%d\n' \
+      "$upsd_failures" "$UPSD_PROBE_MAX_FAILURES" >&2
+  fi
+done
+
+# Reap upsmon and propagate its exit code so Docker restart policies and
 # log-based alerting see the real failure. stop_services is idempotent and
 # does not dictate the exit code; the caller decides.
 set +e
@@ -258,7 +471,5 @@ if [ "$rc" -eq 0 ]; then
 else
   printf 'level=error msg="upsmon exited unexpectedly" rc=%d\n' "$rc" >&2
 fi
-stop_watchdog
-stop_dbus_probe
-stop_services
+teardown_all
 exit "$rc"

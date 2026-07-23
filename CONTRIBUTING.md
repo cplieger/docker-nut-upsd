@@ -11,12 +11,12 @@ a single file.
 point. It sources the helper modules and orchestrates startup; the
 helpers are libraries, not programs:
 
-| Script               | Role                                                                                        |
-| -------------------- | ------------------------------------------------------------------------------------------- |
-| `validate.sh`        | Env-var validation functions + table-driven dispatch                                        |
-| `generate-config.sh` | Generates `ups.conf` / `upsd.conf` / `upsd.users` / `upsmon.conf`                           |
-| `lifecycle.sh`       | `stop_services`, `wait_for_pidfile`, USB comms-recovery watchdog, D-Bus poweroff-path probe |
-| `password.sh`        | `ADMIN_PASSWORD` generation/caching, weak-password warning                                  |
+| Script               | Role                                                                                                      |
+| -------------------- | --------------------------------------------------------------------------------------------------------- |
+| `validate.sh`        | Env-var validation functions + table-driven dispatch                                                      |
+| `generate-config.sh` | Generates `ups.conf` / `upsd.conf` / `upsd.users` / `upsmon.conf`                                         |
+| `lifecycle.sh`       | `stop_services`, `wait_for_pidfile`, USB comms-recovery watchdog, D-Bus poweroff-path probe               |
+| `password.sh`        | Generated-credential caching (`ADMIN_PASSWORD`, internal `local_upsmon`, TLS cert), weak-password warning |
 
 More scripts are invoked by NUT at runtime (not sourced):
 
@@ -34,24 +34,32 @@ point or adding new top-level executables.
 ## Adding or validating an environment variable
 
 Validation is table-driven and deliberately avoids `eval`. Adding a new
-env var that reaches a config file means touching `validate.sh` in three
+env var that reaches a config file means touching `validate.sh` in four
 places:
 
 1. Add a row to `VALIDATION_TABLE` (or `VALIDATION_TABLE_OPTIONAL` for
-   vars only checked when non-empty), e.g. `MY_VAR:newlines,quotes`.
-   Supported checks: `newlines`, `quotes`, `backslash`, `brackets`,
+   vars only checked when non-empty), e.g. `MY_VAR:control,quotes`.
+   Supported checks: `control`, `quotes`, `backslash`, `brackets`,
    `identifier`, `numeric`, `positive`, `port`, `percent`.
 2. Add a `case` arm to `_resolve_var` returning `"${MY_VAR:-}"`. The
    resolver is an explicit lookup table on purpose — there is no
    indirect expansion, so an unlisted var fails the run instead of
    silently resolving to empty.
-3. If you need a check that doesn't exist yet, add a `validate_*`
+3. Add an assignment to `canonicalize_validated_values`
+   (`MY_VAR=$(printf '%s' "${MY_VAR:-}")`) so a trailing newline is
+   stripped BEFORE validation and config writes. The resolver's own `$()`
+   strips it during validation, so an uncanonicalized var would validate
+   clean while writing the raw trailing LF into the config file.
+4. If you need a check that doesn't exist yet, add a `validate_*`
    function and wire it into `_dispatch_check`.
 
 Every value that lands in a NUT config file must reject embedded
-newlines (config injection), and identifiers/passwords additionally
-reject brackets (INI section injection) and double quotes (NUT quoting
-breakout). A value written **unquoted** into a config file (e.g.
+control characters (newline/CR/tab config injection). Values embedded
+in double-quoted NUT fields — including the passwords — additionally
+reject double quotes (NUT quoting breakout) and backslashes; identifiers
+used as section headers (e.g. `UPS_NAME`, written as `[$UPS_NAME]`)
+additionally reject bracket characters (INI section injection). A value
+written **unquoted** into a config file (e.g.
 `UPS_PORT` as `port = $UPS_PORT`, or `API_ADDRESS` in `LISTEN`) must
 also reject whitespace, since a space would split it into extra config
 tokens. When in doubt, copy the check set of the most similar existing
@@ -78,9 +86,41 @@ new generated file should respect that same override hook.
 - **PID-file polling, not `pgrep`.** `wait_for_pidfile` waits on the
   daemon's PID file (the signal upstream relies on) to dodge BusyBox
   `pgrep` quirks with daemonized processes.
+- **`/proc/<pid>/exe` is unreadable for the NUT daemons.** They
+  `setuid()` from root to `nut` without exec-ing afterwards, which
+  clears the process's dumpable flag — and reading a non-dumpable
+  process's `exe` link needs `CAP_SYS_PTRACE`, which Docker's default
+  capability set does not grant (not even to root). Any PID-identity
+  check must go through `pid_matches_binary` (lifecycle.sh), which
+  falls back to the world-readable `/proc/<pid>/comm`; comparing `exe`
+  directly works in build-stage tests (dumpable shell) and then fails
+  every real boot.
 - **Runs as root by design.** USB access (`upsdrvctl`) and config
   ownership need it; `upsd` drops to user `nut` internally via configure
   flags. The Trivy AVD-DS-0002 finding is suppressed in `.trivyignore`.
+- **Upstream sources may carry checked-in patches.** `patches/` holds
+  backports applied to the NUT source in the Dockerfile with
+  `patch -p1 --fuzz=0` (strict, so source drift on a version bump fails
+  the build loudly instead of silently shipping unpatched binaries).
+  Each patch header names its upstream commit and removal condition —
+  e.g. the CVE-2026-54161 NOTIFYCMD/execvp backport is removed once
+  `NUT_VERSION` reaches v2.8.6 — six coupled sites go together: the
+  patch file, the Dockerfile COPY/apply step, the CVE's VEX entry in the
+  Dockerfile's SBOM-fragment RUN, the smoke test's section-8
+  `CVE-2026-54161` assertion, the OpenVEX document at
+  `vex/cve-2026-54161.openvex.json` that the release pipeline attests,
+  plus the test stage's `COPY vex/` line and the smoke test's
+  OpenVEX/NUT_VERSION parity assertion that guard it
+  (and refresh the two README paragraphs that describe the backport:
+  the Security section's VEX-entry description, and the Alerting
+  section's "NOTIFYCMD is executed directly" note, which then
+  describes stock v2.8.6 behavior rather than a backport). Unlike the
+  ARG-generated embedded fragment, the OpenVEX
+  document is a static committed file: its nut subcomponent version
+  string is hardcoded and must track `NUT_VERSION` on every bump while
+  the patch remains applied. A failing `patch` step on a NUT version
+  bump usually means the fix landed upstream: drop the patch rather than
+  re-diffing it.
 - **USB re-enumeration is expected, not exceptional.** Many UPSes reset
   their USB link periodically (the driver runs fine, then goes "Data
   stale"). The `comms_watchdog` in `lifecycle.sh` recovers from this by
@@ -90,14 +130,40 @@ new generated file should respect that same override hook.
   node from the container. The restart re-opens the device while still
   root, which is why the driver must not be started already-dropped to
   `nut`. Keep the watchdog's restart path root-capable.
-- **Admin-password cache is root-only.** The generated `ADMIN_PASSWORD`
-  is cached at `/var/run/nut-secrets/admin_password`, in a `root:root`
-  mode-700 directory created in the Dockerfile, not in the
+- **Password caches are root-only.** The generated credentials
+  (`ADMIN_PASSWORD` at `/var/run/nut-secrets/admin_password`, the
+  internal `local_upsmon` password beside it) are cached in a
+  `root:root` mode-700 directory created in the Dockerfile, not in the
   `nut`-writable `/var/run/nut` that holds PID files. The entrypoint
-  writes it as root via `mktemp` + atomic rename, so a compromised
+  writes them as root via `mktemp` + atomic rename, so a compromised
   `nut`-user process cannot pre-plant a symlink at the cache path. Don't
-  move it back to a `nut`-writable location or use a predictable `.$$`
+  move them back to a `nut`-writable location or use a predictable `.$$`
   temp name.
+- **The generated `upsd.users`/`upsmon.conf` pair links via
+  `[local_upsmon]`.** The bundled `upsmon` authenticates with the
+  reserved internal account (`upsmon primary`); the network-facing
+  `[$API_USER]` is written `upsmon secondary`. That cross-file contract
+  only holds when BOTH files are generated — with a `*.user` override
+  mounted for exactly one of them, the generated half falls back to the
+  legacy `API_USER`/`API_PASSWORD` pair and logs a `level=warn`. See the
+  credential-topology comment block in `generate-config.sh` before
+  touching either generator.
+- **upsd reads `CERTFILE` as the `nut` user, not root.** `ssl_init()`
+  runs _after_ `become_user()` (see the "keyfile must be readable by nut
+  user" comment in NUT's `server/upsd.c`), so the STARTTLS PEM must be
+  readable post-privilege-drop or upsd exits fatally at startup. That is
+  why BOTH certificate sources are served through a `root:nut` 640
+  working copy inside `/etc/nut`: the self-signed cert is _cached_ in
+  the root-only `/var/run/nut-secrets` (same hardening as the password
+  caches) and installed at `/etc/nut/upsd-selfsigned.pem`; the
+  operator-mounted `/etc/nut/upsd.pem` is copied at every boot to
+  `/etc/nut/upsd-mounted.pem`. Never chown/chmod the mount in place: on
+  a rw bind mount that mutates the HOST file (handing the private key
+  to whatever host group the container's `nut` GID maps to), and it is
+  also why `upsd.pem` is excluded from the entrypoint's blanket
+  `/etc/nut` chown/chmod sweep (a read-only mount would additionally
+  EROFS the sweep and abort boot under `set -e`). Keep all these pieces
+  aligned when touching the TLS path.
 - **`chgrp` on the USB bus is best-effort.** Both the startup and the
   watchdog `chgrp -R nut /dev/bus/usb` are guarded (warn-only), so the
   container still starts on a host where the chgrp EPERMs (user-namespace
@@ -117,7 +183,7 @@ The scripts and Dockerfile are linted in CI; run the same tools before
 pushing:
 
 ```sh
-shellcheck *.sh
+shellcheck -x *.sh tests/*.sh
 hadolint Dockerfile
 docker build -t nut-upsd-test .
 ```
