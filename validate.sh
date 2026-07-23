@@ -308,9 +308,12 @@ _run_table() {
   _table="$1"
   _optional="$2"
   printf '%s\n' "$_table" | while IFS= read -r _line; do
-    # Skip blank lines
+    # Skip the empty first/last lines of the table literal. Deliberately ONLY
+    # the empty string: an accidentally indented row must fail loudly through
+    # _resolve_var's unknown-variable error (fail-closed), never be skipped
+    # silently (fail-open) -- this loop dispatches the security validations.
     case "$_line" in
-      '' | ' '*) continue ;;
+      '') continue ;;
     esac
     _var="${_line%%:*}"
     _checks="${_line#*:}"
