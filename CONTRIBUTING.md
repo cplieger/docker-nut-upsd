@@ -1,7 +1,7 @@
 # Contributing to docker-nut-upsd
 
 This image packages Network UPS Tools (NUT) `upsd` into an Alpine
-container. It is POSIX shell only — no Go, no compiled app code of our
+container. It is POSIX shell only; no Go, no compiled app code of our
 own. This guide covers the conventions that aren't obvious from reading
 a single file.
 
@@ -20,11 +20,11 @@ helpers are libraries, not programs:
 
 More scripts are invoked by NUT at runtime (not sourced):
 
-- `nut-notify.sh` — `NOTIFYCMD`; turns UPS events into structured
+- `nut-notify.sh`: `NOTIFYCMD`; turns UPS events into structured
   `level=… msg=…` log lines.
-- `nut-shutdown.sh` — `SHUTDOWNCMD` when `SHUTDOWN_ON_BATTERY_CRITICAL=true`;
+- `nut-shutdown.sh`: `SHUTDOWNCMD` when `SHUTDOWN_ON_BATTERY_CRITICAL=true`;
   powers off the host via D-Bus with retries.
-- `nut-shutdown-noop.sh` — `SHUTDOWNCMD` otherwise; logs the FSD event only.
+- `nut-shutdown-noop.sh`: `SHUTDOWNCMD` otherwise; logs the FSD event only.
 
 The helper modules carry a `# Sourced by entrypoint.sh; not executed
 directly.` header. Keep that contract: put reusable logic in a sourced
@@ -42,7 +42,7 @@ places:
    Supported checks: `control`, `quotes`, `backslash`, `brackets`,
    `identifier`, `numeric`, `positive`, `port`, `percent`.
 2. Add a `case` arm to `_resolve_var` returning `"${MY_VAR:-}"`. The
-   resolver is an explicit lookup table on purpose — there is no
+   resolver is an explicit lookup table on purpose: there is no
    indirect expansion, so an unlisted var fails the run instead of
    silently resolving to empty.
 3. Add an assignment to `canonicalize_validated_values`
@@ -55,7 +55,7 @@ places:
 
 Every value that lands in a NUT config file must reject embedded
 control characters (newline/CR/tab config injection). Values embedded
-in double-quoted NUT fields — including the passwords — additionally
+in double-quoted NUT fields: including the passwords: additionally
 reject double quotes (NUT quoting breakout) and backslashes; identifiers
 used as section headers (e.g. `UPS_NAME`, written as `[$UPS_NAME]`)
 additionally reject bracket characters (INI section injection). A value
@@ -68,7 +68,7 @@ row.
 ## Config generation conventions
 
 `generate_all_configs` asserts each required variable with
-`: "${VAR:?…}"` before writing anything — fail fast rather than emit a
+`: "${VAR:?…}"` before writing anything: fail fast rather than emit a
 half-formed config. Per-file generation is skipped when a matching
 `/etc/nut/<name>.user` override is mounted (`use_user_override`), so any
 new generated file should respect that same override hook.
@@ -82,13 +82,13 @@ new generated file should respect that same override hook.
 - **Stale PID files.** `/var/run/nut` is in the writable layer, so PID
   files survive a `docker restart` and make `upsdrvctl` kill the fresh
   driver as a "duplicate instance". The entrypoint clears `*.pid` at
-  boot — preserve that.
+  boot: preserve that.
 - **PID-file polling, not `pgrep`.** `wait_for_pidfile` waits on the
   daemon's PID file (the signal upstream relies on) to dodge BusyBox
   `pgrep` quirks with daemonized processes.
 - **`/proc/<pid>/exe` is unreadable for the NUT daemons.** They
   `setuid()` from root to `nut` without exec-ing afterwards, which
-  clears the process's dumpable flag — and reading a non-dumpable
+  clears the process's dumpable flag: and reading a non-dumpable
   process's `exe` link needs `CAP_SYS_PTRACE`, which Docker's default
   capability set does not grant (not even to root). Any PID-identity
   check must go through `pid_matches_binary` (lifecycle.sh), which
@@ -102,9 +102,9 @@ new generated file should respect that same override hook.
   backports applied to the NUT source in the Dockerfile with
   `patch -p1 --fuzz=0` (strict, so source drift on a version bump fails
   the build loudly instead of silently shipping unpatched binaries).
-  Each patch header names its upstream commit and removal condition —
+  Each patch header names its upstream commit and removal condition -
   e.g. the CVE-2026-54161 NOTIFYCMD/execvp backport is removed once
-  `NUT_VERSION` reaches v2.8.6 — six coupled sites go together: the
+  `NUT_VERSION` reaches v2.8.6: six coupled sites go together: the
   patch file, the Dockerfile COPY/apply step, the CVE's VEX entry in the
   Dockerfile's SBOM-fragment RUN, the smoke test's section-8
   `CVE-2026-54161` assertion, the OpenVEX document at
@@ -126,7 +126,7 @@ new generated file should respect that same override hook.
   stale"). The `comms_watchdog` in `lifecycle.sh` recovers from this by
   re-homing the driver, but it only works if the bus is passed as a
   **live bind** (`volumes: /dev/bus/usb`) plus `device_cgroup_rules:
-  ["c 189:* rmw"]` — a static `devices:` mapping hides the re-enumerated
+  ["c 189:* rmw"]`: a static `devices:` mapping hides the re-enumerated
   node from the container. The restart re-opens the device while still
   root, which is why the driver must not be started already-dropped to
   `nut`. Keep the watchdog's restart path root-capable.
@@ -143,7 +143,7 @@ new generated file should respect that same override hook.
   `[local_upsmon]`.** The bundled `upsmon` authenticates with the
   reserved internal account (`upsmon primary`); the network-facing
   `[$API_USER]` is written `upsmon secondary`. That cross-file contract
-  only holds when BOTH files are generated — with a `*.user` override
+  only holds when BOTH files are generated: with a `*.user` override
   mounted for exactly one of them, the generated half falls back to the
   legacy `API_USER`/`API_PASSWORD` pair and logs a `level=warn`. See the
   credential-topology comment block in `generate-config.sh` before
@@ -190,7 +190,7 @@ docker build -t nut-upsd-test .
 
 ShellCheck must be clean. `hadolint` reports only DL3018 (unpinned apk),
 which is accepted. Note the in-script `# shellcheck source-path=SCRIPTDIR`
-and targeted `disable` directives — keep them accurate when you move code.
+and targeted `disable` directives: keep them accurate when you move code.
 The `docker build` runs `tests/smoke.sh` in the image's test stage
 (validation matrix, config generation, and fake-clock behavioral tests of
 the comms watchdog), so a failing test fails the build.
@@ -209,5 +209,5 @@ discuss the approach.
 By participating you agree to the
 [Code of Conduct](https://github.com/cplieger/.github/blob/main/CODE_OF_CONDUCT.md).
 Report security vulnerabilities through the
-[security policy](https://github.com/cplieger/.github/blob/main/SECURITY.md) —
+[security policy](https://github.com/cplieger/.github/blob/main/SECURITY.md) -
 never in a public issue.
