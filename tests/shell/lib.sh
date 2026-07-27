@@ -1,41 +1,25 @@
 #!/usr/bin/env bash
-# Shared harness for the shipped-shell unit tests.
+# Shared harness for a repo's shell unit tests — CANONICAL COPY in cplieger/ci
+# (configs/shell/lib.sh), synced to each adopting repo's tests/shell/lib.sh
+# by scripts/classify-repos.py (a repo enrolls by committing a tests/shell/run.sh,
+# which is also what the shell-ci hook looks for). DO NOT edit the synced copy in
+# an app repo — change it here and let the sync land it.
 #
-# WHY THESE TESTS EXIST, and how they differ from tests/smoke.sh: this repo
-# already has a real unit-test suite. tests/smoke.sh sources the four shipped
-# helpers off /usr/local/bin and calls the REAL functions with hostile input —
-# but it runs ONLY inside `docker build` (the Dockerfile test stage), and this
-# image compiles NUT, libmodbus and net-snmp from upstream source natively per
-# arch. So every guard it covers costs a full from-source image build to check,
-# and the guards it does NOT cover are checked nowhere at all.
+# WHY THESE SUITES EXIST, generically: an image smoke test proves the assembled
+# image boots, so it can only ever walk the paths a HEALTHY container takes. The
+# branches that matter most are the ones that fail CLOSED — a refusal, a guard, a
+# fallback — and a healthy image never reaches them. These suites assert what
+# happens when it should NOT work. Each repo's own rationale (which of its shell
+# files are covered, and what its existing tests already own) belongs in its
+# repo-owned tests/shell/run.sh header, not here.
 #
-# This suite is scoped to that second set: re-testing the injection matrix would be
-# duplication that leaves the real gap untested. The scoping is to the FAIL-CLOSED
-# and error paths, not zero overlap — a handful of positive controls here do cover
-# ground smoke.sh also walks (a valid credential-cache reuse, a clean TLS
-# selection), and they are kept deliberately, because without them every refusal
-# assertion beside them would also pass against a function that refuses everything.
-# What lives here is the boot path's most consequential uncovered surface:
-#   - kill_stale_driver_from_pidfile's confused-deputy guards, which stand
-#     between a nut-writable pidfile and a root `kill -9`;
-#   - wait_for_pidfile's startup trust gate;
-#   - the credential-cache guards that decide whether upsd's set/FSD account
-#     boots with a corrupt or short password;
-#   - reconcile_tls_working_copies' failure return, which refuses to leave
-#     withdrawn private-key material nut-readable;
-#   - the validation table's fail-closed dispatch rules, where a silently
-#     skipped row would drop a security check with no log line anywhere;
-#   - the two log lines alerts.yaml keys on, which stop firing SILENTLY when
-#     their shape changes.
-#
-# HOW: each test extracts one function verbatim from the shipped file and runs it
-# against temp directories, with the few external commands and privileged seams
-# it touches stubbed (read_pidfile, pid_matches_binary, kill, sleep, base64).
-# Nothing is reimplemented here — an assertion that passed against a paraphrase
-# would prove nothing about what ships. The functions under test take their
-# inputs as arguments or environment, and file-scope `readonly` constants are
-# plain variables once a function is extracted, which is what makes this work
-# with no container and no image build.
+# HOW: each test EXTRACTS one function verbatim out of the shipped shell and runs
+# it against temp directories, stubbing only what spawns a process or touches the
+# host. Nothing is reimplemented — an assertion against a paraphrase proves nothing
+# about what ships. That requires the function under test to take its inputs as
+# arguments or environment rather than hardcoding paths; where it does not, the
+# honest answer is to leave it uncovered rather than to restructure shipped
+# behaviour for the test's benefit.
 #
 # Sourced by every tests/shell/*_test.sh via the runner; not executable itself.
 
