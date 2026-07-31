@@ -255,6 +255,12 @@ COPY --from=test /tests-passed /tests-passed
 # Canonicalize FIRST, default SECOND (mirroring the entrypoint's order): an
 # LF-only value is non-empty raw, so defaulting from the raw value would pick
 # the LF over the documented default and probe an empty name/address/port.
+# DL3025 wants JSON notation, which cannot run this: the probe sources
+# lifecycle.sh for upsd_probe_host, substitutes three env vars and pipes upsc
+# into grep. Exec form supports none of that, and this image wraps NUT with a
+# shell entrypoint, so it will never be shell-less -- the distroless case the
+# rule guards does not arise here.
+# hadolint ignore=DL3025
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=15s \
     CMD . /usr/local/bin/lifecycle.sh; \
         UPS_NAME=$(printf '%s' "${UPS_NAME:-}"); : "${UPS_NAME:=ups}"; \
