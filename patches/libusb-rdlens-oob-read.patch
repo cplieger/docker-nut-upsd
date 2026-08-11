@@ -1,0 +1,86 @@
+Backport of upstream NUT commit edc06fb39435b892d5daeec53cb4845cb12d1d50
+(PR #3550, issue #3136) for a stack out-of-bounds read in the USB driver
+open path. No CVE was assigned, so this patch has no VEX entry and no
+SBOM-fragment analysis entry, unlike the CVE-2026-54161 backport.
+
+nut_libusb_open() chooses between two candidate HID report descriptor
+lengths held in `int32_t rdlens[2]`, but bounds both the loop and the
+"ran out of candidates" check with sizeof(rdlens) (8, the byte size)
+instead of the element count (2):
+
+	for (j = 0; j < sizeof(rdlens); j++)
+
+Iterations 2..7 read 24 bytes past the end of the array and use that
+stack garbage as rdlen. Garbage that happens to pass the rdlen sanity
+checks is passed to the USB control transfer and on to the HID parser
+callback, which is where upstream saw it segfault.
+
+The out-of-range indices are reached only when neither real candidate
+worked, that is when both descriptor reads failed. That is the state a
+wedged or mid-re-enumeration USB UPS presents, which is the failure this
+image's comms watchdog exists to recover from. The watchdog's recovery
+restarts the driver straight back into this code path, so the defect sits
+on the recovery path rather than off it.
+
+Regression from upstream aba6f43544b17d2f16e69ca19f162c6c19748fc7 ("if
+the tried 'rdlen' did not succeed, fall back to the other value we had in
+mind"), first released in v2.8.5, so this pinned version is the first
+affected one. SIZEOF_ARRAY() is already defined in v2.8.5's
+include/common.h, which both files include.
+
+Both libusb backends carry the identical defect and upstream fixed both.
+This image compiles the libusb-0.1 path, because the builder installs
+libusb-compat-dev and NUT's configure then finds no libusb-1.0
+pkg-config file. The libusb1.c hunks are kept so the patch stays correct
+if that packaging changes.
+
+Remove this patch when NUT_VERSION moves to v2.8.6+, which ships the fix.
+Removal spans three coupled sites: this file, the Dockerfile COPY/apply
+step, and the README's "Dependency CVE posture" paragraph that names the
+two carried backports. See CONTRIBUTING ("Upstream sources may carry
+checked-in patches").
+
+diff --git a/drivers/libusb0.c b/drivers/libusb0.c
+index 52f08f2..8471136 100644
+--- a/drivers/libusb0.c
++++ b/drivers/libusb0.c
+@@ -651,7 +651,7 @@ static int nut_libusb_open(usb_dev_handle **udevp,
+ 				}
+ 			}
+ 
+-			for (j = 0; j < sizeof(rdlens); j++) {
++			for (j = 0; j < SIZEOF_ARRAY(rdlens); j++) {
+ 				rdlen = rdlens[j];
+ 				if (rdlen < 0)
+ 					continue;
+@@ -716,7 +716,7 @@ static int nut_libusb_open(usb_dev_handle **udevp,
+ 				break;
+ 			}
+ 
+-			if (j >= sizeof(rdlens)) {
++			if (j >= SIZEOF_ARRAY(rdlens)) {
+ 				/* Ended the loop without success */
+ 				goto next_device;
+ 			}
+diff --git a/drivers/libusb1.c b/drivers/libusb1.c
+index b02da58..e9f6c85 100644
+--- a/drivers/libusb1.c
++++ b/drivers/libusb1.c
+@@ -807,7 +807,7 @@ static int nut_libusb_open(libusb_device_handle **udevp,
+ 			}
+ 		}
+ 
+-		for (j = 0; j < sizeof(rdlens); j++) {
++		for (j = 0; j < SIZEOF_ARRAY(rdlens); j++) {
+ 			rdlen = rdlens[j];
+ 			if (rdlen < 0)
+ 				continue;
+@@ -897,7 +897,7 @@ static int nut_libusb_open(libusb_device_handle **udevp,
+ 			break;
+ 		}
+ 
+-		if (j >= sizeof(rdlens)) {
++		if (j >= SIZEOF_ARRAY(rdlens)) {
+ 			/* Ended the loop without success */
+ 			goto next_device;
+ 		}

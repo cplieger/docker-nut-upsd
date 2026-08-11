@@ -118,7 +118,13 @@ new generated file should respect that same override hook.
   ARG-generated embedded fragment, the OpenVEX
   document is a static committed file: its nut subcomponent version
   string is hardcoded and must track `NUT_VERSION` on every bump while
-  the patch remains applied. A failing `patch` step on a NUT version
+  the patch remains applied. The second backport, the libusb `rdlens`
+  out-of-bounds read (upstream PR #3550), has no CVE and therefore no
+  VEX entry, no SBOM analysis entry, and no smoke-test assertion: it
+  shares the v2.8.6 removal trigger but spans only three coupled sites,
+  the patch file, the Dockerfile COPY/apply step, and the README's
+  "Dependency CVE posture" paragraph that names both backports.
+  A failing `patch` step on a NUT version
   bump usually means the fix landed upstream: drop the patch rather than
   re-diffing it.
 - **USB re-enumeration is expected, not exceptional.** Many UPSes reset
