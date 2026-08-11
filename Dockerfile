@@ -71,18 +71,29 @@ ARG NUT_VERSION=v2.8.5
 # repin: dep=networkupstools/nut url=https://github.com/networkupstools/nut/releases/download/{version}/nut-{version_nov}.tar.gz
 ARG NUT_SHA256=18bf32e59eb764b13da3c4fa70384926d7fa584cb31d2fe7f137a570633eeec1
 WORKDIR /build/nut
-# CVE-2026-54161 / GHSA-mjgp-j4gm-6qg5 backport (see the patch header): v2.8.5
-# ships upsmon/upssched invoking NOTIFYCMD/CMDSCRIPT via system() with
-# server-controlled text interpolated into the shell command. Applied strictly
-# (--fuzz=0) so source drift on a version bump fails the build loudly instead
-# of silently shipping unpatched binaries. Remove with NUT_VERSION >= v2.8.6.
-COPY patches/cve-2026-54161-notifycmd-execvp.patch /build/patches/
+# Two checked-in backports of upstream fixes this pinned release predates (the
+# patch headers carry the full reasoning). Both apply strictly (--fuzz=0) so
+# source drift on a version bump fails the build loudly instead of silently
+# shipping unpatched binaries, and both are removed with NUT_VERSION >= v2.8.6:
+#   - CVE-2026-54161 / GHSA-mjgp-j4gm-6qg5: v2.8.5 ships upsmon/upssched
+#     invoking NOTIFYCMD/CMDSCRIPT via system() with server-controlled text
+#     interpolated into the shell command.
+#   - libusb rdlens out-of-bounds read (upstream PR #3550, no CVE assigned):
+#     nut_libusb_open() bounds its candidate report-descriptor loop by
+#     sizeof() instead of element count, so it reads 24 bytes of stack past
+#     the array when a wedged UPS fails both descriptor reads and segfaults
+#     the driver. The regression was first released in v2.8.5, and the
+#     trigger state is the one the comms watchdog restarts the driver into.
+COPY patches/cve-2026-54161-notifycmd-execvp.patch \
+     patches/libusb-rdlens-oob-read.patch \
+     /build/patches/
 RUN wget -qO nut.tar.gz \
       "https://github.com/networkupstools/nut/releases/download/${NUT_VERSION}/nut-${NUT_VERSION#v}.tar.gz" \
     && printf '%s  %s\n' "${NUT_SHA256}" nut.tar.gz | sha256sum -c - \
     && tar xz --strip-components=1 -f nut.tar.gz \
     && rm nut.tar.gz \
     && patch -p1 --fuzz=0 -i /build/patches/cve-2026-54161-notifycmd-execvp.patch \
+    && patch -p1 --fuzz=0 -i /build/patches/libusb-rdlens-oob-read.patch \
     && PKG_CONFIG_LIBDIR="/usr/lib/pkgconfig" \
        LIBS="-lssl -lcrypto" \
        ac_cv_func_setpgrp_void=yes \
