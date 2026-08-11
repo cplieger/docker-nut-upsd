@@ -172,13 +172,15 @@ Thresholds, `for:` windows, and the `severity` labels are starting points; adjus
 **Dependency CVE posture.** NUT, libmodbus, and net-snmp are compiled
 from patched upstream sources, every source version- and hash-pinned,
 in native per-arch builds (no QEMU, no cross-compilation), avoiding
-the CVEs carried by Alpine's older packages. Two upstream fixes that
+the CVEs carried by Alpine's older packages. Three upstream fixes that
 NUT v2.8.5 predates are carried as checked-in backports in
-[`patches/`](patches/): the CVE-2026-54161 `NOTIFYCMD` hardening, and
-an out-of-bounds read in the USB driver's report-descriptor handling
-that can crash the driver against a UPS whose USB link has wedged
-(upstream PR #3550, no CVE assigned). Both are dropped once NUT v2.8.6
-ships them. The image is scanned with
+[`patches/`](patches/): the CVE-2026-54161 `NOTIFYCMD` hardening, an
+out-of-bounds read in the USB driver's report-descriptor handling that
+can crash the driver against a UPS whose USB link has wedged (upstream
+PR #3550), and a teardown deadlock that can hang a USB driver
+indefinitely while it reconnects, which leaves the UPS unmonitored
+(upstream issue #598). Neither USB fix has a CVE. All three are dropped
+once NUT v2.8.6 ships them. The image is scanned with
 Trivy and Grype on relevant pull requests and on every release; the
 authoritative, current results live in the repository's Security tab.
 Accepted findings, one line each: Grype's unfixed BusyBox-wget
