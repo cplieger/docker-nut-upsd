@@ -71,10 +71,10 @@ ARG NUT_VERSION=v2.8.5
 # repin: dep=networkupstools/nut url=https://github.com/networkupstools/nut/releases/download/{version}/nut-{version_nov}.tar.gz
 ARG NUT_SHA256=18bf32e59eb764b13da3c4fa70384926d7fa584cb31d2fe7f137a570633eeec1
 WORKDIR /build/nut
-# Two checked-in backports of upstream fixes this pinned release predates (the
-# patch headers carry the full reasoning). Both apply strictly (--fuzz=0) so
-# source drift on a version bump fails the build loudly instead of silently
-# shipping unpatched binaries, and both are removed with NUT_VERSION >= v2.8.6:
+# Three checked-in backports of upstream fixes this pinned release predates
+# (the patch headers carry the full reasoning). All apply strictly (--fuzz=0)
+# so source drift on a version bump fails the build loudly instead of silently
+# shipping unpatched binaries, and all are removed with NUT_VERSION >= v2.8.6:
 #   - CVE-2026-54161 / GHSA-mjgp-j4gm-6qg5: v2.8.5 ships upsmon/upssched
 #     invoking NOTIFYCMD/CMDSCRIPT via system() with server-controlled text
 #     interpolated into the shell command.
@@ -84,8 +84,15 @@ WORKDIR /build/nut
 #     the array when a wedged UPS fails both descriptor reads and segfaults
 #     the driver. The regression was first released in v2.8.5, and the
 #     trigger state is the one the comms watchdog restarts the driver into.
+#   - libusb teardown deadlock on reconnect (upstream #598, no CVE assigned):
+#     v2.8.5 pairs libusb_init/libusb_exit per open/close, so every reconnect
+#     tears the default context down and waits for URBs that a device reset
+#     or an unexpected disconnect orphaned and that never drain. The driver
+#     hangs and the UPS goes unmonitored. Affects every USB driver in this
+#     image, since the defect is in the shared libusb-1.0 path.
 COPY patches/cve-2026-54161-notifycmd-execvp.patch \
      patches/libusb-rdlens-oob-read.patch \
+     patches/libusb-exit-reconnect-deadlock.patch \
      /build/patches/
 RUN wget -qO nut.tar.gz \
       "https://github.com/networkupstools/nut/releases/download/${NUT_VERSION}/nut-${NUT_VERSION#v}.tar.gz" \
@@ -94,6 +101,7 @@ RUN wget -qO nut.tar.gz \
     && rm nut.tar.gz \
     && patch -p1 --fuzz=0 -i /build/patches/cve-2026-54161-notifycmd-execvp.patch \
     && patch -p1 --fuzz=0 -i /build/patches/libusb-rdlens-oob-read.patch \
+    && patch -p1 --fuzz=0 -i /build/patches/libusb-exit-reconnect-deadlock.patch \
     && PKG_CONFIG_LIBDIR="/usr/lib/pkgconfig" \
        LIBS="-lssl -lcrypto" \
        ac_cv_func_setpgrp_void=yes \
