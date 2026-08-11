@@ -29,10 +29,11 @@ affected one. SIZEOF_ARRAY() is already defined in v2.8.5's
 include/common.h, which both files include.
 
 Both libusb backends carry the identical defect and upstream fixed both.
-This image compiles the libusb-0.1 path, because the builder installs
-libusb-compat-dev and NUT's configure then finds no libusb-1.0
-pkg-config file. The libusb1.c hunks are kept so the patch stays correct
-if that packaging changes.
+This image compiles the libusb-1.0 backend, so drivers/libusb1.c is the
+file that ships: the running container reports "USB communication driver
+(libusb 1.0) 0.53" at driver start and "driver.version.usb:
+libusb-1.0.30" in upsc output. The libusb0.c hunks are kept so the patch
+stays correct if the build ever resolves the 0.1 API instead.
 
 Remove this patch when NUT_VERSION moves to v2.8.6+, which ships the fix.
 Removal spans three coupled sites: this file, the Dockerfile COPY/apply
