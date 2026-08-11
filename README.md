@@ -243,9 +243,9 @@ All dependencies are updated automatically via [Renovate](https://github.com/ren
 
 ## Credits
 
-This project packages [Network UPS Tools (NUT)](https://github.com/networkupstools/nut) into a container image. All credit for the core functionality goes to the upstream maintainers.
+This project packages [Network UPS Tools (NUT)](https://github.com/networkupstools/nut) (GPL-2.0-or-later) into a container image. All credit for the core functionality goes to the upstream maintainers.
 
-- [libmodbus](https://github.com/stephane/libmodbus) by
+- [libmodbus](https://github.com/stephane/libmodbus) (LGPL-2.1) by
   [@stephane](https://github.com/stephane), the Modbus protocol
   library used by NUT's `apc_modbus` driver
 - [Net-SNMP](https://github.com/net-snmp/net-snmp), the SNMP
@@ -264,4 +264,7 @@ This project was built with AI-assisted tooling using [Claude](https://claude.co
 
 ## License
 
-GPL-3.0. See [LICENSE](LICENSE).
+Apache-2.0. See [LICENSE](LICENSE).
+
+`patches/` is an exception. It holds backports of upstream NUT source, so
+those files stay GPL-2.0-or-later. Each patch header names its upstream commit.
