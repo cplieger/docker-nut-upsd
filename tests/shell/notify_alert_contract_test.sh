@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # nut-notify.sh: the NOTIFYCMD upsmon runs for every UPS event, and the only
-# source of the log lines four of this repo's five alert rules match.
+# source of the log lines five of this repo's six alert rules match.
 #
 # WHY THIS IS A CONTRACT AND NOT A FORMATTING PREFERENCE: alerts.yaml keys on
-# literal substrings of these lines -- `event=LOWBATT`, `event=(FSD|SHUTDOWN)`,
-# `event=NOCOMM`, `event=(REPLBATT|ALARM)`. Rename the field, reorder the printf,
-# or drop the default case arm, and UPSLowBattery / UPSForcedShutdown /
+# literal substrings of these lines -- `event=ONBATT`, `event=ONLINE`,
+# `event=LOWBATT`, `event=(FSD|SHUTDOWN)`, `event=NOCOMM`,
+# `event=(REPLBATT|ALARM)`. Rename the field, reorder the printf, or drop the
+# default case arm, and UPSOnBattery / UPSLowBattery / UPSForcedShutdown /
 # UPSCommsLost / UPSHardwareFault stop firing SILENTLY: nothing errors, no test
 # fails, the dashboards stay green, and the gap is discovered during a real
 # outage. The matchers below are copied VERBATIM from alerts.yaml rather than
@@ -61,7 +62,7 @@ all_match() {
   done
 }
 
-# --- 1. the four LogQL matchers, read FROM alerts.yaml ----------------------------
+# --- 1. the LogQL matchers, read FROM alerts.yaml ---------------------------------
 # The matcher literal is extracted from the rule file at run time, so EITHER side
 # of the contract failing fails here: rename the log field and the emitted line
 # stops matching; edit the alert expression and the extracted literal changes out
@@ -69,34 +70,48 @@ all_match() {
 # first half.
 ALERTS="$REPO_ROOT/alerts.yaml"
 
-# matcher_for <alert-name> -> the backtick-quoted LogQL line filter in that rule.
+# rule_matchers <alert-name> -> every backtick-quoted LogQL line filter in that
+# rule, in file order, one per line.
 #
 # The range ends at the NEXT rule (or EOF), not at a `[5m]` literal: keying the end
 # on the window would make a window change overrun the range into the following
 # rule, and the extraction would then depend on which backtick pair `head -1`
 # happens to reach first. Correct today by luck; not a property to rely on.
-matcher_for() {
+rule_matchers() {
   awk -v want="- alert: $1" '
     $0 ~ want { inrule = 1; next }
     inrule && /- alert: / { exit }
     inrule { print }
-  ' "$ALERTS" | grep -o '`[^`]*`' | tr -d '`' | head -1
+  ' "$ALERTS" | grep -o '`[^`]*`' | tr -d '`'
+}
+
+# matcher_for <alert-name> -> the one line filter of a single-matcher rule.
+matcher_for() {
+  rule_matchers "$1" | head -1
 }
 
 M_LOWBATT=$(matcher_for UPSLowBattery)
 M_FSD=$(matcher_for UPSForcedShutdown)
 M_NOCOMM=$(matcher_for UPSCommsLost)
 M_FAULT=$(matcher_for UPSHardwareFault)
+
+# UPSOnBattery is the one rule with more than one matcher: it reconstructs "mains
+# is out right now" from the ONBATT/ONLINE event PAIR across its two arms, so
+# head -1 would pin only half of that contract. Deduplicated because each event
+# appears once per arm.
+M_ONBATT_PAIR=$(rule_matchers UPSOnBattery | sort -u)
+
 # Non-emptiness is not enough: an empty matcher would make `grep -F -- ""` match
 # every line (a total false green dressed as rigour), and a matcher extracted from
-# the WRONG rule would be non-empty but meaningless. Every one of these four rules
+# the WRONG rule would be non-empty but meaningless. Every one of these rules
 # filters on an `event=` field, so the SHAPE is the guard that catches both.
-for _m in "$M_LOWBATT" "$M_FSD" "$M_NOCOMM" "$M_FAULT"; do
+for _m in "$M_LOWBATT" "$M_FSD" "$M_NOCOMM" "$M_FAULT" $M_ONBATT_PAIR; do
   case "$_m" in
     *event=*) ;;
     *)
-      printf 'harness error: extracted matcher %s from %s does not filter on event= (lowbatt=%s fsd=%s nocomm=%s fault=%s)\n' \
-        "${_m:-<empty>}" "$ALERTS" "$M_LOWBATT" "$M_FSD" "$M_NOCOMM" "$M_FAULT" >&2
+      printf 'harness error: extracted matcher %s from %s does not filter on event= (lowbatt=%s fsd=%s nocomm=%s fault=%s onbatt-pair=%s)\n' \
+        "${_m:-<empty>}" "$ALERTS" "$M_LOWBATT" "$M_FSD" "$M_NOCOMM" "$M_FAULT" \
+        "$(printf '%s' "$M_ONBATT_PAIR" | tr '\n' ' ')" >&2
       exit 1
       ;;
   esac
@@ -120,6 +135,24 @@ notify REPLBATT | grep -Eq -- "$M_FAULT" \
   && ok "REPLBATT and ALARM both match UPSHardwareFault's regex '$M_FAULT' from alerts.yaml" \
   || no 'UPSHardwareFault matcher' "alerts.yaml wants '$M_FAULT', REPLBATT: $(notify REPLBATT) / ALARM: $(notify ALARM)"
 
+# UPSOnBattery needs BOTH halves of the pair to reach the log: with ONLINE missing
+# the rule can never resolve, and with ONBATT missing it can never fire. The event
+# name is derived from the extracted matcher and fed straight back to the handler,
+# never named here. The COUNT is pinned too: an arm deleted from the expression
+# would otherwise quietly reduce this to whichever event survived.
+_pair_n=0
+_pair_unmatched=""
+for _m in $M_ONBATT_PAIR; do
+  _pair_n=$((_pair_n + 1))
+  # `event=ONBATT` -> ONBATT, the NOTIFYTYPE upsmon passes for that event.
+  _ev=${_m#*event=}
+  notify "$_ev" | grep -qF -- "$_m" || _pair_unmatched="$_pair_unmatched $_ev"
+done
+_pair_seen=$(printf '%s' "$M_ONBATT_PAIR" | tr '\n' ' ')
+[ "$_pair_n" -eq 2 ] && [ -z "$_pair_unmatched" ] \
+  && ok "UPSOnBattery's ONBATT/ONLINE pair from alerts.yaml ($_pair_seen) is emitted on both events" \
+  || no 'UPSOnBattery matcher pair' "alerts.yaml should carry 2 event matchers, got $_pair_n ($_pair_seen); not emitted:${_pair_unmatched:-none}"
+
 # --- 1b. every matched NUT event is actually routed to this handler ----------------
 # This script only runs when upsmon's NOTIFYFLAG for the event carries EXEC, and
 # that list lives in generate-config.sh. So an alert can key on a perfectly-shaped
@@ -130,7 +163,7 @@ notify REPLBATT | grep -Eq -- "$M_FAULT" \
 # stay green while the specific flag line was deleted.
 GENERATOR="$REPO_ROOT/generate-config.sh"
 _unrouted=""
-for _m in "$M_LOWBATT" "$M_FSD" "$M_NOCOMM" "$M_FAULT"; do
+for _m in "$M_LOWBATT" "$M_FSD" "$M_NOCOMM" "$M_FAULT" $M_ONBATT_PAIR; do
   # `event=(FSD|SHUTDOWN)` -> FSD SHUTDOWN; `event=LOWBATT` -> LOWBATT.
   _events=$(printf '%s' "$_m" | sed -e 's/.*event=//' -e 's/[()]//g' -e 's/|/ /g')
   for _ev in $_events; do

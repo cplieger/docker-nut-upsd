@@ -9,7 +9,64 @@
 # selector to your deployment.
 groups:
   - name: nut-upsd
+    # Evaluate every 10s instead of the ruler's 1m default. UPSOnBattery pairs
+    # this with for: 10s, so the on-battery condition must hold across one full
+    # interval before it fires: a mains flicker (a load surge from a device on
+    # the UPS, e.g. a laser printer's fuser inrush) clears within one upsmon
+    # poll and stays silent, while a real outage fires in roughly 10-20s. A 1m
+    # evaluation would delay that by up to a minute, which is too long when the
+    # runtime left depends on the load and can be short. This applies to every
+    # rule in the group; raise it if the extra query load is not worth it for
+    # the slower rules below.
+    interval: 10s
     rules:
+      # Mains state, reconstructed from the event PAIR: upsmon logs ONBATT when
+      # it loses mains and ONLINE when it returns, so more ONBATT than ONLINE in
+      # the window means the last transition was onto battery and the UPS is
+      # carrying the load right now.
+      #
+      # Two arms joined by or, and neither one covers the other's case:
+      #   1. the comparison arm handles a window holding BOTH events. It is what
+      #      keeps a flicker quiet, and it is what still fires when an earlier
+      #      flicker is followed by a real outage (2 ONBATT vs 1 ONLINE).
+      #   2. the unless arm handles the common case, a first outage with no
+      #      ONLINE in the window at all. There the comparison's right side has
+      #      NO series, so the comparison returns no result and arm 1 alone
+      #      could never fire. It cannot replace arm 1 either: one earlier
+      #      flicker makes ONLINE non-empty and would suppress a real outage.
+      # Same shape, and the same reason, as the two-arm up == 0 or absent(up)
+      # reachability pair.
+      #
+      # The 10m window is far longer than any UPS runtime, so the alert cannot
+      # go quiet while the UPS is still on battery, and it is long enough to
+      # hold both halves of a flicker (POLLFREQ, default 5s, apart).
+      - alert: UPSOnBattery
+        expr: |
+          sum by (container) (count_over_time(
+            {container="nut-upsd"} |= `event=ONBATT` [10m]
+          )) > sum by (container) (count_over_time(
+            {container="nut-upsd"} |= `event=ONLINE` [10m]
+          ))
+          or
+          sum by (container) (count_over_time(
+            {container="nut-upsd"} |= `event=ONBATT` [10m]
+          )) > 0
+          unless
+          sum by (container) (count_over_time(
+            {container="nut-upsd"} |= `event=ONLINE` [10m]
+          )) > 0
+        for: 10s
+        labels:
+          severity: warning
+        annotations:
+          summary: "UPS is on battery - mains power lost ({{ $labels.container }})"
+          description: >
+            nut-upsd logged an ONBATT event with no ONLINE event after it: mains
+            power is gone and the UPS carries the connected load from its
+            battery. How long it holds depends on that load and on the battery's
+            size and age, so judge the urgency from the runtime your own UPS
+            reports rather than from a fixed figure. Check mains power now.
+            UPSLowBattery is the escalation when the battery runs down.
       - alert: UPSLowBattery
         expr: |
           sum by (container) (count_over_time(
