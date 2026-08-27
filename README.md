@@ -154,13 +154,14 @@ Set `COMMS_WATCHDOG=false` to disable it. It is a no-op while comms are healthy.
 
 ## Alerting
 
-nut-upsd has no metrics endpoint; its operational state is in its logs. Its `upsmon` notification handler logs a structured `event=<TYPE>` line to the container log for every UPS event (`LOWBATT`, `FSD`/`SHUTDOWN`, `NOCOMM`, and so on). Ship the container's logs to Loki (Grafana Alloy's Docker log discovery does this with no configuration) and evaluate the rules in [`alerts.yaml`](alerts.yaml) with [Loki's ruler](https://grafana.com/docs/loki/latest/alert/); firing alerts deliver through your Alertmanager exactly like Prometheus metric alerts. They cover:
+nut-upsd has no metrics endpoint; its operational state is in its logs. Its `upsmon` notification handler logs a structured `event=<TYPE>` line to the container log for each event the generated `upsmon.conf` wires to it (`ONLINE`, `ONBATT`, `LOWBATT`, `FSD`, `SHUTDOWN`, `COMMOK`, `COMMBAD`, `NOCOMM`, `REPLBATT`, `ALARM`). The NUT daemons also log to the container log directly, so lines such as `Data for UPS [ups] is stale - check driver` appear alongside the structured ones. Ship the container's logs to Loki (Grafana Alloy's Docker log discovery does this with no configuration) and evaluate the rules in [`alerts.yaml`](alerts.yaml) with [Loki's ruler](https://grafana.com/docs/loki/latest/alert/); firing alerts deliver through your Alertmanager exactly like Prometheus metric alerts. They cover:
 
 | Alert | Fires when | Severity |
 | --- | --- | --- |
-| `UPSLowBattery` | a `LOWBATT` event: the UPS is on battery and has reached its low-battery threshold, so shutdown is imminent | critical |
-| `UPSForcedShutdown` | an `FSD`/`SHUTDOWN` event: the battery is exhausted and the shutdown sequence has started | critical |
+| `UPSLowBattery` | a `LOWBATT` event: the UPS raised its low-battery flag (on battery plus low battery starts the shutdown sequence) | critical |
+| `UPSForcedShutdown` | an `FSD`/`SHUTDOWN` event: the shutdown sequence has started | critical |
 | `UPSCommsLost` | a `NOCOMM` event: upsmon could not reach the UPS for `NOCOMMWARNTIME` seconds (default 300) | warning |
+| `UPSHardwareFault` | a `REPLBATT`/`ALARM` event: the UPS reports a worn or missing battery, a fan failure, overheat, or a charger fault | warning |
 | `UPSPowerOffPathBroken` | the D-Bus poweroff-path probe logs `unreachable`: host shutdown is enabled but a forced shutdown could not power off the host right now | warning |
 
 These events are emitted out of the box: the generated `upsmon.conf` sets a `NOTIFYCMD` that writes each event to the log, with `EXEC` on the relevant `NOTIFYFLAG`s. If you supply your own config by mounting `upsmon.conf.user`, keep the `NOTIFYCMD` line and the `EXEC` notify flags or these log lines (and the alerts that key on them) will not appear. Note that `NOTIFYCMD` is executed directly, with no shell, receiving the message as `$1` (the CVE-2026-54161 backport, matching NUT v2.8.6 semantics), so its value must be the path to an executable; wrap any shell snippet or command-with-arguments in a small script and point `NOTIFYCMD` at it. With `SHUTDOWN_ON_BATTERY_CRITICAL=true`, a background probe additionally re-checks the D-Bus poweroff path every `DBUS_PROBE_INTERVAL` seconds (default 300) and logs `level=error` while it is unreachable, so a broken mount alerts before an outage instead of failing during the forced shutdown itself.

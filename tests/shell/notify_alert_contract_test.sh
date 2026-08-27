@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # nut-notify.sh: the NOTIFYCMD upsmon runs for every UPS event, and the only
-# source of the log lines three of this repo's four alert rules match.
+# source of the log lines four of this repo's five alert rules match.
 #
 # WHY THIS IS A CONTRACT AND NOT A FORMATTING PREFERENCE: alerts.yaml keys on
 # literal substrings of these lines -- `event=LOWBATT`, `event=(FSD|SHUTDOWN)`,
-# `event=NOCOMM`. Rename the field, reorder the printf, or drop the default case
-# arm, and UPSLowBattery / UPSForcedShutdown / UPSCommsLost stop firing SILENTLY:
-# nothing errors, no test fails, the dashboards stay green, and the gap is
-# discovered during a real outage. The matchers below are copied VERBATIM from
-# alerts.yaml rather than paraphrased, so a divergence between the two files
-# fails here.
+# `event=NOCOMM`, `event=(REPLBATT|ALARM)`. Rename the field, reorder the printf,
+# or drop the default case arm, and UPSLowBattery / UPSForcedShutdown /
+# UPSCommsLost / UPSHardwareFault stop firing SILENTLY: nothing errors, no test
+# fails, the dashboards stay green, and the gap is discovered during a real
+# outage. The matchers below are copied VERBATIM from alerts.yaml rather than
+# paraphrased, so a divergence between the two files fails here.
 #
 # This script is not covered by tests/smoke.sh at all. It runs standalone (upsmon
 # execs it, so it cannot source the shared helper), needs no privileges, and is
@@ -61,7 +61,7 @@ all_match() {
   done
 }
 
-# --- 1. the three LogQL matchers, read FROM alerts.yaml ----------------------------
+# --- 1. the four LogQL matchers, read FROM alerts.yaml ----------------------------
 # The matcher literal is extracted from the rule file at run time, so EITHER side
 # of the contract failing fails here: rename the log field and the emitted line
 # stops matching; edit the alert expression and the extracted literal changes out
@@ -86,16 +86,17 @@ matcher_for() {
 M_LOWBATT=$(matcher_for UPSLowBattery)
 M_FSD=$(matcher_for UPSForcedShutdown)
 M_NOCOMM=$(matcher_for UPSCommsLost)
+M_FAULT=$(matcher_for UPSHardwareFault)
 # Non-emptiness is not enough: an empty matcher would make `grep -F -- ""` match
 # every line (a total false green dressed as rigour), and a matcher extracted from
-# the WRONG rule would be non-empty but meaningless. Every one of these three rules
+# the WRONG rule would be non-empty but meaningless. Every one of these four rules
 # filters on an `event=` field, so the SHAPE is the guard that catches both.
-for _m in "$M_LOWBATT" "$M_FSD" "$M_NOCOMM"; do
+for _m in "$M_LOWBATT" "$M_FSD" "$M_NOCOMM" "$M_FAULT"; do
   case "$_m" in
     *event=*) ;;
     *)
-      printf 'harness error: extracted matcher %s from %s does not filter on event= (lowbatt=%s fsd=%s nocomm=%s)\n' \
-        "${_m:-<empty>}" "$ALERTS" "$M_LOWBATT" "$M_FSD" "$M_NOCOMM" >&2
+      printf 'harness error: extracted matcher %s from %s does not filter on event= (lowbatt=%s fsd=%s nocomm=%s fault=%s)\n' \
+        "${_m:-<empty>}" "$ALERTS" "$M_LOWBATT" "$M_FSD" "$M_NOCOMM" "$M_FAULT" >&2
       exit 1
       ;;
   esac
@@ -113,6 +114,32 @@ notify FSD | grep -Eq -- "$M_FSD" \
 notify NOCOMM | grep -qF -- "$M_NOCOMM" \
   && ok "a NOCOMM event emits '$M_NOCOMM', the literal UPSCommsLost matches in alerts.yaml" \
   || no 'UPSCommsLost matcher' "alerts.yaml wants '$M_NOCOMM', line: $(notify NOCOMM)"
+
+notify REPLBATT | grep -Eq -- "$M_FAULT" \
+  && notify ALARM | grep -Eq -- "$M_FAULT" \
+  && ok "REPLBATT and ALARM both match UPSHardwareFault's regex '$M_FAULT' from alerts.yaml" \
+  || no 'UPSHardwareFault matcher' "alerts.yaml wants '$M_FAULT', REPLBATT: $(notify REPLBATT) / ALARM: $(notify ALARM)"
+
+# --- 1b. every matched NUT event is actually routed to this handler ----------------
+# This script only runs when upsmon's NOTIFYFLAG for the event carries EXEC, and
+# that list lives in generate-config.sh. So an alert can key on a perfectly-shaped
+# event= literal that NUT will never hand to the handler -- ALARM was exactly that
+# case before it was wired. Read BOTH sides here: the event names out of the alert
+# matchers, and the EXEC routing out of the generator, so dropping either one
+# fails. Scoped per event name rather than a file-wide grep for "EXEC", which would
+# stay green while the specific flag line was deleted.
+GENERATOR="$REPO_ROOT/generate-config.sh"
+_unrouted=""
+for _m in "$M_LOWBATT" "$M_FSD" "$M_NOCOMM" "$M_FAULT"; do
+  # `event=(FSD|SHUTDOWN)` -> FSD SHUTDOWN; `event=LOWBATT` -> LOWBATT.
+  _events=$(printf '%s' "$_m" | sed -e 's/.*event=//' -e 's/[()]//g' -e 's/|/ /g')
+  for _ev in $_events; do
+    grep -Eq "^NOTIFYFLAG $_ev .*EXEC" "$GENERATOR" || _unrouted="$_unrouted $_ev"
+  done
+done
+[ -z "$_unrouted" ] \
+  && ok 'every NUT event the alert rules match carries EXEC in the generated upsmon.conf' \
+  || no 'NOTIFYFLAG routing' "alerts.yaml matches these events but $GENERATOR does not route them to NOTIFYCMD:$_unrouted"
 
 # --- 2. the record fields the logfmt parser and the matchers both depend on --------
 #

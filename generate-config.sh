@@ -193,6 +193,11 @@ USERSEOF
 # upsd.users and upsmon.conf are generated, and falls back to the legacy
 # API pair when upsd.users is user-mounted — see the credential-topology
 # block above generate_upsd_users.
+# NOTIFYFLAG ALARM carries EXEC because ups.alarm is upstream's only report of
+# a UPS hardware fault: the driver maps the device's own flags to text (fan
+# failure, overheat, charger failure, no battery, battery voltage out of range)
+# and upsmon notifies on it. Without EXEC the fault reaches no event= line, so
+# nothing downstream can key on it.
 generate_upsmon_conf() {
   use_user_override upsmon.conf && return 0
   if local_upsmon_credential_active; then
@@ -226,6 +231,7 @@ NOTIFYFLAG COMMBAD SYSLOG+EXEC
 NOTIFYFLAG SHUTDOWN SYSLOG+EXEC+WALL
 NOTIFYFLAG REPLBATT SYSLOG+EXEC
 NOTIFYFLAG NOCOMM SYSLOG+EXEC
+NOTIFYFLAG ALARM SYSLOG+EXEC
 MONEOF
 }
 

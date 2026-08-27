@@ -233,8 +233,15 @@ COPY --from=builder /out/usr/share/cmdvartab /usr/share/cmdvartab
 # libmodbus, and net-snmp alongside the APK packages.
 COPY --from=builder /out/nut-upsd.cdx.json /usr/share/sbom/nut-upsd.cdx.json
 
+# NUT_DEBUG_SYSLOG=stderr keeps upsd and the UPS driver logging to stderr after
+# they daemonize. Without it NUT's background() clears the stderr log bit and
+# reopens fd 2 on /dev/null, so those two write to syslog(3) alone -- and this
+# image runs no syslog daemon while a container has no /dev/log, so musl drops
+# the datagrams. "Data for UPS [x] is stale - check driver" is one of them.
+# https://github.com/networkupstools/nut/blob/v2.8.5/docs/man/nut.conf.txt
 ENV NUT_QUIET_INIT_UPSNOTIFY=true \
-    NUT_QUIET_INIT_SSL=true
+    NUT_QUIET_INIT_SSL=true \
+    NUT_DEBUG_SYSLOG=stderr
 COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY --chmod=755 validate.sh /usr/local/bin/validate.sh
 COPY --chmod=755 generate-config.sh /usr/local/bin/generate-config.sh
