@@ -295,9 +295,11 @@ start_recovered_driver() {
   if timeout -k 5 90 /usr/sbin/upsdrvctl start "$UPS_NAME" >"$_srd_out_file" 2>&1; then
     printf 'level=info msg="comms watchdog driver restart issued" ups=%s\n' "$UPS_NAME" >&2
   else
-    # Capture the exit status (124 = timeout) so a silent failure still names
-    # its class; log_value flattens CR/tab/control bytes that the previous
-    # LF-only sanitizer let split or corrupt the logfmt record.
+    # Capture the exit status so a silent failure still names its class. On
+    # this BusyBox image `timeout -k 5 90` reports expiry as 143 (128+TERM),
+    # or 137 (128+KILL) when upsdrvctl ignored the TERM through the grace —
+    # never coreutils' 124. log_value flattens CR/tab/control bytes that the
+    # previous LF-only sanitizer let split or corrupt the logfmt record.
     _srd_rc=$?
     _srd_out=$(capture_head "$_srd_out_file")
     printf 'level=error msg="comms watchdog driver restart failed" ups=%s rc=%d detail="%s"\n' \
