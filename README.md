@@ -158,6 +158,7 @@ nut-upsd has no metrics endpoint; its operational state is in its logs. Its `ups
 
 | Alert | Fires when | Severity |
 | --- | --- | --- |
+| `UPSOnBattery` | more `ONBATT` than `ONLINE` events in the window: mains power is gone and the UPS is carrying the load on battery | warning |
 | `UPSLowBattery` | a `LOWBATT` event: the UPS raised its low-battery flag (on battery plus low battery starts the shutdown sequence) | critical |
 | `UPSForcedShutdown` | an `FSD`/`SHUTDOWN` event: the shutdown sequence has started | critical |
 | `UPSCommsLost` | a `NOCOMM` event: upsmon could not reach the UPS for `NOCOMMWARNTIME` seconds (default 300) | warning |
