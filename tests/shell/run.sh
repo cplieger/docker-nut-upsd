@@ -38,7 +38,7 @@
 #     withdrawn private-key material nut-readable;
 #   - the validation table's fail-closed dispatch rules, where a silently
 #     skipped row would drop a security check with no log line anywhere;
-#   - the two log lines alerts.yaml keys on, which stop firing SILENTLY when
+#   - the log lines alerts.yaml keys on, which stop firing SILENTLY when
 #     their shape changes.
 #
 # Each *_test.sh is a separate process, so one test's stubs, traps and shell

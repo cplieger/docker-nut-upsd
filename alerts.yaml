@@ -21,10 +21,12 @@ groups:
         annotations:
           summary: "UPS low battery - shutdown imminent ({{ $labels.container }})"
           description: >
-            nut-upsd logged a NUT LOWBATT event: the UPS is on battery and has
-            reached its low-battery threshold, so NUT will begin its shutdown
-            sequence. This event is logged even when periodic status polling is
-            degraded. Verify mains power and the connected-load runtime now.
+            nut-upsd logged a NUT LOWBATT event: the UPS raised its low-battery
+            flag. NUT notifies on that flag alone, so check whether the UPS is
+            also on battery: on battery plus low battery starts the shutdown
+            sequence, while a low-battery flag raised on line power points at
+            the UPS reporting it wrongly (see LOWBATT_PERCENT / ignorelb).
+            Verify mains power and the connected-load runtime now.
       - alert: UPSForcedShutdown
         expr: |
           sum by (container) (count_over_time(
@@ -36,9 +38,11 @@ groups:
         annotations:
           summary: "UPS forced-shutdown initiated ({{ $labels.container }})"
           description: >
-            nut-upsd logged an FSD/SHUTDOWN event: the UPS battery is exhausted
-            and the shutdown sequence has started. Unprotected power loss is
-            imminent for all UPS-fed equipment.
+            nut-upsd logged an FSD/SHUTDOWN event: the shutdown sequence has
+            started and unprotected power loss is imminent for all UPS-fed
+            equipment. An exhausted battery is the common cause; an operator
+            FSD command and too few healthy power sources raise the same
+            event.
       - alert: UPSCommsLost
         expr: |
           sum by (container) (count_over_time(
@@ -53,6 +57,25 @@ groups:
             nut-upsd logged a NOCOMM event: upsmon could not reach the UPS for
             at least NOCOMMWARNTIME seconds (default 300). UPS state is unknown
             until communication is restored.
+      - alert: UPSHardwareFault
+        expr: |
+          sum by (container) (count_over_time(
+            {container="nut-upsd"} |~ `event=(REPLBATT|ALARM)` [15m]
+          )) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "UPS reports a hardware fault ({{ $labels.container }})"
+          description: >
+            nut-upsd logged a REPLBATT or ALARM event: the UPS reports its own
+            hardware fault, and the detail field carries what it named (worn
+            battery, no battery installed, fan failure, overheat, charger
+            failure, battery voltage out of range). The UPS may not carry the
+            load through the next outage. NUT raises ALARM once per change and
+            repeats REPLBATT every RBWARNTIME seconds (default 43200), so this
+            alert marks the event rather than tracking the state; read the UPS
+            status and plan service.
       - alert: UPSPowerOffPathBroken
         expr: |
           sum by (container) (count_over_time(

@@ -230,15 +230,19 @@ rm -f /etc/nut/upsmon.conf.user "$FALLBACK_ERR"
 #    Non-regular override refusal (use_user_override): a FIFO planted at an
 #    override path passes a bare existence check and cp then blocks forever
 #    waiting for a writer, hanging config generation with no diagnostic. The
-#    regular-file gate must refuse it with an explicit error BEFORE cp — a
-#    timeout rc of 124 means cp blocked, i.e. the gate failed.
+#    regular-file gate must refuse it with an explicit error BEFORE cp — an
+#    elapsed timeout budget means cp blocked, i.e. the gate failed. BusyBox
+#    timeout (the only one in this image) reports expiry as 143 (128+TERM)
+#    because it execs the command in the parent and signals it from a watchdog;
+#    coreutils' 124 is matched too for portability. Matching 124 alone would
+#    read a blocked cp as a pass and make the gate deletable with this green.
 mkfifo /etc/nut/ups.conf.user
 FIFO_ERR=$(mktemp)
 fifo_rc=0
 timeout 2 sh -c '. /usr/local/bin/generate-config.sh; generate_ups_conf' \
   >/dev/null 2>"$FIFO_ERR" || fifo_rc=$?
-if [ "$fifo_rc" -eq 0 ] || [ "$fifo_rc" -eq 124 ]; then
-  err "FAIL: FIFO at /etc/nut/ups.conf.user was not refused before cp (rc=$fifo_rc; 124 = cp blocked until timeout)"
+if [ "$fifo_rc" -eq 0 ] || [ "$fifo_rc" -eq 124 ] || [ "$fifo_rc" -eq 143 ]; then
+  err "FAIL: FIFO at /etc/nut/ups.conf.user was not refused before cp (rc=$fifo_rc; 124/143 = cp blocked until timeout)"
   fail=1
 fi
 if ! grep -q 'level=error msg="mounted override path is not a regular file' "$FIFO_ERR"; then
@@ -279,8 +283,8 @@ DIRDST_ERR=$(mktemp)
 dirdst_rc=0
 timeout 2 sh -c '. /usr/local/bin/password.sh; . /usr/local/bin/generate-config.sh; generate_ups_conf' \
   >/dev/null 2>"$DIRDST_ERR" || dirdst_rc=$?
-if [ "$dirdst_rc" -eq 0 ] || [ "$dirdst_rc" -eq 124 ]; then
-  err "FAIL: directory at /etc/nut/ups.conf was not refused promptly (rc=$dirdst_rc; 124 = install blocked until timeout)"
+if [ "$dirdst_rc" -eq 0 ] || [ "$dirdst_rc" -eq 124 ] || [ "$dirdst_rc" -eq 143 ]; then
+  err "FAIL: directory at /etc/nut/ups.conf was not refused promptly (rc=$dirdst_rc; 124/143 = install blocked until timeout)"
   fail=1
 fi
 if ! grep -q 'level=error msg="failed to apply mounted override; aborting" file=ups.conf.user' "$DIRDST_ERR"; then
