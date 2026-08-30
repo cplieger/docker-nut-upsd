@@ -67,7 +67,7 @@ resolve() {
 
 regenerated() {
   [ "${#PW}" -eq "$PASSWORD_LENGTH" ] && [ "$PW" != "$1" ] \
-    && grep -q 'cached ADMIN_PASSWORD invalid (wrong size, unreadable, or whitespace-only); regenerating' "$ERR"
+    && grep -q 'cached ADMIN_PASSWORD invalid (wrong size, unreadable, or not from the generated alphabet); regenerating' "$ERR"
 }
 
 # n_chars <count> <char>: a repeated-byte string built without seq (head and tr are
@@ -104,15 +104,29 @@ regenerated "$GOOD" \
 
 # --- 3. an all-WHITESPACE cache of the right size is treated as absent ------------
 #
-# The isolating bait for the `tr -d '[:space:]'` clause: exactly PASSWORD_LENGTH
-# space bytes passes the size check AND the length check, so that clause is the
-# only thing between a corrupted writable layer and upsd's [admin] account being
-# configured with a password of spaces.
+# The isolating bait for the alphabet clause (`tr -d 'A-Za-z0-9'`): exactly
+# PASSWORD_LENGTH space bytes passes the size check AND the length check, so that
+# clause is the only thing between a corrupted writable layer and upsd's [admin]
+# account being configured with a password of spaces.
 printf "%${PASSWORD_LENGTH}s" '' >"$CACHE"
 resolve
 regenerated "$GOOD" && [ -n "$(printf '%s' "$PW" | tr -d '[:space:]')" ] \
   && ok 'an all-whitespace cache of exactly PASSWORD_LENGTH bytes is regenerated, not served' \
   || no 'whitespace-only cache' "PW=[$PW] len=${#PW}; log: $(head -c 200 "$ERR")"
+
+# --- 3b. ...and so is one whose trailing newline hides a truncated value ----------
+#
+# The isolating bait for the `${#_rcp_pw} -eq PASSWORD_LENGTH` clause:
+# PASSWORD_LENGTH-1 printable bytes plus a newline is PASSWORD_LENGTH bytes on disk,
+# and command substitution strips the newline before the alphabet clause can see
+# it -- so the size check and the alphabet clause both pass, and only the length
+# check stands between a truncated value and upsd's [admin] account.
+SHORT_BY_LF=$(n_chars $((PASSWORD_LENGTH - 1)) A)
+printf '%s\n' "$SHORT_BY_LF" >"$CACHE"
+resolve
+regenerated "$SHORT_BY_LF" \
+  && ok 'a right-sized cache shortened by command substitution is regenerated at full length' \
+  || no 'command-substitution-shortened cache' "PW=[$PW] len=${#PW}; log: $(head -c 200 "$ERR")"
 
 # --- 4. an undersized cache is rejected ------------------------------------------
 #

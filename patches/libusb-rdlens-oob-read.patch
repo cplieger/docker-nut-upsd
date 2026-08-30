@@ -15,10 +15,12 @@ stack garbage as rdlen. Garbage that happens to pass the rdlen sanity
 checks is passed to the USB control transfer and on to the HID parser
 callback, which is where upstream saw it segfault.
 
-The out-of-range indices are reached only when neither real candidate
-worked, that is when both descriptor reads failed. That is the state a
-wedged or mid-re-enumeration USB UPS presents, which is the failure this
-image's comms watchdog exists to recover from. The watchdog's recovery
+The out-of-range indices are reached only when no candidate worked: both
+reads failing is caught earlier by an explicit `if (rdlen1 < 0 && rdlen2 <
+0) goto next_device`, so entering the loop means at least one length was
+read and then failed -- the report-descriptor control transfer failing is
+the arm a wedged or mid-re-enumeration USB UPS takes, which is the failure
+this image's comms watchdog exists to recover from. The watchdog's recovery
 restarts the driver straight back into this code path, so the defect sits
 on the recovery path rather than off it.
 
@@ -30,16 +32,12 @@ include/common.h, which both files include.
 
 Both libusb backends carry the identical defect and upstream fixed both.
 This image compiles the libusb-1.0 backend, so drivers/libusb1.c is the
-file that ships: the running container reports "USB communication driver
-(libusb 1.0) 0.53" at driver start and "driver.version.usb:
-libusb-1.0.30" in upsc output. The libusb0.c hunks are kept so the patch
-stays correct if the build ever resolves the 0.1 API instead.
+file that ships; the libusb0.c hunks are kept so the patch stays correct
+if the build ever resolves the 0.1 API instead.
 
 Remove this patch when NUT_VERSION moves to v2.8.6+, which ships the fix.
-Removal spans three coupled sites: this file, the Dockerfile COPY/apply
-step, and the README's "Dependency CVE posture" paragraph that names the
-two carried backports. See CONTRIBUTING ("Upstream sources may carry
-checked-in patches").
+See CONTRIBUTING ("Upstream sources may carry checked-in patches") for the
+removal checklist.
 
 diff --git a/drivers/libusb0.c b/drivers/libusb0.c
 index 52f08f2..8471136 100644

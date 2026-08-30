@@ -24,34 +24,22 @@ set -eu
 # path constant used here is a readonly top-level definition in the helpers
 # sourced above, and no current-run temp can exist yet.
 
-# Clear stale driver/daemon PID paths from the nut-writable /var/run/nut.
-# PID files from a crashed previous run survive a `docker restart` and cause
-# upsdrvctl to trigger its "Duplicate driver instance detected" path, which
-# kills the freshly started driver seconds after launch. Match EVERY object
-# type at a reserved *.pid pathname, not just regular files: a symlink, FIFO,
-# socket, or directory planted there by the nut user survives a -type f
-# filter and obstructs — or, for a followed symlink, redirects — the root
-# daemon's later pidfile write. We own this directory and no other process
-# can legitimately hold these paths at boot. -delete unlinks every type and
-# rmdirs an empty directory, but BusyBox find's exit code stays 0 when a
-# non-empty directory at a *.pid path survives the delete, so the re-scan
-# below enforces the pathname postcondition instead of trusting the exit
-# status — fail loud rather than booting past a surviving obstruction.
-# stale_nut_pid_paths [FIND_ACTION...]: list (or, with -delete, remove) every
-# reserved *.pid path in /var/run/nut. ONE shared predicate for the presence
-# scan, the delete, and the postcondition re-scan, so the three cannot drift
-# apart if the pattern or depth ever changes. || true: a find failure must
-# read as "nothing listed", not a set -e boot abort.
-# The capture sites below bound the listing with `head -c`: /var/run/nut is
-# nut-writable, so a compromised daemon could plant an arbitrarily large set
-# of *.pid names — an unbounded command substitution would materialize all of
-# it in PID 1 memory (and one giant log record) at every restart (CWE-400).
-# head's early exit SIGPIPEs the find; the || true inside the function absorbs
-# that (and pipefail is not set), so the bound never aborts the block. Only
-# the CAPTURES are bounded — -delete still walks the full set, as it must.
+# stale_nut_pid_paths [FIND_ACTION...]: every reserved *.pid path in the
+# nut-writable /var/run/nut. One left by a crashed run makes upsdrvctl kill the
+# freshly started driver ("Duplicate driver instance detected"). Matches EVERY
+# object type, not just regular files: a symlink, FIFO, socket or directory
+# planted there by the nut user survives -type f and obstructs — or, followed,
+# redirects — the root daemon's later pidfile write. `|| true`: a find failure
+# must read as "nothing listed", not a set -e boot abort.
 stale_nut_pid_paths() {
   find /var/run/nut -maxdepth 1 -name '*.pid' "$@" 2>/dev/null || true
 }
+# BusyBox find exits 0 when a non-empty directory at a *.pid path survives
+# -delete, so the re-scan enforces the pathname POSTCONDITION rather than
+# trusting the exit status. `head -c` bounds only the CAPTURES: this directory
+# is nut-writable, so an unbounded substitution would materialize an
+# arbitrarily large planted set in PID 1 memory (CWE-400); the SIGPIPE it sends
+# find is what the function's `|| true` absorbs (pipefail is not set).
 if [ -n "$(stale_nut_pid_paths | head -c 1)" ]; then
   printf 'level=info msg="clearing stale NUT PID paths from previous lifecycle" path=/var/run/nut\n' >&2
   stale_nut_pid_paths -delete
@@ -63,18 +51,14 @@ if [ -n "$(stale_nut_pid_paths | head -c 1)" ]; then
   fi
 fi
 
-# Clear temp files leaked by a kill that landed between mktemp and rm -f/mv
-# in lifecycle.sh's capture helpers (start_recovered_driver, stop_nut_cmd),
-# the password/TLS-certificate resolvers (password.sh), or the
-# mounted-override staging install (generate-config.sh use_user_override).
-# Root-owned paths, unlike /var/run/nut above. Everything matched is
-# crash-leaked: every producer runs later in this boot. The override globs
-# are literals because use_user_override builds its destination dynamically
-# from its argument; the four names below are the four generate_* callers'
-# destinations. Warn-only on failure: set -e must not turn one undeletable
-# stale artifact into an unannotated boot abort — the producers that later
-# need the space fail with their own structured errors if storage is still
-# unavailable.
+# Clear temps leaked by a kill between mktemp and rm -f/mv in lifecycle.sh's
+# capture helpers, password.sh's resolvers, or generate-config.sh's override
+# staging. Root-owned, unlike /var/run/nut above, and everything matched is
+# crash-leaked because every producer runs later in this boot. The four
+# /etc/nut globs are literals: use_user_override builds its destination from its
+# argument. Warn-only, so one undeletable artifact is not an unannotated boot
+# abort — the producers that need the space fail with their own structured
+# errors if storage is still unavailable.
 if ! _clt_err=$(rm -f "$WD_RESTART_CAPTURE_PREFIX".* "$STOP_CMD_CAPTURE_PREFIX".* \
   "${ADMIN_PASSWORD_FILE}.tmp."* \
   "${LOCAL_UPSMON_PASSWORD_FILE}.tmp."* \
@@ -89,28 +73,23 @@ fi
 
 # Clear a stale POWERDOWNFLAG (killpower) from a previous lifecycle. upsmon
 # creates it on FSD; /var/run/nut-secrets is the writable layer so it survives
-# a `docker restart`, and nothing in this container consumes it (host poweroff
-# is via D-Bus, not the NUT kill-power path). A latched flag would otherwise
+# a `docker restart`. No NUT kill-power path in this container acts on it (host
+# poweroff is via D-Bus). A latched flag would otherwise
 # make the comms watchdog stand down indefinitely (see restart_ups_driver), so
 # clear it at a fresh start. The flag lives in the root-only nut-secrets dir
 # so the nut user cannot plant it (see generate-config.sh).
-if [ -e /var/run/nut-secrets/killpower ]; then
-  printf 'level=info msg="clearing stale killpower flag from previous lifecycle" path=/var/run/nut-secrets/killpower\n' >&2
-  rm -f /var/run/nut-secrets/killpower
+if [ -e "$POWERDOWNFLAG_FILE" ]; then
+  printf 'level=info msg="clearing stale killpower flag from previous lifecycle" path=%s\n' "$POWERDOWNFLAG_FILE" >&2
+  rm -f "$POWERDOWNFLAG_FILE"
 fi
 
-# Canonicalize every validated env var BEFORE any raw-value interpretation —
-# including the := defaults right below: an LF-only value (env-file artifact)
-# is non-empty raw, so it would dodge the documented default and then fail
+# Must precede the := defaults below: an LF-only value (env-file artifact) is
+# non-empty raw, so it would dodge the documented default and then fail
 # validation (or reach generate_all_configs' bare :? abort) instead of
-# defaulting. $() strips trailing newlines, so a value with a trailing LF is
-# defaulted, checked, classified (driver_transport reads the raw value), and
-# written as the same byte sequence. Must also precede password resolution:
-# resolve_admin_password's emptiness test is a raw-value interpretation, and
-# an LF-only ADMIN_PASSWORD must canonicalize to empty (auto-generate) rather
-# than dodge generation and abort later at generate_all_configs' :? guard.
-# set -u safe here (before defaults exist): every assignment in it uses
-# ${VAR:-}. See validate.sh canonicalize_validated_values.
+# defaulting. The two credentials are exempt — an LF-only ADMIN_PASSWORD is
+# refused by the control check rather than stripped — so this need not precede
+# password resolution. set -u safe before the defaults exist: every assignment
+# inside uses ${VAR:-}. See validate.sh canonicalize_validated_values.
 canonicalize_validated_values
 
 # ---------------------------------------------------------------------------
@@ -146,11 +125,8 @@ canonicalize_validated_values
 : "${COMMS_WATCHDOG:=true}"
 : "${COMMS_CHECK_INTERVAL:=15}"
 : "${COMMS_RECOVERY_TIMEOUT:=90}"
-# Two-stage recovery cadence: retry fast for COMMS_FAST_RETRIES attempts (keep
-# COMMS_FAST_RETRIES x COMMS_RECOVERY_TIMEOUT <= the UPSDataAbsent alert window so
-# a transient re-enumeration self-heals before it pages), then back off to
-# COMMS_RECOVERY_TIMEOUT x COMMS_BACKOFF_FACTOR for a UPS that stays absent. See
-# lifecycle.sh comms_watchdog.
+# Two-stage recovery cadence, stage 2 backing off by COMMS_BACKOFF_FACTOR: see
+# lifecycle.sh comms_watchdog, and the README for sizing it.
 : "${COMMS_FAST_RETRIES:=3}"
 : "${COMMS_BACKOFF_FACTOR:=5}"
 
@@ -190,10 +166,8 @@ fi
 # ---------------------------------------------------------------------------
 # Determine SHUTDOWNCMD
 # ---------------------------------------------------------------------------
-# Default: noop shutdown (log-only on FSD). We ship a tiny script instead of
-# inlining a `printf` into SHUTDOWNCMD because NUT's parseconf terminates the
-# quoted argument at the first unescaped `"` — an inlined multi-quoted printf
-# silently loses its log line.
+# Default: noop shutdown (log-only on FSD). Why a script and not an inlined
+# printf: see nut-shutdown-noop.sh.
 export SHUTDOWN_ON_BATTERY_CRITICAL
 SHUTDOWN_CMD="/usr/local/bin/nut-shutdown-noop.sh"
 
@@ -212,7 +186,7 @@ if [ "$SHUTDOWN_ON_BATTERY_CRITICAL" = "true" ]; then
   SHUTDOWN_CMD="/usr/local/bin/nut-shutdown.sh"
   printf 'level=info msg="host shutdown enabled via D-Bus on battery critical"\n' >&2
 else
-  printf 'level=info msg="host shutdown disabled; FSD will only log to stderr"\n' >&2
+  printf 'level=info msg="host shutdown disabled; an FSD logs and then ends this container through upsmon exit, leaving the restart policy to decide"\n' >&2
 fi
 
 # Normalize COMMS_WATCHDOG case-insensitively, mirroring SHUTDOWN_ON_BATTERY_CRITICAL.
@@ -251,16 +225,12 @@ else
   fi
 fi
 
-# Reconcile the two managed TLS working copies to the current selection —
-# always, even with an upsd.conf.user override mounted. resolve_tls_cert
-# provisions exactly one source per boot (mounted-PEM precedence, README 'TLS
-# (STARTTLS)'), so any unselected copy is withdrawn private-key material from
-# a previous lifecycle (mount removed or API_TLS toggled off) persisting
-# nut-readable in the writable layer. An override naming a withdrawn source
-# now fails visibly at upsd startup instead of silently serving stale key
-# material; overrides naming the currently provisioned source keep working.
-# set -u safe: $TLS_CERT_PATH is only read on the API_TLS=true branch, where
-# resolve_tls_cert (above) guarantees it is set.
+# Always, even with an upsd.conf.user override mounted: resolve_tls_cert
+# provisions exactly one source per boot, so any unselected working copy is
+# withdrawn private-key material from a previous lifecycle left nut-readable in
+# the writable layer. Withdrawing it makes an override naming it fail visibly
+# at upsd startup instead of silently serving stale key material. set -u safe:
+# $TLS_CERT_PATH is read only on the API_TLS=true branch.
 reconcile_tls_working_copies
 
 # ---------------------------------------------------------------------------
@@ -277,9 +247,9 @@ generate_all_configs
 # they fail with EROFS and would abort the boot under set -e).
 # resolve_tls_cert (password.sh) serves a root:nut 640 working copy inside
 # /etc/nut instead, which this sweep normalizes like any generated file.
-find /etc/nut ! -name '*.user' ! -name upsd.pem -exec chown root:nut {} +
-find /etc/nut -type d ! -name '*.user' ! -name upsd.pem -exec chmod 750 {} +
-find /etc/nut -type f ! -name '*.user' ! -name upsd.pem -exec chmod 640 {} +
+find /etc/nut ! -name '*.user' ! -name "${TLS_CERT_MOUNT##*/}" -exec chown root:nut {} +
+find /etc/nut -type d ! -name '*.user' ! -name "${TLS_CERT_MOUNT##*/}" -exec chmod 750 {} +
+find /etc/nut -type f ! -name '*.user' ! -name "${TLS_CERT_MOUNT##*/}" -exec chmod 640 {} +
 if usb_bus_required; then
   if chgrp -R nut /dev/bus/usb 2>/dev/null; then
     printf 'level=info msg="chgrp nut:/dev/bus/usb applied (host device nodes)"\n' >&2
@@ -416,14 +386,12 @@ fi
 # ---------------------------------------------------------------------------
 # Supervise upsmon and upsd
 # ---------------------------------------------------------------------------
-# upsd responsiveness probe cadence and consecutive-failure threshold. The
-# probe (`upsc -l`) only asks upsd to list its configured UPSes, so it
-# succeeds even while driver data is stale — it isolates upsd protocol
-# failure from the data-freshness signal the comms watchdog acts on.
-# 4 x 15s ~= 60s of sustained failure exits BEFORE the comms watchdog's first
-# driver bounce (COMMS_RECOVERY_TIMEOUT, default 90s), so a dead upsd cannot
-# strand the container in endless driver-restart churn that never repairs
-# the actual failed dependency.
+# `upsc -l` only lists configured UPSes, so the probe succeeds while driver
+# data is stale: it isolates upsd protocol failure from the freshness signal
+# the comms watchdog acts on. 4 x 15s ~= 60s of sustained failure exits BEFORE
+# the watchdog's first driver bounce (COMMS_RECOVERY_TIMEOUT, default 90s), so
+# a dead upsd cannot strand the container in driver-restart churn that repairs
+# nothing.
 readonly UPSD_PROBE_INTERVAL=15
 readonly UPSD_PROBE_MAX_FAILURES=4
 
@@ -444,30 +412,51 @@ while kill -0 "$UPSMON_PID" 2>/dev/null; do
   sleep "$UPSD_PROBE_INTERVAL" &
   wait $! || true
   kill -0 "$UPSMON_PID" 2>/dev/null || break
+  # Both background workers are supervised here as well: an external SIGKILL
+  # (a host OOM kill; the published compose example sets no memory limit) took
+  # a documented capability away for the container's life, with upsd still
+  # answering and the healthcheck still green. A non-empty PID slot is proof
+  # the start gate passed, so re-launching on it cannot enable a disabled
+  # worker. The respawn is FRESH, not resumed: both loops keep their state in
+  # process-local variables, so the cadence restarts from zero.
+  if [ -n "${WATCHDOG_PID:-}" ] && ! kill -0 "$WATCHDOG_PID" 2>/dev/null; then
+    wait "$WATCHDOG_PID" 2>/dev/null || true
+    printf 'level=error msg="comms watchdog exited; starting a fresh one, whose recovery cadence restarts from zero"\n' >&2
+    comms_watchdog &
+    WATCHDOG_PID=$!
+  fi
+  if [ -n "${DBUS_PROBE_PID:-}" ] && ! kill -0 "$DBUS_PROBE_PID" 2>/dev/null; then
+    wait "$DBUS_PROBE_PID" 2>/dev/null || true
+    printf 'level=error msg="D-Bus poweroff-path probe exited; starting a fresh one, whose unreachable/recovered state restarts from zero"\n' >&2
+    dbus_liveness_probe &
+    DBUS_PROBE_PID=$!
+  fi
   if upsd_responsive; then
     upsd_failures=0
   else
     upsd_failures=$((upsd_failures + 1))
     if [ "$upsd_failures" -ge "$UPSD_PROBE_MAX_FAILURES" ]; then
-      printf 'level=error msg="upsd unresponsive; stopping services and exiting so the restart policy rebuilds the stack" consecutive_failures=%d probe_interval=%ss\n' \
-        "$upsd_failures" "$UPSD_PROBE_INTERVAL" >&2
+      printf 'level=error msg="upsd unresponsive; stopping services and exiting so the restart policy rebuilds the stack" consecutive_failures=%d probe_interval=%ss probe=%s\n' \
+        "$upsd_failures" "$UPSD_PROBE_INTERVAL" "$(upsd_probe_host):${API_PORT}" >&2
       teardown_all
       exit 1
     fi
-    printf 'level=warn msg="upsd not responding to protocol probe" consecutive_failures=%d threshold=%d\n' \
-      "$upsd_failures" "$UPSD_PROBE_MAX_FAILURES" >&2
+    printf 'level=warn msg="upsd not responding to protocol probe" consecutive_failures=%d threshold=%d probe=%s\n' \
+      "$upsd_failures" "$UPSD_PROBE_MAX_FAILURES" "$(upsd_probe_host):${API_PORT}" >&2
   fi
 done
 
 # Reap upsmon and propagate its exit code so Docker restart policies and
-# log-based alerting see the real failure. stop_services is idempotent and
-# does not dictate the exit code; the caller decides.
+# log-based alerting see the real failure. Status 0 from this process is not a
+# clean stop: it is an executed SHUTDOWNCMD (upsmon's privileged parent,
+# clients/upsmon.c runparent). stop_services is idempotent and does not dictate
+# the exit code; the caller decides.
 set +e
 wait "$UPSMON_PID"
 rc=$?
 set -e
 if [ "$rc" -eq 0 ]; then
-  printf 'level=info msg="upsmon exited cleanly" rc=0\n' >&2
+  printf 'level=warn msg="upsmon parent exited after running SHUTDOWNCMD; a forced shutdown (FSD) was executed" rc=0\n' >&2
 else
   printf 'level=error msg="upsmon exited unexpectedly" rc=%d\n' "$rc" >&2
 fi

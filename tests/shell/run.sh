@@ -28,7 +28,7 @@
 # ground smoke.sh also walks (a valid credential-cache reuse, a clean TLS
 # selection), and they are kept deliberately, because without them every refusal
 # assertion beside them would also pass against a function that refuses everything.
-# What lives here is the boot path's most consequential uncovered surface:
+# What lives here is the shipped shell's most consequential uncovered surface:
 #   - kill_stale_driver_from_pidfile's confused-deputy guards, which stand
 #     between a nut-writable pidfile and a root `kill -9`;
 #   - wait_for_pidfile's startup trust gate;
@@ -39,7 +39,9 @@
 #   - the validation table's fail-closed dispatch rules, where a silently
 #     skipped row would drop a security check with no log line anywhere;
 #   - the log lines alerts.yaml keys on, which stop firing SILENTLY when
-#     their shape changes.
+#     their shape changes;
+#   - nut-shutdown.sh's retry state machine, whose attempt bound, early success
+#     exit and between-attempt sleep decide whether an FSD reaches a poweroff.
 #
 # Each *_test.sh is a separate process, so one test's stubs, traps and shell
 # options cannot leak into another's. All of them run even when an early one

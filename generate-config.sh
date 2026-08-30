@@ -8,6 +8,7 @@
 # If /etc/nut/<name>.user exists, copy it over /etc/nut/<name> and return 0
 # (caller skips generation). Return 1 otherwise.
 use_user_override() {
+  _uo_probed="${_uo_probed:-} $1"
   if [ ! -e "/etc/nut/$1.user" ]; then
     # A dangling symlink (e.g. a mounted directory of symlinks with a broken
     # target) fails -e and would silently drop the operator's override; name
@@ -42,7 +43,7 @@ use_user_override() {
     printf 'level=error msg="failed to apply mounted override; aborting" file=%s.user\n' "$1" >&2
     exit 1
   fi
-  printf 'level=info msg="using mounted %s.user"\n' "$1" >&2
+  printf 'level=info msg="using mounted %s.user"\n' "$1" >&2 || :
 }
 
 # --- ups.conf — skipped if user-mounted ---
@@ -55,17 +56,16 @@ generate_ups_conf() {
     port = $UPS_PORT
 UPSEOF
 
-  # pollonly is only meaningful for USB HID drivers; other drivers may
-  # ignore it or warn. Emit it only for the USB driver family, reusing the
-  # canonical classification in validate.sh (driver_transport) so the
-  # USB-family driver list lives in one place.
-  if [ "$(driver_transport)" = "usb" ]; then
+  # pollonly is registered by usbhid-ups alone (drivers/usbhid-ups.c in the
+  # pinned NUT tree); any other driver exits during ups.conf parsing on a flag
+  # absent from its vartab (drivers/main.c, storeval).
+  if [ "$UPS_DRIVER" = "usbhid-ups" ]; then
     printf '    pollonly\n' >>/etc/nut/ups.conf
   fi
 
   # Battery overrides (ignorelb tells NUT to use our thresholds instead of
   # hardware).
-  _batt_overrides="${LOWBATT_PERCENT:-}${LOWBATT_RUNTIME:-}${CRITBATT_PERCENT:-}${CRITBATT_RUNTIME:-}"
+  _batt_overrides="${LOWBATT_PERCENT:-}${LOWBATT_RUNTIME:-}"
   if [ -n "$_batt_overrides" ]; then
     printf '    ignorelb\n' >>/etc/nut/ups.conf
   fi
@@ -75,15 +75,10 @@ UPSEOF
     && printf '    override.battery.charge.low = %s\n' "$LOWBATT_PERCENT" >>/etc/nut/ups.conf
   [ -n "${LOWBATT_RUNTIME:-}" ] \
     && printf '    override.battery.runtime.low = %s\n' "$LOWBATT_RUNTIME" >>/etc/nut/ups.conf
-  [ -n "${CRITBATT_PERCENT:-}" ] \
-    && printf '    override.battery.charge.critical = %s\n' "$CRITBATT_PERCENT" >>/etc/nut/ups.conf
-  [ -n "${CRITBATT_RUNTIME:-}" ] \
-    && printf '    override.battery.runtime.critical = %s\n' "$CRITBATT_RUNTIME" >>/etc/nut/ups.conf
 
   if [ -n "$_batt_overrides" ]; then
-    printf 'level=info msg="battery thresholds overridden (ignorelb active)" low_pct=%s low_rt=%s crit_pct=%s crit_rt=%s\n' \
-      "${LOWBATT_PERCENT:-unset}" "${LOWBATT_RUNTIME:-unset}" \
-      "${CRITBATT_PERCENT:-unset}" "${CRITBATT_RUNTIME:-unset}" >&2
+    printf 'level=info msg="battery thresholds overridden (ignorelb active)" low_pct=%s low_rt=%s\n' \
+      "${LOWBATT_PERCENT:-unset}" "${LOWBATT_RUNTIME:-unset}" >&2
   else
     printf 'level=info msg="no battery threshold overrides; using UPS hardware defaults"\n' >&2
   fi
@@ -113,32 +108,14 @@ UPSDEOF
 # ---------------------------------------------------------------------------
 # Credential topology: which account links upsd.users to upsmon.conf
 # ---------------------------------------------------------------------------
-# The generated pair separates NUT's monitor roles the canonical way: the box
-# that owns the UPS (this container's bundled upsmon) runs the ONE `upsmon
-# primary`, and remote network clients are secondaries. So the bundled upsmon
-# authenticates with a reserved internal account — [local_upsmon], secret
-# auto-generated and cached root-only (resolve_local_upsmon_password,
-# password.sh) — that carries `upsmon primary` (the FSD-request authority),
-# while the network-facing [$API_USER] account is written `upsmon secondary`
-# (status-following only). validate.sh rejects API_USER=local_upsmon (and
-# =admin) so a generated [$API_USER] section can never merge with a reserved
-# stanza and clobber its credential.
-#
-# The internal credential is a contract BETWEEN two generated files (the
-# [local_upsmon] stanza in upsd.users and the MONITOR credential in
-# upsmon.conf), so it is only used when BOTH files are generated. When a
-# *.user override is mounted for exactly ONE of them, the generated half
-# falls back to the legacy shared API-pair contract — the only credential a
-# mounted half written against the documented env vars can be assumed to
-# know — and logs a level=warn naming the fallback:
-#   - upsd.users.user mounted, upsmon.conf generated: MONITOR authenticates
-#     with $API_USER/$API_PASSWORD (primary — the mounted users file decides
-#     what that account may do).
-#   - upsd.users generated, upsmon.conf.user mounted: [$API_USER] keeps
-#     `upsmon primary` so a mounted MONITOR line using the API pair keeps its
-#     primary slot; no [local_upsmon] stanza is generated (nothing would
-#     authenticate with it).
-# Both mounted: nothing is generated and no decision is needed.
+# The bundled upsmon is the only generated `upsmon primary`, and it holds that
+# slot through the reserved [local_upsmon] account (secret auto-generated and
+# cached root-only by password.sh); the network-facing [$API_USER] is the
+# secondary. validate.sh owns the reserved-name refusal. The internal
+# credential is a contract between the two GENERATED files, so when exactly one
+# of them is mounted the generated half uses the API pair instead — the only
+# credential a mounted half written against the documented env vars can be
+# assumed to know. The two level=warn records below name which half fell back.
 local_upsmon_credential_active() {
   [ ! -e /etc/nut/upsd.users.user ] && [ ! -e /etc/nut/upsmon.conf.user ]
 }
@@ -166,7 +143,7 @@ USERSEOF
 USERSEOF
   else
     # Legacy fallback — see the credential-topology block above.
-    printf 'level=warn msg="upsmon.conf.user mounted without upsd.users.user; generated upsd.users keeps the API user as upsmon primary (cross-file credential contract with a mounted override)" user=%s\n' \
+    printf 'level=warn msg="upsmon.conf.user mounted without upsd.users.user; generated upsd.users keeps the API user as upsmon primary (cross-file credential contract with a mounted override). Your mounted upsmon.conf must MONITOR with this user and password, or upsd refuses the login and with it the forced-shutdown request, and networked clients fall back to their own HOSTSYNC timeout" user=%s\n' \
       "$API_USER" >&2
     cat >>/etc/nut/upsd.users <<USERSEOF
 
@@ -178,34 +155,29 @@ USERSEOF
 }
 
 # --- upsmon.conf — skipped if user-mounted ---
-# POWERDOWNFLAG lives in the root-only /var/run/nut-secrets (mode 700
-# root:root, created unconditionally by the Dockerfile) rather than the
-# nut-writable /var/run/nut, so a compromised nut-user process cannot plant
-# the flag and latch the comms watchdog's stand-down (lifecycle.sh
+# POWERDOWNFLAG lives in the root-only /var/run/nut-secrets rather than the
+# nut-writable /var/run/nut, so a compromised nut-user process cannot plant the
+# flag and latch the comms watchdog's stand-down (lifecycle.sh
 # restart_ups_driver). Every legitimate actor is root: upsmon's privileged
-# parent writes the flag on FSD, the entrypoint clears it at boot, the
-# watchdog tests it, and nut-shutdown.sh clears it on a failed poweroff.
-# The MONITOR host comes from upsd_probe_host (lifecycle.sh, sourced before
-# this runs): upsd binds ONLY the LISTEN address generated from API_ADDRESS,
-# so upsmon must connect where upsd actually listens — the same mapping the
-# comms watchdog probe and the Dockerfile HEALTHCHECK apply.
-# The MONITOR credential is the internal [local_upsmon] account when both
-# upsd.users and upsmon.conf are generated, and falls back to the legacy
-# API pair when upsd.users is user-mounted — see the credential-topology
-# block above generate_upsd_users.
-# NOTIFYFLAG ALARM carries EXEC because ups.alarm is upstream's only report of
-# a UPS hardware fault: the driver maps the device's own flags to text (fan
-# failure, overheat, charger failure, no battery, battery voltage out of range)
-# and upsmon notifies on it. Without EXEC the fault reaches no event= line, so
-# nothing downstream can key on it.
+# parent writes it on FSD, the entrypoint clears it at boot, the watchdog tests
+# it, nut-shutdown.sh clears it on a failed poweroff.
+
+# MONITOR host: upsd_probe_host (lifecycle.sh) owns the LISTEN-address mapping.
+# MONITOR credential: local_upsmon_credential_active owns the choice.
+# ALARM needs EXEC because ups.alarm is upstream's only report of a UPS hardware
+# fault; without it the fault reaches no event= line.
 generate_upsmon_conf() {
-  use_user_override upsmon.conf && return 0
+  if use_user_override upsmon.conf; then
+    printf 'level=info msg="mounted upsmon.conf.user owns POWERDOWNFLAG; the comms watchdog stand-down and the boot-time stale-flag clear both read this path and stay inert unless your file sets it" path=%s\n' \
+      "$POWERDOWNFLAG_FILE" >&2
+    return 0
+  fi
   if local_upsmon_credential_active; then
     _mon_user=local_upsmon
     _mon_password="$LOCAL_UPSMON_PASSWORD"
   else
     # Legacy fallback — see the credential-topology block above.
-    printf 'level=warn msg="upsd.users.user mounted without upsmon.conf.user; generated upsmon.conf MONITOR falls back to the API user/password pair (cross-file credential contract with a mounted override)" user=%s\n' \
+    printf 'level=warn msg="upsd.users.user mounted without upsmon.conf.user; generated upsmon.conf MONITOR falls back to the API user/password pair (cross-file credential contract with a mounted override). Your mounted upsd.users must declare this account as upsmon primary, or upsd refuses the forced-shutdown request from the bundled upsmon and networked clients fall back to their own HOSTSYNC timeout" user=%s\n' \
       "$API_USER" >&2
     _mon_user="$API_USER"
     _mon_password="$API_PASSWORD"
@@ -213,7 +185,7 @@ generate_upsmon_conf() {
   cat >/etc/nut/upsmon.conf <<MONEOF
 MONITOR $UPS_NAME@$(upsd_probe_host):$API_PORT 1 "$_mon_user" "$_mon_password" primary
 SHUTDOWNCMD "$SHUTDOWN_CMD"
-POWERDOWNFLAG /var/run/nut-secrets/killpower
+POWERDOWNFLAG $POWERDOWNFLAG_FILE
 NOTIFYCMD /usr/local/bin/nut-notify.sh
 POLLFREQ $POLLFREQ
 POLLFREQALERT $POLLFREQALERT
@@ -223,55 +195,53 @@ HOSTSYNC $HOSTSYNC
 NOCOMMWARNTIME $NOCOMMWARNTIME
 RBWARNTIME $RBWARNTIME
 NOTIFYFLAG ONLINE SYSLOG+EXEC
-NOTIFYFLAG ONBATT SYSLOG+EXEC+WALL
-NOTIFYFLAG LOWBATT SYSLOG+EXEC+WALL
-NOTIFYFLAG FSD SYSLOG+EXEC+WALL
+NOTIFYFLAG ONBATT SYSLOG+EXEC
+NOTIFYFLAG LOWBATT SYSLOG+EXEC
+NOTIFYFLAG FSD SYSLOG+EXEC
 NOTIFYFLAG COMMOK SYSLOG+EXEC
 NOTIFYFLAG COMMBAD SYSLOG+EXEC
-NOTIFYFLAG SHUTDOWN SYSLOG+EXEC+WALL
+NOTIFYFLAG SHUTDOWN SYSLOG+EXEC
 NOTIFYFLAG REPLBATT SYSLOG+EXEC
 NOTIFYFLAG NOCOMM SYSLOG+EXEC
-NOTIFYFLAG ALARM SYSLOG+EXEC
+NOTIFYFLAG ALARM EXEC
+NOTIFYFLAG OTHER EXEC
 MONEOF
 }
 
 generate_all_configs() {
-  # Required variables — fail fast if caller forgot to set them.
-  : "${UPS_NAME:?generate_all_configs requires UPS_NAME}"
-  : "${UPS_DESC:?generate_all_configs requires UPS_DESC}"
-  : "${UPS_DRIVER:?generate_all_configs requires UPS_DRIVER}"
-  : "${UPS_PORT:?generate_all_configs requires UPS_PORT}"
-  : "${API_USER:?generate_all_configs requires API_USER}"
+  # Empty in these five fails OPEN: an empty password authenticates, upsd
+  # serves cleartext, SHUTDOWNCMD no-ops. Everything else fails visibly.
   : "${API_PASSWORD:?generate_all_configs requires API_PASSWORD}"
   # Only required when the internal cross-file credential is in play (both
   # upsd.users and upsmon.conf generated — see the credential-topology block).
   if local_upsmon_credential_active; then
     : "${LOCAL_UPSMON_PASSWORD:?generate_all_configs requires LOCAL_UPSMON_PASSWORD when upsd.users and upsmon.conf are both generated}"
   fi
-  : "${API_ADDRESS:?generate_all_configs requires API_ADDRESS}"
-  : "${API_PORT:?generate_all_configs requires API_PORT}"
-  : "${API_TLS:?generate_all_configs requires API_TLS}"
   # Only required when TLS is on (resolve_tls_cert sets it before this runs).
   if [ "$API_TLS" = "true" ]; then
     : "${TLS_CERT_PATH:?generate_all_configs requires TLS_CERT_PATH when API_TLS=true}"
   fi
   : "${ADMIN_PASSWORD:?generate_all_configs requires ADMIN_PASSWORD}"
   : "${SHUTDOWN_CMD:?generate_all_configs requires SHUTDOWN_CMD}"
-  : "${POLLFREQ:?generate_all_configs requires POLLFREQ}"
-  : "${POLLFREQALERT:?generate_all_configs requires POLLFREQALERT}"
-  : "${DEADTIME:?generate_all_configs requires DEADTIME}"
-  : "${FINALDELAY:?generate_all_configs requires FINALDELAY}"
-  : "${HOSTSYNC:?generate_all_configs requires HOSTSYNC}"
-  : "${NOCOMMWARNTIME:?generate_all_configs requires NOCOMMWARNTIME}"
-  : "${RBWARNTIME:?generate_all_configs requires RBWARNTIME}"
 
-  # --- nut.conf — always generated (MODE is not user-configurable) ---
-  cat >/etc/nut/nut.conf <<'EOF'
-MODE=netserver
-EOF
+  _uo_probed=''
 
   generate_ups_conf
   generate_upsd_conf
   generate_upsd_users
   generate_upsmon_conf
+
+  # An operator's *.user file the four generators never probed was ignored; from
+  # the log an ignored override and an absent one are otherwise identical.
+  for _uo_file in /etc/nut/*.user; do
+    [ -e "$_uo_file" ] || continue
+    _uo_name=${_uo_file##*/}
+    case " $_uo_probed " in
+      *" ${_uo_name%.user} "*) ;;
+      *)
+        printf 'level=warn msg="mounted override is not a file this image applies; ignoring it" file=%s\n' \
+          "$_uo_name" >&2
+        ;;
+    esac
+  done
 }

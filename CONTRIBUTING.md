@@ -39,31 +39,37 @@ places:
 
 1. Add a row to `VALIDATION_TABLE` (or `VALIDATION_TABLE_OPTIONAL` for
    vars only checked when non-empty), e.g. `MY_VAR:control,quotes`.
-   Supported checks: `control`, `quotes`, `backslash`, `brackets`,
-   `identifier`, `numeric`, `positive`, `port`, `percent`.
-2. Add a `case` arm to `_resolve_var` returning `"${MY_VAR:-}"`. The
-   resolver is an explicit lookup table on purpose: there is no
+   Supported checks: `control`, `quotes`, `backslash`, `hash`,
+   `nospace` (the value is written unquoted, so whitespace would split
+   it into extra tokens), `nut_word` (NUT keeps only ASCII 0x20-0x7E and
+   at most 512 bytes), `brackets`, `identifier`, `numeric`, `positive`,
+   `port`, `percent`.
+2. Add a `case` arm to `_resolve_var` assigning `_value="${MY_VAR:-}"`.
+   The resolver is an explicit lookup table on purpose: there is no
    indirect expansion, so an unlisted var fails the run instead of
    silently resolving to empty.
 3. Add an assignment to `canonicalize_validated_values`
    (`MY_VAR=$(printf '%s' "${MY_VAR:-}")`) so a trailing newline is
-   stripped BEFORE validation and config writes. The resolver's own `$()`
-   strips it during validation, so an uncanonicalized var would validate
-   clean while writing the raw trailing LF into the config file.
+   stripped BEFORE validation and config writes. A value a remote client
+   must reproduce byte for byte is the exception: enumerate it there with
+   a RAW assignment (`MY_VAR="${MY_VAR:-}"`), as `API_PASSWORD` and
+   `ADMIN_PASSWORD` are, so the `control` check refuses a trailing LF
+   instead of this app silently stripping it.
 4. If you need a check that doesn't exist yet, add a `validate_*`
    function and wire it into `_dispatch_check`.
 
 Every value that lands in a NUT config file must reject embedded
 control characters (newline/CR/tab config injection). Values embedded
 in double-quoted NUT fields: including the passwords: additionally
-reject double quotes (NUT quoting breakout) and backslashes; identifiers
+reject double quotes (NUT quoting breakout), backslashes and `#`
+(parseconf hard-errors on an unescaped `#` inside quotes); identifiers
 used as section headers (e.g. `UPS_NAME`, written as `[$UPS_NAME]`)
 additionally reject bracket characters (INI section injection). A value
 written **unquoted** into a config file (e.g.
 `UPS_PORT` as `port = $UPS_PORT`, or `API_ADDRESS` in `LISTEN`) must
-also reject whitespace, since a space would split it into extra config
-tokens. When in doubt, copy the check set of the most similar existing
-row.
+also reject whitespace (`nospace`), since a space would split it into
+extra config tokens. When in doubt, copy the check set of the most
+similar existing row.
 
 ## Config generation conventions
 
@@ -76,9 +82,9 @@ new generated file should respect that same override hook.
 ## Gotchas worth knowing
 
 - **NUT `parseconf` quoting.** An unescaped `"` terminates a quoted
-  argument, so a multi-quoted `printf` inlined into `SHUTDOWNCMD`
-  silently loses output. That's why `nut-shutdown-noop.sh` exists as a
-  separate script instead of an inline command.
+  argument (v2.8.5 `common/parseconf.c`, `quotecollect()`), so a
+  multi-quoted `printf` inlined into `SHUTDOWNCMD` silently loses
+  output. That's why `nut-shutdown-noop.sh` exists as a separate script.
 - **Stale PID files.** `/var/run/nut` is in the writable layer, so PID
   files survive a `docker restart` and make `upsdrvctl` kill the fresh
   driver as a "duplicate instance". The entrypoint clears `*.pid` at
@@ -97,34 +103,34 @@ new generated file should respect that same override hook.
   every real boot.
 - **Runs as root by design.** USB access (`upsdrvctl`) and config
   ownership need it; `upsd` drops to user `nut` internally via configure
-  flags. The Trivy AVD-DS-0002 finding is suppressed in `.trivyignore`.
+  flags. The Trivy AVD-DS-0002 finding is suppressed in `.trivyignore`,
+  which carries the rationale; CI supplies its own ignore list, so those
+  bytes reach only an ad-hoc `trivy` run in this working directory.
 - **Upstream sources may carry checked-in patches.** `patches/` holds
   backports applied to the NUT source in the Dockerfile with
   `patch -p1 --fuzz=0` (strict, so source drift on a version bump fails
   the build loudly instead of silently shipping unpatched binaries).
-  Each patch header names its upstream commit and removal condition -
-  e.g. the CVE-2026-54161 NOTIFYCMD/execvp backport is removed once
-  `NUT_VERSION` reaches v2.8.6: six coupled sites go together: the
-  patch file, the Dockerfile COPY/apply step, the CVE's VEX entry in the
-  Dockerfile's SBOM-fragment RUN, the smoke test's section-8
-  `CVE-2026-54161` assertion, the OpenVEX document at
-  `vex/cve-2026-54161.openvex.json` that the release pipeline attests,
-  plus the test stage's `COPY vex/` line and the smoke test's
-  OpenVEX/NUT_VERSION parity assertion that guard it
-  (and refresh the two README paragraphs that describe the backport:
-  the Security section's VEX-entry description, and the Alerting
-  section's "NOTIFYCMD is executed directly" note, which then
-  describes stock v2.8.6 behavior rather than a backport). Unlike the
-  ARG-generated embedded fragment, the OpenVEX
-  document is a static committed file: its nut subcomponent version
-  string is hardcoded and must track `NUT_VERSION` on every bump while
-  the patch remains applied. The other two backports, the libusb `rdlens`
-  out-of-bounds read (upstream PR #3550) and the libusb teardown deadlock
-  on reconnect (upstream #598), have no CVE and therefore no VEX entry,
-  no SBOM analysis entry, and no smoke-test assertion: each shares the
-  v2.8.6 removal trigger but spans only three coupled sites, the patch
-  file, the Dockerfile COPY/apply step, and the README's "Dependency CVE
-  posture" paragraph that names the carried backports.
+  Each patch header names its upstream commit and removal condition, and
+  this is the removal checklist they point at. Every patch is removed once
+  `NUT_VERSION` reaches v2.8.6, and every removal touches at least the
+  patch file itself and the Dockerfile COPY/apply step.
+  The CVE-2026-54161 NOTIFYCMD/execvp backport spans four coupled sites:
+  those two, the CVE's VEX entry in the Dockerfile's SBOM-fragment RUN,
+  and the smoke test's section-8 `CVE-2026-54161` assertion. Refresh the
+  two README paragraphs that describe it as well: the Security section's
+  VEX-entry description, and the Alerting section's "NOTIFYCMD is executed
+  directly" note, which then describes stock v2.8.6 behavior rather than a
+  backport. The other three backports - the libusb `rdlens` out-of-bounds
+  read (upstream PR #3550), the libusb teardown deadlock on reconnect
+  (upstream #598) and the richcomm libusb context reopen (upstream
+  ce2364e2b) - have no CVE and therefore no VEX entry, no SBOM analysis
+  entry and no smoke-test assertion: each spans the patch file, the
+  Dockerfile COPY/apply step, and the README's "Dependency CVE posture"
+  paragraph that names the carried backports.
+  Do not edit the diff bodies: a patch that no longer matches what
+  upstream wrote is no longer a backport, and the removal drops the whole
+  file with nothing recording the divergence - so a defect found in
+  patched code is reported upstream, not fixed in the hunks.
   A failing `patch` step on a NUT version
   bump usually means the fix landed upstream: drop the patch rather than
   re-diffing it.

@@ -3,11 +3,8 @@ name: Security
 on:
   pull_request:
     paths:
-      - go.mod
-      - go.sum
-      - package.json
-      - package-lock.json
       - Dockerfile
+      - "patches/**"
       - "**/*.sh"
       - compose.yaml
       - .trivyignore

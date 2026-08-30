@@ -7,6 +7,28 @@
 # enabled, the D-Bus poweroff-path probe's error line. Thresholds, the for:
 # windows, and the severity labels are starting points; adjust the container
 # selector to your deployment.
+#
+# The event and msg rules below read PARSED logfmt fields, so a token inside a
+# quoted value cannot match one; the level-prefix rule (UPSContainerError)
+# reads the line position instead, deliberately. One consequence of the parser:
+# a collector that already sets an event stream label makes the parsed value
+# land as event_extracted, and every event rule then matches nothing.
+#
+# Two shapes live in this group and each rule below says which it is. A STATE
+# rule is honest only where the producer RE-EMITS its line while the condition
+# holds, so the window can be sized above that cadence: UPSCommsLost (upsmon
+# repeats NOCOMM every NOCOMMWARNTIME) and UPSPowerOffPathBroken (the probe
+# repeats its error every DBUS_PROBE_INTERVAL). A TRANSITION rule is the only
+# honest shape for the events NUT emits ONCE per change - ONBATT, ONLINE,
+# LOWBATT, FSD, REPLBATT, ALARM - because nothing repeats them: in NUT v2.8.5
+# clients/upsmon.c each notifier returns early when the flag is already set
+# (ups_on_batt :880, ups_on_line :900, ups_low_batt :1746). Such a rule marks
+# the change and resolves when its line ages out; it does NOT track the state,
+# and no window value can make it, because the quantity it would have to
+# outlast is the duration of the outage. Continuous UPS state is not in this
+# log stream at all - it is on the NUT protocol on port 3493 (upsc's
+# ups.status), so alert on a NUT metrics exporter if you want a latched
+# "still on battery" alarm.
 groups:
   - name: nut-upsd
     # Evaluate every 10s instead of the ruler's 1m default. UPSOnBattery pairs
@@ -20,10 +42,9 @@ groups:
     # the slower rules below.
     interval: 10s
     rules:
-      # Mains state, reconstructed from the event PAIR: upsmon logs ONBATT when
-      # it loses mains and ONLINE when it returns, so more ONBATT than ONLINE in
-      # the window means the last transition was onto battery and the UPS is
-      # carrying the load right now.
+      # Mains transition, read from the event PAIR: upsmon logs ONBATT when it
+      # loses mains and ONLINE when it returns, so more ONBATT than ONLINE means
+      # the most recent transition the window still holds was onto battery.
       #
       # Two arms joined by or, and neither one covers the other's case:
       #   1. the comparison arm handles a window holding BOTH events. It is what
@@ -37,23 +58,29 @@ groups:
       # Same shape, and the same reason, as the two-arm up == 0 or absent(up)
       # reachability pair.
       #
-      # The 10m window is far longer than any UPS runtime, so the alert cannot
-      # go quiet while the UPS is still on battery, and it is long enough to
-      # hold both halves of a flicker (POLLFREQ, default 5s, apart).
+      # TRANSITION rule (see the file header). The 2m window is sized on the
+      # only cadence the expression controls: both halves of a flicker land
+      # within about 2x POLLFREQ (default 5s), so raise this window if you
+      # raise POLLFREQ. It deliberately does NOT try to cover an outage -
+      # nothing repeats event=ONBATT - so the alert marks mains loss and
+      # resolves 2m later while the UPS may still be carrying the load. The
+      # window also bounds the one gap in the pair: an earlier outage whose
+      # ONBATT has aged out while its ONLINE has not ties the counts, so a
+      # new outage can stay quiet for at most one window.
       - alert: UPSOnBattery
         expr: |
           sum by (container) (count_over_time(
-            {container="nut-upsd"} |= `event=ONBATT` [10m]
+            {container="nut-upsd"} | logfmt | event="ONBATT" [2m]
           )) > sum by (container) (count_over_time(
-            {container="nut-upsd"} |= `event=ONLINE` [10m]
+            {container="nut-upsd"} | logfmt | event="ONLINE" [2m]
           ))
           or
           sum by (container) (count_over_time(
-            {container="nut-upsd"} |= `event=ONBATT` [10m]
+            {container="nut-upsd"} | logfmt | event="ONBATT" [2m]
           )) > 0
           unless
           sum by (container) (count_over_time(
-            {container="nut-upsd"} |= `event=ONLINE` [10m]
+            {container="nut-upsd"} | logfmt | event="ONLINE" [2m]
           )) > 0
         for: 10s
         labels:
@@ -61,33 +88,38 @@ groups:
         annotations:
           summary: "UPS is on battery - mains power lost ({{ $labels.container }})"
           description: >
-            nut-upsd logged an ONBATT event with no ONLINE event after it: mains
-            power is gone and the UPS carries the connected load from its
-            battery. How long it holds depends on that load and on the battery's
+            nut-upsd logged an ONBATT event with no ONLINE event after it in
+            the last 2 minutes: mains power was lost and the UPS took the
+            connected load onto its battery. NUT reports that transition once,
+            so this alert marks it and then resolves; it does not track how
+            long the UPS stays on battery. For that, read ups.status over the
+            NUT protocol. How long it holds depends on that load and on the battery's
             size and age, so judge the urgency from the runtime your own UPS
             reports rather than from a fixed figure. Check mains power now.
             UPSLowBattery is the escalation when the battery runs down.
       - alert: UPSLowBattery
         expr: |
           sum by (container) (count_over_time(
-            {container="nut-upsd"} |= `event=LOWBATT` [5m]
+            {container="nut-upsd"} | logfmt | event="LOWBATT" [5m]
           )) > 0
         for: 0m
         labels:
           severity: critical
         annotations:
-          summary: "UPS low battery - shutdown imminent ({{ $labels.container }})"
+          summary: "UPS reports low battery ({{ $labels.container }})"
           description: >
             nut-upsd logged a NUT LOWBATT event: the UPS raised its low-battery
             flag. NUT notifies on that flag alone, so check whether the UPS is
             also on battery: on battery plus low battery starts the shutdown
             sequence, while a low-battery flag raised on line power points at
             the UPS reporting it wrongly (see LOWBATT_PERCENT / ignorelb).
-            Verify mains power and the connected-load runtime now.
+            Verify mains power and the connected-load runtime now. NUT reports
+            this flag once when it is raised, so this alert marks that
+            transition rather than tracking the state.
       - alert: UPSForcedShutdown
         expr: |
           sum by (container) (count_over_time(
-            {container="nut-upsd"} |~ `event=(FSD|SHUTDOWN)` [5m]
+            {container="nut-upsd"} | logfmt | event=~"FSD|SHUTDOWN" [5m]
           )) > 0
         for: 0m
         labels:
@@ -103,7 +135,7 @@ groups:
       - alert: UPSCommsLost
         expr: |
           sum by (container) (count_over_time(
-            {container="nut-upsd"} |= `event=NOCOMM` [5m]
+            {container="nut-upsd"} | logfmt | event="NOCOMM" [15m]
           )) > 0
         for: 0m
         labels:
@@ -112,12 +144,14 @@ groups:
           summary: "UPS communication lost ({{ $labels.container }})"
           description: >
             nut-upsd logged a NOCOMM event: upsmon could not reach the UPS for
-            at least NOCOMMWARNTIME seconds (default 300). UPS state is unknown
-            until communication is restored.
+            at least NOCOMMWARNTIME seconds (default 300), and repeats it every
+            NOCOMMWARNTIME seconds while comms stay down. UPS state is unknown
+            until communication is restored. Keep this window above twice your
+            NOCOMMWARNTIME so the alert stays firing between warnings.
       - alert: UPSHardwareFault
         expr: |
           sum by (container) (count_over_time(
-            {container="nut-upsd"} |~ `event=(REPLBATT|ALARM)` [15m]
+            {container="nut-upsd"} | logfmt | event=~"REPLBATT|ALARM" [15m]
           )) > 0
         for: 0m
         labels:
@@ -136,7 +170,7 @@ groups:
       - alert: UPSPowerOffPathBroken
         expr: |
           sum by (container) (count_over_time(
-            {container="nut-upsd"} |= `D-Bus poweroff path unreachable` [15m]
+            {container="nut-upsd"} | logfmt | msg=~"D-Bus poweroff path unreachable.*" [15m]
           )) > 0
         for: 0m
         labels:
@@ -144,8 +178,61 @@ groups:
         annotations:
           summary: "UPS host-poweroff path broken ({{ $labels.container }})"
           description: >
-            nut-upsd has SHUTDOWN_ON_BATTERY_CRITICAL enabled but its periodic
-            D-Bus liveness probe (every DBUS_PROBE_INTERVAL seconds, default
-            300) cannot reach logind through the mounted system bus socket. A
-            forced shutdown right now would NOT power off the host. Check the
-            /run/dbus/system_bus_socket mount and the host D-Bus daemon.
+            nut-upsd has SHUTDOWN_ON_BATTERY_CRITICAL enabled and its periodic
+            probe (every DBUS_PROBE_INTERVAL seconds, default 300) asked logind
+            CanPowerOff over the mounted system bus and did not get an answer
+            that permits a non-interactive poweroff. A green probe proves that a
+            live logind owns the bus name and that the standing authorisation
+            posture allows the call nut-shutdown.sh makes; it is not an
+            end-to-end verdict, its sample is as old as one DBUS_PROBE_INTERVAL,
+            and it says nothing about inhibitors - for a root sender logind
+            refuses a real poweroff on a block inhibitor BEFORE polkit is
+            consulted while CanPowerOff takes the root shortcut and answers
+            yes, so on the default posture no cadence makes this probe see one.
+            Read the detail field on the log line: a missing socket or a bus
+            error points at the /run/dbus/system_bus_socket mount and the host
+            D-Bus daemon, while an authorisation answer (no, challenge) points
+            at the host's polkit decision for
+            org.freedesktop.login1.power-off - the README's user-namespace
+            remap note is the common cause, because a remapped sender loses the
+            euid-0 shortcut and power-off's shipped default asks for admin
+            authentication that a non-interactive call cannot supply. Keep the
+            window above twice DBUS_PROBE_INTERVAL or the alert flaps between
+            probes; it also stays firing for up to one window after the path
+            recovers.
+      # The container's own refusals, collapsed by level rather than
+      # enumerated: every env-var refusal, boot abort, TLS provisioning
+      # failure and watchdog give-up logs level=error, and none of them
+      # reaches a rule above (those all key on upsmon's event= lines or the
+      # D-Bus probe). A startup refusal exits the container, so restart:
+      # retries it and the line recurs on every attempt; the image
+      # HEALTHCHECK cannot report it, because the refusal exits inside the
+      # 15s start period and the first probe is only due at 30s. The matcher
+      # is anchored at line start so a level=error substring inside another
+      # record's detail="..." field cannot fire it, and the one exclusion
+      # drops the event handler's own lines, which the rules above cover.
+      - alert: UPSContainerError
+        expr: |
+          sum by (container) (count_over_time(
+            {container="nut-upsd"}
+            |~ `^level=error `
+            != `msg="UPS event"` [15m]
+          )) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "nut-upsd logged an error ({{ $labels.container }})"
+          description: >
+            The container logged a level=error line of its own: an invalid
+            environment variable, a NUT daemon that failed to start, a
+            missing /dev/bus/usb, a TLS certificate it could not provision,
+            or a comms watchdog that has given up on the UPS. A startup
+            refusal exits the container, so the restart policy retries it and
+            repeats the line while the UPS goes unmonitored; the container
+            healthcheck cannot report that state, because the refusal happens
+            inside the healthcheck's start period. This rule is a net under
+            the others and is not exclusive of them: a broken D-Bus poweroff
+            path fires UPSPowerOffPathBroken as well, and that rule names
+            what to check. Read the line itself in the container log: it
+            names the variable or the daemon.

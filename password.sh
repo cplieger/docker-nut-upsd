@@ -41,9 +41,7 @@ _replace_file() {
 # produced. The cache keeps the value stable across in-container restarts. It
 # lives in the root-only /var/run/nut-secrets runtime directory (mode 700,
 # owner root) so the lower-privileged `nut` service user cannot pre-create or
-# replace the temp/cache paths (symlink/clobber hardening). The file lives in
-# the container's writable layer and is lost on recreation (docker rm &&
-# docker run, or any orchestrator redeploy).
+# replace the temp/cache paths (symlink/clobber hardening).
 _resolve_cached_password() {
   _rcp_label="$1"
   _rcp_file="$2"
@@ -52,21 +50,21 @@ _resolve_cached_password() {
   # and the read itself is capped at PASSWORD_LENGTH bytes. An unbounded
   # `cat` of a corrupted or grown cache in the reused writable layer would
   # let PID 1 consume memory proportional to the file and repeat the OOM on
-  # every restart. Treat a whitespace-only cache as absent (self-heal):
-  # POSIX command substitution strips trailing newlines, but spaces/tabs
-  # would otherwise pass a length check and cache an unusable password.
+  # every restart. Trust only generation's own alphabet (A-Za-z0-9), so a cache
+  # holding whitespace, a stripped trailing newline, or the quote/backslash/control
+  # bytes that break out of generate-config.sh's quoted password fields regenerates.
   _rcp_size=$(stat -c %s "$_rcp_file" 2>/dev/null) || _rcp_size=""
   if [ "$_rcp_size" = "$PASSWORD_LENGTH" ] \
     && _rcp_pw=$(head -c "$PASSWORD_LENGTH" "$_rcp_file" 2>/dev/null) \
     && [ "${#_rcp_pw}" -eq "$PASSWORD_LENGTH" ] \
-    && [ -n "$(printf '%s' "$_rcp_pw" | tr -d '[:space:]')" ]; then
+    && [ -z "$(printf '%s' "$_rcp_pw" | tr -d 'A-Za-z0-9')" ]; then
     printf 'level=info msg="reusing %s from container FS (not persisted across recreations)" path=%s\n' \
       "$_rcp_label" "$_rcp_file" >&2
     printf '%s' "$_rcp_pw"
     return 0
   fi
   if [ -s "$_rcp_file" ]; then
-    printf 'level=warn msg="cached %s invalid (wrong size, unreadable, or whitespace-only); regenerating" path=%s size=%s expected=%s\n' \
+    printf 'level=warn msg="cached %s invalid (wrong size, unreadable, or not from the generated alphabet); regenerating" path=%s size=%s expected=%s\n' \
       "$_rcp_label" "$_rcp_file" "${_rcp_size:-unreadable}" "$PASSWORD_LENGTH" >&2
   fi
   # Pull more entropy than we need so stripping `/+=` still leaves
@@ -119,12 +117,12 @@ resolve_local_upsmon_password() {
 
 # Warn (don't block) on the well-known default credentials.
 warn_weak_api_password() {
-  if [ "$API_PASSWORD" = "secret" ] || [ "${#API_PASSWORD}" -lt "$PASSWORD_MIN_LENGTH" ]; then
+  if [ "${#API_PASSWORD}" -lt "$PASSWORD_MIN_LENGTH" ]; then
     printf 'level=warn msg="API_PASSWORD is weak (default value or <%d chars). Acceptable on a trusted LAN; rotate it if your NUT client supports custom credentials."\n' \
       "$PASSWORD_MIN_LENGTH" >&2
   fi
   if [ "${#ADMIN_PASSWORD}" -lt "$PASSWORD_MIN_LENGTH" ]; then
-    printf 'level=warn msg="ADMIN_PASSWORD is weak (<%d chars). It guards upsd set/FSD actions; use a longer value or unset it to auto-generate a strong one."\n' \
+    printf 'level=warn msg="ADMIN_PASSWORD is weak (<%d chars). It guards upsd set/FSD actions unless a mounted upsd.users.user owns those accounts; use a longer value or unset it to auto-generate a strong one."\n' \
       "$PASSWORD_MIN_LENGTH" >&2
   fi
 }
@@ -132,39 +130,34 @@ warn_weak_api_password() {
 # ---------------------------------------------------------------------------
 # TLS (STARTTLS) server certificate resolution
 # ---------------------------------------------------------------------------
-# upsd's CERTFILE is ONE PEM containing the server certificate followed by
-# its private key (NUT docs/security.txt; the v2.8.x OpenSSL backend loads
-# both from the same file). Precedence: an operator-mounted PEM at
-# TLS_CERT_MOUNT wins (its content is authoritative and never regenerated or
-# rewritten; it is copied to an internal working copy on every boot, so a
-# rotated cert is picked up at restart); otherwise a self-signed PEM is
-# generated at boot and cached at TLS_CERT_CACHE with the same hardening as
-# the password caches above (root-only dir, mktemp + atomic rename), so it
-# stays stable across in-container restarts.
-#
-# Placement subtlety: upsd reads CERTFILE as the dropped nut user, NOT root —
-# ssl_init() runs after become_user() ("keyfile must be readable by nut
-# user", server/upsd.c; docs/security.txt mandates root:nut 0640). The
-# root-only /var/run/nut-secrets is unreadable to upsd by design, and the
-# operator's mount must never be chowned/chmodded in place: on a rw bind
-# mount that mutates the HOST file, handing the private key to whatever host
-# group the container's nut GID happens to map to. So BOTH sources are
-# installed as a root:nut 640 working copy inside /etc/nut (750 root:nut —
-# the generated-config perms) and CERTFILE points at the copy: the
-# self-signed cache at TLS_CERT_RUNTIME, the mounted PEM at
-# TLS_CERT_MOUNTED_RUNTIME.
+# upsd's CERTFILE is ONE PEM: certificate then private key (NUT
+# docs/security.txt) — hence _generate_selfsigned_cert's crt-then-key cat.
+# Placement subtlety: upsd reads it as the dropped nut user, not root (ssl_init
+# runs after become_user, server/upsd.c), so both sources install as a root:nut
+# 640 copy in /etc/nut; _install_cert_working_copy owns why only the copy is chowned.
 readonly TLS_CERT_MOUNT=/etc/nut/upsd.pem
 readonly TLS_CERT_CACHE=/var/run/nut-secrets/upsd-selfsigned.pem
 readonly TLS_CERT_RUNTIME=/etc/nut/upsd-selfsigned.pem
 readonly TLS_CERT_MOUNTED_RUNTIME=/etc/nut/upsd-mounted.pem
 readonly TLS_CERT_DAYS=825
 
-# tls_cert_valid FILE: the first certificate parses and is not expiring
-# within a day, and the private key parses — the sanity gate for reusing the
-# cached self-signed PEM (regenerate on anything less).
-tls_cert_valid() {
-  openssl x509 -in "$1" -noout -checkend 86400 >/dev/null 2>&1 \
+# tls_cert_parses FILE: one PEM holding a certificate and its private key.
+# upsd fatalx()es on either half (server/netssl.c:715-722).
+tls_cert_parses() {
+  openssl x509 -in "$1" -noout >/dev/null 2>&1 \
     && openssl pkey -in "$1" -noout >/dev/null 2>&1
+}
+
+tls_cert_fresh() {
+  openssl x509 -in "$1" -noout -checkend 86400 >/dev/null 2>&1
+}
+
+# tls_cert_valid FILE: the gate for reusing the cached self-signed PEM
+# (regenerate on anything less). States what it checks and no more: a
+# certificate and key that parse but do not match each other pass, and upsd's
+# own ssl_init is what refuses that (see the mounted arm below).
+tls_cert_valid() {
+  tls_cert_parses "$1" && tls_cert_fresh "$1"
 }
 
 # tls_cert_fingerprint FILE: SHA-256 fingerprint of the first certificate in
@@ -185,16 +178,12 @@ _tls_mktemp() {
 }
 
 # _generate_selfsigned_cert: mint a fresh self-signed cert+key PEM into the
-# root-only cache. EC P-256 over RSA 2048: keygen completes in milliseconds
-# even on small ARM hosts (RSA 2048 keygen is slower and CPU-variable at
-# boot), handshakes are smaller, and P-256 is universally supported by the
-# OpenSSL/GnuTLS stacks NUT clients build against. The container has no
-# stable identity to attest, so the name is the generic CN=nut-upsd (SAN
-# DNS:nut-upsd); 825-day validity stays inside the ceiling common TLS
-# verifiers enforce. mktemp in the root-only dir gives O_EXCL 0600 temp
-# files a compromised nut process cannot pre-plant (same rationale as
-# _resolve_cached_password); cert-then-key order is NUT's documented
-# CERTFILE layout (`cat upsd.crt upsd.key > upsd.pem`).
+# root-only cache. EC P-256 over RSA 2048: keygen completes in milliseconds even
+# on small ARM hosts (RSA 2048 keygen is slower and CPU-variable at boot).
+# mktemp in the root-only dir gives O_EXCL 0600 temp files a compromised nut
+# process cannot pre-plant (same rationale as _resolve_cached_password);
+# cert-then-key order is NUT's documented CERTFILE layout
+# (`cat upsd.crt upsd.key > upsd.pem`).
 _generate_selfsigned_cert() {
   _gc_key=$(_tls_mktemp "$TLS_CERT_CACHE") || return 1
   _gc_crt=$(_tls_mktemp "$TLS_CERT_CACHE") || {
@@ -205,9 +194,9 @@ _generate_selfsigned_cert() {
     rm -f "$_gc_key" "$_gc_crt"
     return 1
   }
-  if openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
+  if _gc_err=$(openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
     -keyout "$_gc_key" -out "$_gc_crt" -days "$TLS_CERT_DAYS" -nodes \
-    -subj "/CN=nut-upsd" -addext "subjectAltName=DNS:nut-upsd" >/dev/null 2>&1 \
+    -subj "/CN=nut-upsd" -addext "subjectAltName=DNS:nut-upsd" 2>&1 >/dev/null) \
     && cat "$_gc_crt" "$_gc_key" >"$_gc_pem" \
     && _replace_file "$_gc_pem" "$TLS_CERT_CACHE"; then
     rm -f "$_gc_key" "$_gc_crt"
@@ -216,8 +205,8 @@ _generate_selfsigned_cert() {
     return 0
   fi
   rm -f "$_gc_key" "$_gc_crt" "$_gc_pem"
-  printf 'level=error msg="self-signed TLS certificate generation failed" path=%s\n' \
-    "$TLS_CERT_CACHE" >&2
+  printf 'level=error msg="self-signed TLS certificate generation failed" path=%s err="%s"\n' \
+    "$TLS_CERT_CACHE" "$(log_value "$(printf '%s' "$_gc_err" | head -c 512)")" >&2
   return 1
 }
 
@@ -268,12 +257,15 @@ resolve_tls_cert() {
         "$TLS_CERT_MOUNT" >&2
       return 1
     fi
-    # Warn-only parse/expiry gate: the mounted PEM's content is still served
-    # as-is (upsd stays authoritative at ssl_init), but name the likely
-    # consequence now instead of leaving a later fatal exit or client
-    # rejection undiagnosed.
-    if ! tls_cert_valid "$TLS_CERT_MOUNT"; then
-      printf 'level=warn msg="mounted TLS certificate does not parse as cert+key or expires within a day; upsd may exit at startup or verifying clients may reject the handshake" path=%s\n' \
+    # The content is still served as-is, but the two failures it can carry have
+    # opposite outcomes: upsd fatalx()es on a parse failure
+    # (server/netssl.c:715-722), while an expired pair loads and only a
+    # verifying client refuses it.
+    if ! tls_cert_parses "$TLS_CERT_MOUNT"; then
+      printf 'level=error msg="mounted TLS certificate is not one PEM holding a certificate and its private key; upsd will exit at startup" path=%s\n' \
+        "$TLS_CERT_MOUNT" >&2
+    elif ! tls_cert_fresh "$TLS_CERT_MOUNT"; then
+      printf 'level=warn msg="mounted TLS certificate expires within a day; upsd will still serve it, but verifying clients will refuse the handshake" path=%s\n' \
         "$TLS_CERT_MOUNT" >&2
     fi
     # Operator-mounted PEM: copied on every boot to a root:nut 640 working

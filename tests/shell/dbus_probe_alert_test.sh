@@ -74,33 +74,39 @@ count() {
 }
 
 # --- 1. the matcher alerts.yaml actually uses ------------------------------------
-# The literal is read FROM the rule file, so either side of the contract failing
+# The pattern is read FROM the rule file, so either side of the contract failing
 # fails here: reword the log line and it stops matching; edit the alert expression
-# and the extracted literal changes out from under the emitter.
+# and the extracted pattern changes out from under the emitter. The rule filters on
+# the PARSED msg field (`| logfmt | msg=~"<phrase>.*"`), which is anchored, so the
+# emitted msg VALUE has to start with the phrase -- a line that merely contains it
+# somewhere else would not fire the alert and must not satisfy this assertion.
 # The range ends at the NEXT rule (or EOF) rather than at a `[15m]` literal, so a
 # window change cannot overrun it into a neighbouring rule; and the guard checks the
-# matcher's SHAPE, not just non-emptiness -- an empty matcher would make
-# `grep -F -- ""` match every line, and a wrong-rule matcher would be non-empty but
-# meaningless. This rule filters on the poweroff-path phrase.
+# pattern's SHAPE, not just non-emptiness -- an empty pattern would make
+# `grep -F -- ""` match every line, and a wrong-rule pattern would be non-empty but
+# meaningless.
 M_DBUS=$(awk '
   /- alert: UPSPowerOffPathBroken$/ { inrule = 1; next }
   inrule && /- alert: / { exit }
   inrule { print }
-' "$REPO_ROOT/alerts.yaml" | grep -o '`[^`]*`' | tr -d '`' | head -1)
+' "$REPO_ROOT/alerts.yaml" | sed -n 's/.*| logfmt | msg=~"\([^"]*\)".*/\1/p' | head -1)
 case "$M_DBUS" in
   *poweroff*) ;;
   *)
-    printf 'harness error: extracted matcher %s from alerts.yaml is not the poweroff-path filter\n' \
+    printf 'harness error: extracted matcher %s from alerts.yaml is not the poweroff-path msg filter\n' \
       "${M_DBUS:-<empty>}" >&2
     exit 1
     ;;
 esac
+# The rule's trailing `.*` is what lets the msg carry more than the phrase; strip it
+# to get the prefix the field must open with.
+M_DBUS_PHRASE=${M_DBUS%.\*}
 run_probe 1 broken
-grep -qF -- "$M_DBUS" "$LOG" \
+grep -qF -- "msg=\"$M_DBUS_PHRASE" "$LOG" \
   && grep -q 'level=error' "$LOG" \
   && grep -q 'socket=/run/dbus/system_bus_socket' "$LOG" \
-  && ok "a broken poweroff path logs level=error carrying '$M_DBUS' (read from alerts.yaml), naming the socket" \
-  || no 'UPSPowerOffPathBroken matcher' "alerts.yaml wants '$M_DBUS', log: $(head -c 300 "$LOG")"
+  && ok "a broken poweroff path logs level=error whose msg opens with '$M_DBUS_PHRASE' (read from alerts.yaml), naming the socket" \
+  || no 'UPSPowerOffPathBroken matcher' "alerts.yaml wants msg=\"$M_DBUS_PHRASE, log: $(head -c 300 "$LOG")"
 
 # --- 2. the line RECURS while broken --------------------------------------------
 #

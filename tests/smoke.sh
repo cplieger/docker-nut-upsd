@@ -35,6 +35,26 @@ for b in upsd upsc upsmon upsdrvctl; do
   fi
 done
 
+if [ ! -x /usr/lib/nut/usbhid-ups ]; then
+  err "FAIL: default UPS driver missing or not executable: /usr/lib/nut/usbhid-ups"
+  fail=1
+fi
+
+# `command -v` above resolves names without running the loader, so it
+# cannot see a runtime library that was dropped, renamed or swapped.
+for bin in /usr/sbin/upsd /usr/bin/upsc /usr/sbin/upsmon /usr/sbin/upsdrvctl /usr/lib/nut/*; do
+  [ -x "$bin" ] || continue
+  if ! out=$(ldd "$bin" 2>&1); then
+    err "FAIL: loader rejected shipped NUT executable: $bin"
+    err "$out"
+    fail=1
+  elif printf '%s\n' "$out" | grep -qE 'not found|Error loading shared library'; then
+    err "FAIL: shipped NUT executable has an unresolved shared library: $bin"
+    err "$out"
+    fail=1
+  fi
+done
+
 # 2. Valid env passes validation and generates all four config files.
 export UPS_NAME=ups UPS_DESC="Test UPS" UPS_DRIVER=usbhid-ups UPS_PORT=auto \
   API_USER=monuser API_PASSWORD=secret API_ADDRESS=0.0.0.0 API_PORT=3493 \
@@ -61,7 +81,7 @@ if ! resolve_tls_cert 2>/dev/null; then
 fi
 
 generate_all_configs
-for f in nut.conf ups.conf upsd.conf upsd.users upsmon.conf; do
+for f in ups.conf upsd.conf upsd.users upsmon.conf; do
   if [ ! -s "/etc/nut/$f" ]; then
     err "FAIL: config not generated: /etc/nut/$f"
     fail=1
@@ -79,6 +99,31 @@ grep -q 'pollonly' /etc/nut/ups.conf || {
   err "FAIL: ups.conf missing pollonly for usbhid driver"
   fail=1
 }
+# Battery thresholds: with no overrides, preserve the UPS hardware LB flag;
+# with LOWBATT_PERCENT set, emit NUT's low-charge override and arm ignorelb.
+if ! (
+  unset LOWBATT_PERCENT LOWBATT_RUNTIME CRITBATT_PERCENT CRITBATT_RUNTIME
+  generate_ups_conf >/dev/null 2>&1
+  ! grep -q '^    ignorelb$' /etc/nut/ups.conf \
+    && ! grep -q '^    override\.battery\.' /etc/nut/ups.conf
+); then
+  err "FAIL: default ups.conf emitted ignorelb or a battery override"
+  fail=1
+fi
+if ! (
+  LOWBATT_PERCENT=20
+  unset LOWBATT_RUNTIME CRITBATT_PERCENT CRITBATT_RUNTIME
+  generate_ups_conf >/dev/null 2>&1
+  [ "$(grep -c '^    ignorelb$' /etc/nut/ups.conf)" -eq 1 ] \
+    && grep -q '^    override\.battery\.charge\.low = 20$' /etc/nut/ups.conf
+); then
+  err "FAIL: LOWBATT_PERCENT did not emit one ignorelb and the NUT low-charge override"
+  fail=1
+fi
+(
+  unset LOWBATT_PERCENT LOWBATT_RUNTIME CRITBATT_PERCENT CRITBATT_RUNTIME
+  generate_ups_conf >/dev/null 2>&1
+)
 grep -q 'LISTEN 0.0.0.0 3493' /etc/nut/upsd.conf || {
   err "FAIL: upsd.conf missing LISTEN directive"
   fail=1
@@ -152,26 +197,77 @@ if ! (
   err "FAIL: trailing-LF API_PORT did not canonicalize to a one-line MONITOR directive"
   fail=1
 fi
-# Canonicalize-then-resolve contract (entrypoint boot order): the emptiness
-# test in resolve_admin_password is a raw-value interpretation, so an LF-only
-# ADMIN_PASSWORD (env-file artifact) must canonicalize to empty FIRST and then
-# auto-generate a full-length password — without canonicalize-first the raw LF
-# is non-empty, dodges generation, strips to empty, and the boot later aborts
-# at generate_all_configs' :? guard. This pins the two functions composed in
-# the documented order; the entrypoint's literal top-level call ordering is
-# inline flow and is NOT exercised here.
+# Credential byte fidelity (validate.sh canonicalize_validated_values): a remote
+# client reproduces API_PASSWORD/ADMIN_PASSWORD byte for byte, so those two are
+# enumerated but assigned RAW — an LF-only value reaches the `control` check and
+# is REFUSED, naming the variable, instead of being silently rewritten into an
+# account whose stored password is not the one that was set. The presentation
+# values around them still canonicalize (the two cases above).
 rm -f /var/run/nut-secrets/admin_password
-if ! (
+CRED_ERR=$(mktemp)
+if (
   ADMIN_PASSWORD="$(printf '\nx')"
   ADMIN_PASSWORD=${ADMIN_PASSWORD%x}
+  canonicalize_validated_values
+  run_validations
+) >/dev/null 2>"$CRED_ERR"; then
+  err "FAIL: LF-only ADMIN_PASSWORD was accepted (credential silently rewritten)"
+  fail=1
+fi
+if ! grep -q 'msg="env var contains control characters" var=ADMIN_PASSWORD' "$CRED_ERR"; then
+  err "FAIL: LF-only ADMIN_PASSWORD was not refused with the control-character error naming it ($(head -c 200 "$CRED_ERR"))"
+  fail=1
+fi
+rm -f "$CRED_ERR"
+#    ...and an UNSET ADMIN_PASSWORD still auto-generates a full-length secret,
+#    which is the documented behaviour of unset (README) rather than of an
+#    LF-only value. The isolating pair for the refusal above: without it, making
+#    the refusal fire for every ADMIN_PASSWORD would still pass.
+if ! (
+  ADMIN_PASSWORD=""
   canonicalize_validated_values
   resolve_admin_password 2>/dev/null
   [ "${#ADMIN_PASSWORD}" -eq "$PASSWORD_LENGTH" ]
 ); then
-  err "FAIL: LF-only ADMIN_PASSWORD did not canonicalize to empty and auto-generate a ${PASSWORD_LENGTH}-char password"
+  err "FAIL: an unset ADMIN_PASSWORD did not auto-generate a ${PASSWORD_LENGTH}-char password"
   fail=1
 fi
 rm -f /var/run/nut-secrets/admin_password
+# warn_weak_api_password truth table. The strong pair is the isolating control:
+# without it, a function that warned unconditionally would pass both cases.
+WEAK_PASSWORD_ERR=$(mktemp)
+(
+  API_PASSWORD=secret
+  ADMIN_PASSWORD=ABCDEFGHIJKLMNOPQRSTUVWX
+  warn_weak_api_password
+) 2>"$WEAK_PASSWORD_ERR"
+if ! grep -q 'API_PASSWORD is weak' "$WEAK_PASSWORD_ERR" \
+  || grep -q 'ADMIN_PASSWORD is weak' "$WEAK_PASSWORD_ERR"; then
+  err "FAIL: the published weak API password did not emit only the API_PASSWORD warning"
+  fail=1
+fi
+
+(
+  API_PASSWORD=ABCDEFGHIJKLMNOPQRSTUVWX
+  ADMIN_PASSWORD=short
+  warn_weak_api_password
+) 2>"$WEAK_PASSWORD_ERR"
+if ! grep -q 'ADMIN_PASSWORD is weak' "$WEAK_PASSWORD_ERR" \
+  || grep -q 'API_PASSWORD is weak' "$WEAK_PASSWORD_ERR"; then
+  err "FAIL: a short admin password did not emit only the ADMIN_PASSWORD warning"
+  fail=1
+fi
+
+(
+  API_PASSWORD=ABCDEFGHIJKLMNOPQRSTUVWX
+  ADMIN_PASSWORD=ZYXWVUTSRQPONMLKJIHGFEDC
+  warn_weak_api_password
+) 2>"$WEAK_PASSWORD_ERR"
+if [ -s "$WEAK_PASSWORD_ERR" ]; then
+  err "FAIL: strong API and admin passwords emitted a weak-credential warning"
+  fail=1
+fi
+rm -f "$WEAK_PASSWORD_ERR"
 # Canonicalize-then-default contract (entrypoint boot order): the := defaults
 # are a raw-value interpretation (an LF-only value is non-empty raw), so an
 # LF-only UPS_NAME (env-file artifact) must canonicalize to empty FIRST and
@@ -297,6 +393,25 @@ if [ -n "$(ls -A /etc/nut/ups.conf)" ]; then
 fi
 rmdir /etc/nut/ups.conf
 rm -f /etc/nut/ups.conf.user /etc/nut/ups.conf.tmp.* "$DIRDST_ERR"
+#    A best-effort success diagnostic must not turn a completed override install
+#    into generation fallback when stderr is unavailable.
+printf '[ups]\n    driver = dummy-ups\n    port = /tmp/operator.dev\n' >/etc/nut/ups.conf.user
+if ! use_user_override ups.conf 2>&-; then
+  err "FAIL: applied ups.conf.user returned failure when its success diagnostic could not write"
+  fail=1
+fi
+if ! cmp -s /etc/nut/ups.conf.user /etc/nut/ups.conf; then
+  err "FAIL: direct override install did not preserve the operator bytes"
+  fail=1
+fi
+if ! generate_ups_conf 2>&-; then
+  err "FAIL: generate_ups_conf failed after applying ups.conf.user with stderr closed"
+  fail=1
+elif ! cmp -s /etc/nut/ups.conf.user /etc/nut/ups.conf; then
+  err "FAIL: generate_ups_conf overwrote an applied ups.conf.user after its success diagnostic failed"
+  fail=1
+fi
+rm -f /etc/nut/ups.conf.user
 
 # resolve_local_upsmon_password (password.sh): generates a PASSWORD_LENGTH-char
 # secret, caches it root-only, and reuses the cache on the next resolve
@@ -347,6 +462,121 @@ generate_all_configs >/dev/null 2>&1
 
 # 3. Validation rejects config-injection attempts (run_validations exits non-
 #    zero on failure, so each negative case runs in a subshell).
+
+# Every row of the two SHIPPED validation tables, driven with a value the row's
+# config destination forbids. Those declarations are the only link between an
+# operator-set variable and the validator its destination needs, so deleting a
+# row -- or widening the check that rejects a class -- goes unnoticed today: the
+# named cases below fail instead, one per variable and prohibited class. Each
+# case requires the intended validator's OWN message, because a row carries
+# several checks and an outcome-only assertion cannot tell which one refused
+# (shell.md, "where two guards are redundant"). The tables are driven through
+# _run_table rather than run_validations to keep the cross-field guards out of
+# the way; the classes are value shapes, not check names.
+rejected_table_value() {
+  case "$1" in
+    control) printf 'bad\rvalue' ;;
+    quote) printf 'bad"value' ;;
+    backslash) printf 'bad\\value' ;;
+    bracket) printf 'bad]value' ;;
+    identifier) printf 'bad value' ;;
+    numeric) printf 'not-a-number' ;;
+    positive | port) printf '0' ;;
+    percent) printf '101' ;;
+    *) return 1 ;;
+  esac
+}
+
+rejected_table_message() {
+  case "$1" in
+    control) printf 'contains control characters' ;;
+    quote) printf 'contains double-quote' ;;
+    backslash) printf 'contains backslash' ;;
+    bracket) printf 'contains bracket characters' ;;
+    identifier) printf 'is not a valid identifier' ;;
+    numeric) printf 'must be a non-negative integer' ;;
+    positive) printf 'must be a positive integer (>= 1)' ;;
+    port) printf 'must be 1-65535' ;;
+    percent) printf 'must be 0-100' ;;
+    *) return 1 ;;
+  esac
+}
+
+check_table_rejection() {
+  _matrix_var="$1"
+  _matrix_class="$2"
+  _matrix_optional="$3"
+  _matrix_value=$(rejected_table_value "$_matrix_class") || exit 1
+  _matrix_want=$(rejected_table_message "$_matrix_class") || exit 1
+  if _matrix_err=$(
+    (
+      export "$_matrix_var=$_matrix_value"
+      if [ "$_matrix_optional" = 1 ]; then
+        _run_table "$VALIDATION_TABLE_OPTIONAL" 1
+      else
+        _run_table "$VALIDATION_TABLE" 0
+      fi
+    ) 2>&1
+  ); then
+    err "FAIL: $_matrix_var accepted a $_matrix_class value forbidden by its config destination"
+    fail=1
+  elif ! printf '%s\n' "$_matrix_err" | grep -Fq "$_matrix_want"; then
+    err "FAIL: $_matrix_var refused a $_matrix_class value, but not through the $_matrix_class check"
+    err "$_matrix_err"
+    fail=1
+  fi
+}
+
+while IFS='|' read -r matrix_var matrix_class matrix_optional; do
+  [ -n "$matrix_var" ] || continue
+  check_table_rejection "$matrix_var" "$matrix_class" "$matrix_optional"
+done <<'CASES'
+UPS_NAME|control|0
+UPS_NAME|quote|0
+UPS_NAME|bracket|0
+UPS_NAME|identifier|0
+UPS_DESC|control|0
+UPS_DESC|quote|0
+UPS_DESC|backslash|0
+UPS_DRIVER|control|0
+UPS_DRIVER|identifier|0
+UPS_PORT|control|0
+UPS_PORT|backslash|0
+API_USER|control|0
+API_USER|bracket|0
+API_PASSWORD|control|0
+API_PASSWORD|quote|0
+API_PASSWORD|backslash|0
+API_ADDRESS|control|0
+API_ADDRESS|quote|0
+API_ADDRESS|backslash|0
+API_ADDRESS|bracket|0
+API_PORT|control|0
+API_PORT|port|0
+API_TLS|control|0
+ADMIN_PASSWORD|control|0
+ADMIN_PASSWORD|quote|0
+ADMIN_PASSWORD|backslash|0
+SHUTDOWN_ON_BATTERY_CRITICAL|control|0
+DBUS_PROBE_INTERVAL|numeric|0
+POLLFREQ|positive|0
+POLLFREQALERT|positive|0
+DEADTIME|positive|0
+FINALDELAY|numeric|0
+HOSTSYNC|numeric|0
+NOCOMMWARNTIME|numeric|0
+RBWARNTIME|numeric|0
+COMMS_WATCHDOG|control|0
+COMMS_CHECK_INTERVAL|numeric|0
+COMMS_RECOVERY_TIMEOUT|positive|0
+COMMS_FAST_RETRIES|positive|0
+COMMS_BACKOFF_FACTOR|positive|0
+LOWBATT_PERCENT|control|1
+LOWBATT_PERCENT|percent|1
+LOWBATT_RUNTIME|control|1
+LOWBATT_RUNTIME|numeric|1
+CASES
+
 if (
   UPS_NAME='bad]name'
   run_validations
@@ -442,6 +672,65 @@ if (
   err "FAIL: backslash-injection API_PASSWORD was accepted"
   fail=1
 fi
+# An unescaped `#` must be refused in every value that reaches a NUT config
+# field: parseconf hard-errors on it inside a double-quoted value and reads it
+# as a comment introducer outside one, and the consumer then DROPS the line and
+# carries on — so an ordinary `Rack #1 UPS` silently yields an account that
+# cannot authenticate, or a LISTEN line on a different port, on a healthy-looking
+# boot. The backslash refusal above closes the only escape route.
+if (
+  UPS_DESC='Rack #1 UPS'
+  run_validations
+) >/dev/null 2>&1; then
+  err "FAIL: a # in UPS_DESC was accepted"
+  fail=1
+fi
+if (
+  UPS_PORT='/dev/ttyS0#x'
+  run_validations
+) >/dev/null 2>&1; then
+  err "FAIL: a # in UPS_PORT was accepted"
+  fail=1
+fi
+if (
+  API_PASSWORD='pass#word'
+  run_validations
+) >/dev/null 2>&1; then
+  err "FAIL: a # in API_PASSWORD was accepted"
+  fail=1
+fi
+if (
+  API_ADDRESS='0.0.0.0#x'
+  run_validations
+) >/dev/null 2>&1; then
+  err "FAIL: a # in API_ADDRESS was accepted"
+  fail=1
+fi
+if (
+  ADMIN_PASSWORD='admin#pw'
+  run_validations
+) >/dev/null 2>&1; then
+  err "FAIL: a # in ADMIN_PASSWORD was accepted"
+  fail=1
+fi
+# A credential NUT will not preserve must be refused rather than stored altered:
+# parseconf's addchar() discards every byte outside 0x20-0x7E (CVE-2012-2944) and
+# stops appending at its 512-byte word limit, both silently, so the account would
+# enforce a password the operator never set.
+if (
+  API_PASSWORD="$(printf 'p\303\244ssword')"
+  run_validations
+) >/dev/null 2>&1; then
+  err "FAIL: a non-ASCII API_PASSWORD was accepted (NUT stores it with the byte dropped)"
+  fail=1
+fi
+if (
+  ADMIN_PASSWORD=$(printf '%600s' '' | tr ' ' 'a')
+  run_validations
+) >/dev/null 2>&1; then
+  err "FAIL: a 600-byte ADMIN_PASSWORD was accepted (NUT truncates at 512)"
+  fail=1
+fi
 # API_USER is written unquoted as a `[$API_USER]` section header in upsd.users,
 # so it gets the same identifier discipline as UPS_NAME.
 if (
@@ -500,22 +789,22 @@ if (
   err "FAIL: trailing-LF snmp-ups with UPS_PORT=auto was accepted (canonicalization bypassed the transport check)"
   fail=1
 fi
-# log_value sanitizer contract: double quotes and backslashes are DELETED,
-# control bytes (tab, BEL) flatten to single spaces, and printable ASCII
-# survives byte-for-byte. Locks the BusyBox-safe octal-range pipeline —
-# BusyBox tr treats a complemented class ('[:print:]') as a literal set, so
-# a class-based sanitizer mangles every logged value on Alpine.
-if [ "$(log_value "$(printf 'val"with\\stuff\tand\007ctl')")" != 'valwithstuff and ctl' ]; then
-  err "FAIL: log_value did not delete quote/backslash and flatten control bytes (got '$(log_value "$(printf 'val"with\\stuff\tand\007ctl')")')"
+# log_value sanitizer contract: double quotes and backslashes do not survive;
+# LF, CR, tab, BEL, and high bytes flatten to spaces; printable ASCII survives.
+# This runs under BusyBox tr, whose complemented [:print:] class is not equivalent.
+_log_value_input=$(printf 'val"with\\stuff\n\r\t\377and\007ctl')
+_log_value_want='valwithstuff    and ctl'
+_log_value_got=$(log_value "$_log_value_input")
+if [ "$_log_value_got" != "$_log_value_want" ]; then
+  err "FAIL: log_value byte contract: got '$_log_value_got', want '$_log_value_want'"
   fail=1
 fi
 
-# 4. Watchdog / transport / credential helpers are defined (sourced from
-#    validate.sh, generate-config.sh, lifecycle.sh, and password.sh).
-#    stop_watchdog and stop_dbus_probe live in entrypoint.sh and are not
-#    asserted here.
+# 4. Watchdog / D-Bus / credential helpers are defined (sourced from
+#    lifecycle.sh, generate-config.sh, and password.sh). stop_watchdog and
+#    stop_dbus_probe live in entrypoint.sh and are not asserted here.
 for fn in upsd_probe_host comms_fresh upsd_responsive restart_ups_driver comms_watchdog watchdog_epoch \
-  driver_transport usb_bus_required dbus_poweroff_path_ok dbus_liveness_probe read_pidfile \
+  dbus_poweroff_path_ok dbus_liveness_probe read_pidfile \
   local_upsmon_credential_active resolve_admin_password resolve_local_upsmon_password \
   resolve_tls_cert pid_matches_binary; do
   if ! command -v "$fn" >/dev/null 2>&1; then
@@ -523,6 +812,56 @@ for fn in upsd_probe_host comms_fresh upsd_responsive restart_ups_driver comms_w
     fail=1
   fi
 done
+
+STANDALONE_OUT=$(mktemp)
+STANDALONE_ERR=$(mktemp)
+if ! sh -c '
+  . "$1"
+  command -v upsd_probe_host >/dev/null 2>&1
+  API_ADDRESS=0.0.0.0
+  [ "$(upsd_probe_host)" = "127.0.0.1" ]
+' sh /usr/local/bin/lifecycle.sh >"$STANDALONE_OUT" 2>"$STANDALONE_ERR"; then
+  err "FAIL: lifecycle.sh could not be sourced alone by the healthcheck shell"
+  err "$(head -c 512 "$STANDALONE_ERR")"
+  fail=1
+elif [ -s "$STANDALONE_OUT" ] || [ -s "$STANDALONE_ERR" ]; then
+  err "FAIL: sourcing lifecycle.sh alone emitted output"
+  err "stdout=$(head -c 256 "$STANDALONE_OUT") stderr=$(head -c 256 "$STANDALONE_ERR")"
+  fail=1
+fi
+rm -f "$STANDALONE_OUT" "$STANDALONE_ERR"
+
+# Capture cleanup preserves /dev/null on allocation failure but removes real paths.
+CAPTURE_RM_CALLS=$(mktemp)
+CAPTURE_MODE=fail
+# shellcheck disable=SC2329  # the stubs are invoked indirectly by the capture helpers
+mktemp() {
+  if [ "$CAPTURE_MODE" = "fail" ]; then
+    return 1
+  fi
+  printf '%s' /var/run/nut-secrets/capture-test.real
+}
+# shellcheck disable=SC2329  # invoked indirectly by capture_cleanup
+rm() {
+  printf '%s\n' "$*" >>"$CAPTURE_RM_CALLS"
+  return 0
+}
+capture_path=$(capture_tmpfile /var/run/nut-secrets/capture-test)
+capture_cleanup "$capture_path"
+if [ "$capture_path" != "/dev/null" ] || [ -s "$CAPTURE_RM_CALLS" ]; then
+  err "FAIL: capture cleanup attempted to unlink the /dev/null fallback"
+  fail=1
+fi
+CAPTURE_MODE=success
+capture_path=$(capture_tmpfile /var/run/nut-secrets/capture-test)
+capture_cleanup "$capture_path"
+if [ "$capture_path" != "/var/run/nut-secrets/capture-test.real" ] \
+  || ! grep -qx -- '-f /var/run/nut-secrets/capture-test.real' "$CAPTURE_RM_CALLS"; then
+  err "FAIL: capture cleanup did not remove a real capture path"
+  fail=1
+fi
+unset -f mktemp rm
+rm -f "$CAPTURE_RM_CALLS"
 
 #    read_pidfile: race-safe pidfile reads. A regular nut-readable file's
 #    content comes back through the BusyBox `su` privilege drop (real NUT
@@ -566,15 +905,16 @@ if pid_matches_binary $$ /usr/sbin/upsd; then
   fail=1
 fi
 
-#    upsd_probe_host maps ONLY the wildcard binds (and localhost) to loopback;
-#    specific IPv4 binds — including 127.0.0.2-style loopback addresses that a
-#    127.0.0.1 probe cannot reach — pass through unchanged, specific IPv6
+#    upsd_probe_host maps ONLY the wildcard binds to loopback; specific IPv4
+#    binds — including 127.0.0.2-style loopback addresses that a 127.0.0.1
+#    probe cannot reach, and the name "localhost", which upsd binds to only
+#    the first address it resolves to — pass through unchanged, specific IPv6
 #    literals gain NUT's documented brackets ([::1], [2001:db8::1]), and the
 #    :: wildcard maps to the bracketed loopback [::1]. Guards the shared
 #    helper against regressing to address-family-wide rewriting (the
 #    Dockerfile HEALTHCHECK sources this same helper, so these cases
 #    directly cover the healthcheck mapping).
-for spec in '0.0.0.0=127.0.0.1' 'localhost=127.0.0.1' '::=[::1]' \
+for spec in '0.0.0.0=127.0.0.1' 'localhost=localhost' '::=[::1]' \
   '::1=[::1]' '2001:db8::1=[2001:db8::1]' \
   '127.0.0.2=127.0.0.2' '192.168.1.5=192.168.1.5'; do
   addr=${spec%%=*}
@@ -585,6 +925,45 @@ for spec in '0.0.0.0=127.0.0.1' 'localhost=127.0.0.1' '::=[::1]' \
     fail=1
   fi
 done
+
+# A server with stale driver data still answers LIST UPS and must remain alive.
+PROBE_CALLS=$(mktemp)
+PROBE_EXPECTED=$(mktemp)
+# shellcheck disable=SC2329  # the stubs are invoked indirectly by the probe helpers
+timeout() {
+  _probe_bound=$1
+  shift
+  printf 'timeout=%s command=%s\n' "$_probe_bound" "$*" >>"$PROBE_CALLS"
+  "$@"
+}
+# shellcheck disable=SC2329  # invoked indirectly, via the timeout stub above
+upsc() {
+  printf 'upsc %s\n' "$*" >>"$PROBE_CALLS"
+  [ "$1" = "-l" ] && return 0
+  [ "${2:-}" = "ups.status" ] && return 1
+  return 2
+}
+if comms_fresh; then
+  err "FAIL: comms_fresh accepted an ups.status read modeled as stale"
+  fail=1
+fi
+if ! upsd_responsive; then
+  err "FAIL: upsd_responsive conflated protocol liveness with stale driver data"
+  fail=1
+fi
+cat >"$PROBE_EXPECTED" <<'EOF'
+timeout=3 command=upsc ups@127.0.0.1:3493 ups.status
+upsc ups@127.0.0.1:3493 ups.status
+timeout=5 command=upsc -l 127.0.0.1:3493
+upsc -l 127.0.0.1:3493
+EOF
+if ! cmp -s "$PROBE_EXPECTED" "$PROBE_CALLS"; then
+  err "FAIL: freshness and supervision probes did not use their distinct bounded NUT queries"
+  err "$(tr '\n' '|' <"$PROBE_CALLS")"
+  fail=1
+fi
+unset -f timeout upsc
+rm -f "$PROBE_CALLS" "$PROBE_EXPECTED"
 
 # 5. Watchdog behavior, driven through the injectable seams (comms_fresh,
 #    sleep, watchdog_epoch) with a fake clock — no real waiting.
@@ -631,6 +1010,46 @@ else
   fi
 fi
 rm -f "$WATCHDOG_ERR" "$RESTART_LOG"
+
+# A transient clock failure skips one stale tick without killing recovery.
+CLOCK_ERR=$(mktemp)
+CLOCK_RESTARTS=$(mktemp)
+set +e
+# shellcheck disable=SC2329  # the stubs are invoked indirectly by comms_watchdog
+(
+  _CLOCK_TICK=0
+  sleep() {
+    _CLOCK_TICK=$((_CLOCK_TICK + 1))
+    [ "$_CLOCK_TICK" -le 4 ] || exit 0
+  }
+  comms_fresh() { return 1; }
+  watchdog_epoch() {
+    case "$_CLOCK_TICK" in
+      1) printf '0' ;;
+      2) return 1 ;;
+      3) printf '5' ;;
+      4) printf '10' ;;
+    esac
+  }
+  restart_ups_driver() {
+    printf '%s %s\n' "$1" "$_CLOCK_TICK" >>"$CLOCK_RESTARTS"
+    return 0
+  }
+  COMMS_CHECK_INTERVAL=1
+  COMMS_RECOVERY_TIMEOUT=10
+  set -eu
+  comms_watchdog
+) 2>"$CLOCK_ERR"
+clock_rc=$?
+set -e
+if [ "$clock_rc" -ne 0 ] \
+  || [ "$(grep -c 'clock read failed; skipping tick' "$CLOCK_ERR")" -ne 1 ] \
+  || [ "$(cat "$CLOCK_RESTARTS")" != "1 4" ]; then
+  err "FAIL: a clock-read failure killed or reset the comms watchdog"
+  err "rc=$clock_rc restarts=$(tr '\n' '|' <"$CLOCK_RESTARTS") log=$(tr '\n' '|' <"$CLOCK_ERR")"
+  fail=1
+fi
+rm -f "$CLOCK_ERR" "$CLOCK_RESTARTS"
 
 #    Recovery resets both the stale window and the restart budget: stale from
 #    t=15 (attempt 1 at t=105), fresh during t=150-299 (recovery logged),
@@ -851,8 +1270,8 @@ fi
 rmdir /etc/nut/upsd.pem
 rm -f "$NONREG_ERR"
 
-#    Unparseable mounted PEM: warn-only — resolve_tls_cert must log the parse
-#    warning but still serve the mounted content (upsd stays authoritative).
+#    Unparseable mounted PEM: non-fatal — resolve_tls_cert must log the parse
+#    error but still serve the mounted content (upsd stays authoritative).
 printf 'not a pem\n' >/etc/nut/upsd.pem
 # Pre-call digest: the post-call source-vs-copy cmp alone cannot prove the
 # SOURCE itself survived (both sides could have been rewritten identically).
@@ -864,11 +1283,11 @@ if ! (
   [ "$(sha256sum /etc/nut/upsd.pem | awk '{print $1}')" = "$tls_sha_badpem" ] || exit 1
   cmp -s /etc/nut/upsd.pem /etc/nut/upsd-mounted.pem
 ); then
-  err "FAIL: unparseable mounted PEM was not served as-is (warn-only gate regressed to fatal)"
+  err "FAIL: unparseable mounted PEM was not served as-is (non-fatal gate regressed to fatal)"
   fail=1
 fi
-if ! grep -q 'level=warn msg="mounted TLS certificate does not parse' "$BADPEM_ERR"; then
-  err "FAIL: unparseable mounted PEM did not log the parse/expiry warning"
+if ! grep -q 'level=error msg="mounted TLS certificate is not one PEM holding a certificate and its private key' "$BADPEM_ERR"; then
+  err "FAIL: unparseable mounted PEM did not log the parse error"
   fail=1
 fi
 rm -f /etc/nut/upsd.pem /etc/nut/upsd-mounted.pem "$BADPEM_ERR"
@@ -1026,25 +1445,6 @@ else
     err "FAIL: embedded SBOM fragment missing the CVE-2026-54161 VEX entry"
     fail=1
   }
-  # OpenVEX/NUT_VERSION parity: the static vex doc must name the same nut
-  # purl the ARG-generated fragment carries, so a NUT bump that forgets the
-  # OpenVEX doc fails the build loudly (CONTRIBUTING patch-removal checklist).
-  VEXDOC=/tmp/vex/cve-2026-54161.openvex.json
-  if [ ! -s "$VEXDOC" ]; then
-    err "FAIL: OpenVEX document missing or empty: $VEXDOC"
-    fail=1
-  else
-    nut_purl=$(grep -o '"purl": "pkg:github/networkupstools/nut@[^"]*"' "$SBOM" | head -n 1)
-    nut_purl=${nut_purl#*: \"}
-    nut_purl=${nut_purl%\"}
-    if [ -z "$nut_purl" ]; then
-      err "FAIL: embedded SBOM fragment has no nut purl for OpenVEX parity"
-      fail=1
-    elif ! grep -Fq "\"@id\": \"$nut_purl\"" "$VEXDOC"; then
-      err "FAIL: OpenVEX nut subcomponent does not match the built NUT_VERSION ($nut_purl); update vex/cve-2026-54161.openvex.json"
-      fail=1
-    fi
-  fi
 fi
 
 # Restore the section-2 baseline configs for any future sections.

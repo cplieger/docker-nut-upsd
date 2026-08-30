@@ -1,6 +1,8 @@
 #!/bin/sh
 # lifecycle.sh — NUT service lifecycle utility functions.
-# Sourced by entrypoint.sh; not executed directly.
+# Sourced, never executed. The Dockerfile HEALTHCHECK sources this file
+# ALONE, so the top level must only DEFINE: no call into another helper,
+# nothing that runs at source time, no reliance on the caller's `set -eu`.
 
 readonly PIDFILE_POLL_INTERVAL="0.1"
 readonly PIDFILE_POLL_MAX=50 # nominal wait = POLL_MAX × POLL_INTERVAL = 5s (each poll's pidfile read adds its own <=1s bound; see read_pidfile)
@@ -9,17 +11,19 @@ readonly DBUS_PROBE_REPLY_TIMEOUT_MS=3000
 # worst case, inside Docker's default 10s stop budget before SIGKILL.
 readonly STOP_CMD_TIMEOUT=3
 
-# Shared temp-file capture lifecycle for bounded subprocess output. Capture
-# via a regular file, never $(): a TERM-ignoring child can hold a pipe's
-# write end open past timeout's signal and block the reader forever; a
-# regular-file read never blocks. Files live in the root-only
-# /var/run/nut-secrets (symlink hardening); if mktemp fails the caller still
-# runs with output discarded to /dev/null. The prefixes are constants because
-# the entrypoint's leaked-temp cleanup globs "$PREFIX".* — a literal respelled
+# Shared temp-file capture lifecycle for bounded subprocess output. Capture via
+# a regular file, never $(): a TERM-ignoring child can hold a pipe's write end
+# open past timeout's signal and block the reader forever. Files live in the
+# root-only /var/run/nut-secrets; if mktemp fails the caller still runs with
+# output discarded to /dev/null. The prefixes are constants because the
+# entrypoint's leaked-temp cleanup globs "$PREFIX".* — a literal respelled
 # there would silently stop matching if a label changed (same rationale as the
 # password.sh cache-path constants that cleanup already uses).
 readonly STOP_CMD_CAPTURE_PREFIX=/var/run/nut-secrets/stop-cmd
 readonly WD_RESTART_CAPTURE_PREFIX=/var/run/nut-secrets/wd-restart
+# upsmon's POWERDOWNFLAG, for the same reason: the generator writes the
+# directive and three lifecycle paths read the flag, so the path has one owner.
+readonly POWERDOWNFLAG_FILE=/var/run/nut-secrets/killpower
 capture_tmpfile() {
   mktemp "$1.XXXXXX" 2>/dev/null || printf '/dev/null'
 }
@@ -27,7 +31,10 @@ capture_head() {
   head -c 512 "$1" 2>/dev/null || true
 }
 capture_cleanup() {
-  [ "$1" = "/dev/null" ] || rm -f "$1"
+  # Deliberately status-neutral: both callers publish a best-effort contract an
+  # unlink failure must not abort (the pidfile unlink warns instead — that state
+  # is read by the next bounce, this temp file is not).
+  [ "$1" = "/dev/null" ] || rm -f "$1" 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
@@ -42,12 +49,9 @@ capture_cleanup() {
 stop_nut_cmd() {
   _stop_label="$1"
   shift
-  # Capture via temp file, not $(): a TERM-ignoring control client would keep
-  # the pipe's write end open past timeout's TERM and hold PID 1 inside the
-  # signal trap indefinitely, defeating this function's stated purpose (Docker's
-  # 10s SIGKILL as the only backstop). A regular-file read never blocks. Use
-  # KILL at the deadline because timeout's default TERM can itself wait forever
-  # for a TERM-ignoring client; this keeps the documented 3x3=9s budget hard.
+  # -s KILL at the deadline, not TERM: a TERM-ignoring control client would
+  # hold PID 1 inside the signal trap past it (Docker's 10s SIGKILL the only
+  # backstop) and stretch the 3x3=9s budget. Capture helpers own file-not-$().
   _stop_out_file=$(capture_tmpfile "$STOP_CMD_CAPTURE_PREFIX")
   if timeout -s KILL "$STOP_CMD_TIMEOUT" "$@" >"$_stop_out_file" 2>&1; then
     :
@@ -73,17 +77,13 @@ stop_services() {
 }
 
 # read_pidfile: bounded, race-safe read of a NUT pidfile from the nut-writable
-# /var/run/nut. Refuses a path that is a symlink or not a regular file (a
-# legitimate NUT pidfile is a small regular file), opens it only after
-# dropping to the unprivileged nut user (BusyBox su: Alpine resolves setpriv
-# to the BusyBox applet, which does not implement --reuid/--regid) so a
-# symlink raced in between the check and the open cannot leak a root-only
-# file's content across the nut-to-root confidentiality boundary, and
-# hard-bounds the read (timeout -s KILL 1) so a raced FIFO or other special
-# file cannot block the caller. The path travels as a positional parameter
-# ($1), never interpolated into the -c string, so a crafted filename cannot
-# inject shell syntax. Prints the first 64 bytes (far beyond any real PID)
-# or nothing; always returns 0.
+# /var/run/nut. Refuses symlinks and non-regular files, prints at most 64 bytes
+# or nothing, and always returns 0. Opens the file only after dropping to the
+# unprivileged nut user, so a symlink raced in after the check cannot leak
+# root-only content (BusyBox su: Alpine's setpriv applet implements no
+# --reuid/--regid). The hard bound (timeout -s KILL 1) keeps a raced FIFO from
+# blocking the caller, and the path travels as a positional parameter, never
+# interpolated into the -c string.
 read_pidfile() {
   _rp_path=$1
   [ ! -L "$_rp_path" ] && [ -f "$_rp_path" ] || return 0
@@ -130,31 +130,28 @@ wait_for_pidfile() {
 # ---------------------------------------------------------------------------
 # USB comms recovery watchdog
 # ---------------------------------------------------------------------------
-# Devices like the CyberPower Elite PFC drop and re-establish their USB link on
-# their own firmware resets (NUT issue networkupstools/nut#1786). Each reset
-# re-enumerates the UPS to a NEW /dev/bus/usb node (a fresh device number =>
-# new minor, owned root:root by the kernel). The running driver — which dropped
-# to the unprivileged "nut" user after init — can neither see the new node
-# (unless the bus is bind-mounted live) nor open it (wrong group), so it sits
-# "Data stale" until the container is recreated. That is the flip-flop behind
-# the UPSDataAbsent alert. This watchdog detects sustained stale comms and
-# re-homes the driver onto the current node, recovering before the alert fires.
-# It REQUIRES the bus to be passed as a live bind mount plus a cgroup rule for
-# the USB major (c 189:* rmw) — see the README ("USB hotplug").
+# A UPS that resets its own USB link re-enumerates to a new root:root node
+# (NUT issue networkupstools/nut#1786) and the nut-user driver then sits "Data
+# stale" until the container is recreated. This watchdog detects sustained
+# stale comms and re-homes the driver onto the current node. The README ("USB
+# hotplug & comms recovery") owns the prerequisites and what an operator sees.
 
-# upsd_probe_host: host for the loopback protocol probes. upsd binds ONLY the
-# LISTEN address generated from API_ADDRESS (upsd.conf), so a specific bind
-# address must be probed at that address — probing 127.0.0.1 would fail
+# upsd_probe_host: host for the loopback protocol probes. upsd binds the LISTEN
+# address in upsd.conf, which is generated from API_ADDRESS unless
+# upsd.conf.user is mounted — then the operator owns it and must keep the two in
+# step (the README's override list). A specific bind address must therefore be
+# probed at that address — probing 127.0.0.1 would fail
 # permanently (driver bounced forever by the watchdog, container fatally
-# exited by the supervision loop). Only the wildcard binds (and the localhost
-# alias) map to loopback; every specific bind — including 127.0.0.2-style
-# loopback addresses, which a 127.0.0.1 probe cannot reach — passes through
-# and is probed exactly where upsd listens. Every IPv6 literal is bracketed
-# (the wildcard as [::1], specific addresses as [<addr>]) because NUT's
-# host:port syntax requires brackets around any colon-bearing host.
+# exited by the supervision loop). Only the wildcard binds map to loopback;
+# every specific bind passes through and is probed exactly where upsd listens
+# — 127.0.0.2-style loopback addresses, which a 127.0.0.1 probe cannot reach,
+# and "localhost", which upsd binds to the FIRST address the name resolves to
+# and warns as much, while upsc tries every resolved address. Every IPv6
+# literal is bracketed (the wildcard as [::1], specific addresses as [<addr>])
+# because NUT's host:port syntax requires brackets around any colon-bearing host.
 upsd_probe_host() {
-  case "${API_ADDRESS:-0.0.0.0}" in
-    0.0.0.0 | localhost) printf '127.0.0.1' ;;
+  case "$API_ADDRESS" in
+    0.0.0.0) printf '127.0.0.1' ;;
     ::) printf '[::1]' ;;
     *:*) printf '[%s]' "${API_ADDRESS}" ;;
     *) printf '%s' "${API_ADDRESS}" ;;
@@ -165,7 +162,7 @@ upsd_probe_host() {
 # stale/unreachable. upsc prints the requested variable on fresh data and an
 # error ("Data stale" / connection refused) otherwise.
 comms_fresh() {
-  timeout 3 upsc "${UPS_NAME}@$(upsd_probe_host):${API_PORT:-3493}" ups.status >/dev/null 2>&1
+  timeout 3 upsc "${UPS_NAME}@$(upsd_probe_host):${API_PORT}" ups.status >/dev/null 2>&1
 }
 
 # upsd_responsive: return 0 when upsd answers the NUT protocol (LIST UPS),
@@ -176,7 +173,7 @@ upsd_responsive() {
   # after up to 5s of foreground upsc — that 5s would push worst-case teardown
   # to 14s, past Docker's 10s stop budget (see STOP_CMD_TIMEOUT above).
   # The orphaned upsc self-terminates within its own 5s timeout.
-  timeout 5 upsc -l "$(upsd_probe_host):${API_PORT:-3493}" >/dev/null 2>&1 &
+  timeout 5 upsc -l "$(upsd_probe_host):${API_PORT}" >/dev/null 2>&1 &
   wait $!
 }
 
@@ -203,17 +200,13 @@ driver_binary() {
 }
 
 # pid_matches_binary PID BINARY: verify the live process PID is an instance of
-# BINARY. Prefers the kernel-truth /proc/<pid>/exe symlink — but a NUT daemon
-# setuid()s from root to nut WITHOUT exec-ing afterwards, which clears its
-# dumpable flag, and reading a non-dumpable process's exe link requires
-# CAP_SYS_PTRACE, which Docker's default capability set does not grant (even
-# to root). So when exe is unreadable, fall back to the world-readable
-# /proc/<pid>/comm, compared against the kernel-truncated (TASK_COMM_LEN = 15
-# chars) basename of BINARY. comm is self-reported (prctl PR_SET_NAME), so
-# the fallback is deliberately weaker: it still shields every distinctly-named
-# process (upsd, upsmon, PID 1) from a planted-PID confused-deputy kill, and a
-# compromised nut process renaming itself to the driver's comm only marks the
-# attacker's OWN process for the kill — no privilege gained.
+# BINARY. Prefers the kernel-truth /proc/<pid>/exe symlink; when exe is
+# unreadable, falls back to the world-readable /proc/<pid>/comm against the
+# truncated basename of BINARY. The cause of that fallback, and the threat
+# argument for it, are in CONTRIBUTING ("/proc/<pid>/exe is unreadable for the
+# NUT daemons"): a NUT daemon setuid()s without exec-ing, which clears its
+# dumpable flag. comm is self-reported, so the fallback is deliberately the
+# weaker of the two.
 pid_matches_binary() {
   _pm_pid=$1
   _pm_bin=$2
@@ -277,20 +270,19 @@ kill_stale_driver_from_pidfile() {
         "$UPS_NAME" "$_ksd_pid" "$(driver_binary)" >&2
     fi
   fi
-  rm -f "$_ksd_pf"
+  if ! rm -f "$_ksd_pf"; then
+    printf 'level=warn msg="comms watchdog could not drop the stale driver pidfile" ups=%s pidfile=%s\n' \
+      "$UPS_NAME" "$_ksd_pf" >&2
+  fi
 }
 
 # start_recovered_driver: bounded restart of the UPS driver with captured,
 # size-bounded output.
 start_recovered_driver() {
   # 90s > NUT's 75s default maxstartdelay, so timeout only fires on a genuine wedge.
-  # Capture via temp file, not $(): command substitution reads the pipe until
-  # EOF, and a wedged pre-daemonize driver grandchild keeps the write end open
-  # past timeout's TERM of upsdrvctl — blocking the watchdog subshell forever
-  # (exactly the wedge this timeout exists for). A regular-file read never
-  # blocks. -k 5 hard-kills a TERM-ignoring upsdrvctl like the boot path does.
-  # The temp file lives in the root-only /var/run/nut-secrets, consistent with
-  # the existing symlink-hardening rationale.
+  # -k 5 hard-kills a TERM-ignoring upsdrvctl as the boot path does. The
+  # write-end holder that makes the file capture necessary here is a wedged
+  # pre-daemonize driver grandchild. Capture helpers own file-not-$().
   _srd_out_file=$(capture_tmpfile "$WD_RESTART_CAPTURE_PREFIX")
   if timeout -k 5 90 /usr/sbin/upsdrvctl start "$UPS_NAME" >"$_srd_out_file" 2>&1; then
     printf 'level=info msg="comms watchdog driver restart issued" ups=%s\n' "$UPS_NAME" >&2
@@ -309,36 +301,31 @@ start_recovered_driver() {
 }
 
 # restart_ups_driver: re-home the driver onto the (possibly re-enumerated) USB
-# node. Runs as root (PID 1 lineage). Re-asserts the nut group on the bus so
-# the driver's own reconnect attempts can also open a freshly created
-# root:root node (the default 0664 node mode already grants the group rw),
-# then bounces the driver. The restart re-opens the device
-# while still root (upsdrvctl runs as root and the driver drops to nut only
-# AFTER opening), so it succeeds regardless of the new node's group. A wedged
-# driver is hard-killed by pidfile because `upsdrvctl stop` alone has been
-# observed to fail to reap it ("Stopping ...pid failed: Permission denied").
-# For non-USB transports (see usb_bus_required) the group re-assert is
-# skipped and the restart is a plain driver bounce.
+# node. Runs as root (PID 1 lineage): re-asserts the nut group on the bus so
+# the driver's own reconnect can open a freshly created root:root node, then
+# bounces the driver. upsdrvctl re-opens the device while still root and the
+# driver drops to nut only AFTER opening, which is why the restart succeeds
+# whatever the new node's group. A wedged driver is hard-killed by pidfile
+# because `upsdrvctl stop` alone has been observed to fail to reap it
+# ("Stopping ...pid failed: Permission denied"). Non-USB: no group re-assert.
 restart_ups_driver() {
   _attempt=${1:-1}
-  # Stand down only when a real host poweroff is in progress. upsmon
-  # (primary) writes POWERDOWNFLAG (/var/run/nut-secrets/killpower) on every FSD,
-  # including the log-only noop path (SHUTDOWN_ON_BATTERY_CRITICAL=false) where the
-  # host stays up and the container keeps running — gating on killpower alone would
-  # latch USB recovery OFF for the container's life. Requiring
-  # SHUTDOWN_ON_BATTERY_CRITICAL=true scopes the stand-down to the only case with a
-  # poweroff to protect (the flag is also cleared at entrypoint startup). The flag
-  # lives in the root-only nut-secrets dir so a compromised nut process cannot plant
-  # it and suppress recovery. Return non-zero so a stand-down is not counted
-  # as a restart attempt by comms_watchdog.
-  if [ "${SHUTDOWN_ON_BATTERY_CRITICAL:-false}" = "true" ] && [ -e /var/run/nut-secrets/killpower ]; then
+  # Stand down only when a real host poweroff is in progress. upsmon (primary)
+  # writes POWERDOWNFLAG on EVERY FSD, including the log-only noop path, so
+  # gating on the flag alone would latch USB recovery OFF for the container's
+  # life. In the default configuration the container is EXITING from that point
+  # (upsmon's parent runs SHUTDOWNCMD and exits 0), so the conjunct's live case
+  # is a mounted upsmon.conf.user that keeps the generated flag path with a
+  # non-poweroff SHUTDOWNCMD. generate-config.sh's POWERDOWNFLAG directive owns
+  # who touches the flag. Return non-zero so a stand-down is not counted.
+  if [ "${SHUTDOWN_ON_BATTERY_CRITICAL:-false}" = "true" ] && [ -e "$POWERDOWNFLAG_FILE" ]; then
     printf 'level=warn msg="comms watchdog standing down; forced shutdown (killpower) in progress" ups=%s\n' "$UPS_NAME" >&2
     return 1
   fi
   # From the FINAL fast retry onward (attempt >= COMMS_FAST_RETRIES) the UPS is
   # likely genuinely absent or the driver unstartable, so escalate to error --
-  # deliberately ON the last fast attempt so the error still lands inside the
-  # UPSDataAbsent alert window (see README 'USB hotplug & comms recovery').
+  # deliberately ON the last fast attempt, not after it (see README 'USB hotplug
+  # & comms recovery' for sizing this against an alert window).
   if [ "$_attempt" -ge "$COMMS_FAST_RETRIES" ]; then
     printf 'level=error msg="comms watchdog still restarting driver; UPS likely absent or driver unstartable" ups=%s attempt=%d\n' "$UPS_NAME" "$_attempt" >&2
   else
@@ -358,18 +345,13 @@ restart_ups_driver() {
 }
 
 # comms_watchdog: probe upsd every COMMS_CHECK_INTERVAL seconds and re-home the
-# driver after sustained stale comms, in two stages. Stage 1 retries every
-# COMMS_RECOVERY_TIMEOUT for the first COMMS_FAST_RETRIES attempts so a transient
-# USB re-enumeration self-heals fast — inside the upstream UPSDataAbsent alert
-# window (keep COMMS_FAST_RETRIES x COMMS_RECOVERY_TIMEOUT <= that window; default
-# 3x90s = 4.5m vs the 5m alert). Stage 2 (once fast retries are exhausted) backs
-# off to COMMS_RECOVERY_TIMEOUT x COMMS_BACKOFF_FACTOR and escalates to error, so a
-# genuinely-absent UPS stops thrashing host USB perms / flooding logs while a
-# sustained outage stays visible and still self-heals if the UPS returns.
-# Staleness is monotonic elapsed time since the FIRST stale probe of the current
-# window (via watchdog_epoch), not a sum of check intervals — each stale probe
-# can spend up to 3s inside upsc's timeout, and interval-summing let that
-# stretch the real recovery window ~20% past the configured budget.
+# driver after sustained stale comms, in two stages: COMMS_FAST_RETRIES fast
+# attempts, then a COMMS_BACKOFF_FACTOR-multiplied threshold with the log at
+# error, so a genuinely-absent UPS stops thrashing host USB perms while staying
+# visible. Each window is monotonic elapsed time since its first stale probe
+# (watchdog_epoch, not summed intervals), re-armed only at the first stale probe
+# AFTER a bounce -- so one fast retry costs COMMS_RECOVERY_TIMEOUT plus up to one
+# check interval plus the bounce itself. README "USB hotplug & comms recovery" sizes it.
 comms_watchdog() {
   : "${UPS_NAME:?comms_watchdog requires UPS_NAME}"
   : "${UPS_DRIVER:?comms_watchdog requires UPS_DRIVER}"
@@ -435,21 +417,41 @@ comms_watchdog() {
 # D-Bus poweroff-path liveness probe
 # ---------------------------------------------------------------------------
 # With SHUTDOWN_ON_BATTERY_CRITICAL=true the poweroff path (upsmon SHUTDOWNCMD
-# -> nut-shutdown.sh -> D-Bus PowerOff) is otherwise checked once at startup
-# and first exercised during a real forced shutdown — a D-Bus mount that broke
-# after boot would surface exactly when it can no longer be fixed. This probe
-# re-checks reachability every DBUS_PROBE_INTERVAL seconds (0 disables) and
-# logs level=error while the path is broken, so the UPSPowerOffPathBroken
-# alert (alerts.yaml) can fire before an outage; level=info once on recovery.
+# -> nut-shutdown.sh -> D-Bus PowerOff) is otherwise first exercised during a
+# real forced shutdown — a mount that broke after boot would surface exactly
+# when it can no longer be fixed. The README ("Alerting") owns the cadence and
+# the operator-facing contract.
 
 # dbus_poweroff_path_ok: return 0 when the host D-Bus socket is mounted and
-# logind answers a side-effect-free Peer.Ping on the exact destination
-# nut-shutdown.sh will call during a forced shutdown.
+# logind's own CanPowerOff answers yes. That method carries the same polkit
+# action as the PowerOff nut-shutdown.sh calls and has no side effect, where a
+# Peer.Ping is answered before object resolution and proves only that some
+# process owns the name. `no` and `challenge` come back as SUCCESSFUL method
+# returns, so the reply STRING is the verdict and never dbus-send's exit status;
+# `challenge` is a refusal here because the real call is non-interactive. The
+# reply text is left in _dbus_detail for the caller's log line.
 dbus_poweroff_path_ok() {
-  [ -S /run/dbus/system_bus_socket ] || return 1
-  timeout 5 dbus-send --system --print-reply --reply-timeout="$DBUS_PROBE_REPLY_TIMEOUT_MS" \
+  _dbus_detail=""
+  [ -S /run/dbus/system_bus_socket ] || {
+    _dbus_detail="socket missing"
+    return 1
+  }
+  # $() capture is safe here for the same reason nut-shutdown.sh gives: dbus-send
+  # spawns no fd-holding grandchildren.
+  _dbus_reply=$(timeout 5 dbus-send --system --print-reply \
+    --reply-timeout="$DBUS_PROBE_REPLY_TIMEOUT_MS" \
     --dest=org.freedesktop.login1 /org/freedesktop/login1 \
-    org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1
+    org.freedesktop.login1.Manager.CanPowerOff 2>&1) || {
+    _dbus_detail="$_dbus_reply"
+    return 1
+  }
+  case "$_dbus_reply" in
+    *'string "yes"'*) return 0 ;;
+    *)
+      _dbus_detail="$_dbus_reply"
+      return 1
+      ;;
+  esac
 }
 
 # dbus_liveness_probe: background loop started by the entrypoint when host
@@ -467,7 +469,8 @@ dbus_liveness_probe() {
       fi
       _dbus_broken=0
     else
-      printf 'level=error msg="D-Bus poweroff path unreachable; host poweroff on battery critical would fail" socket=/run/dbus/system_bus_socket\n' >&2
+      printf 'level=error msg="D-Bus poweroff path unreachable; host poweroff on battery critical would fail" socket=/run/dbus/system_bus_socket detail="%s"\n' \
+        "$(log_value "${_dbus_detail:-}")" >&2
       _dbus_broken=1
     fi
     sleep "$DBUS_PROBE_INTERVAL" || true

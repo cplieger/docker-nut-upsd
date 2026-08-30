@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# The shutdown helper's retry state machine: call count, early success, retry
+# records, and sleeps between failed attempts.
+set -u
+
+# shellcheck source-path=SCRIPTDIR
+. "$(dirname -- "$0")/lib.sh"
+new_workdir >/dev/null
+
+[ "$ENTRYPOINT" = "$REPO_ROOT/entrypoint.sh" ] && ENTRYPOINT="$REPO_ROOT/nut-shutdown.sh"
+if [ ! -f "$ENTRYPOINT" ] || [ ! -r "$ENTRYPOINT" ]; then
+  printf 'harness error: ENTRYPOINT is not a readable file: %s\n' "$ENTRYPOINT" >&2
+  exit 1
+fi
+
+HOST_TIMEOUT=$(command -v timeout) || exit 1
+BIN="$WORK/bin"
+mkdir "$BIN"
+DBUS_CALLS="$WORK/dbus.calls"
+TIMEOUT_CALLS="$WORK/timeout.calls"
+SLEEP_CALLS="$WORK/sleep.calls"
+RM_CALLS="$WORK/rm.calls"
+DBUS_RESULTS="$WORK/dbus.results"
+ERR="$WORK/stderr"
+OUT="$WORK/stdout"
+DBUS_ARGS='--system --print-reply --reply-timeout=3000 --dest=org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager.PowerOff boolean:false'
+
+cat >"$BIN/timeout" <<'EOF'
+#!/bin/sh
+[ "$#" -ge 2 ] && [ "$1" = 5 ] || exit 96
+printf '%s\n' "$*" >>"$TIMEOUT_CALLS"
+shift
+exec "$@"
+EOF
+cat >"$BIN/dbus-send" <<'EOF'
+#!/bin/sh
+[ "$*" = "$DBUS_ARGS" ] || exit 95
+printf '%s\n' "$*" >>"$DBUS_CALLS"
+_call=$(wc -l <"$DBUS_CALLS")
+_result=$(sed -n "${_call}p" "$DBUS_RESULTS")
+case "$_result" in
+  success) printf 'method return\n'; exit 0 ;;
+  failure) printf 'D-Bus refused request\n' >&2; exit 1 ;;
+  *) printf 'unexpected D-Bus call %s\n' "$_call" >&2; exit 94 ;;
+esac
+EOF
+cat >"$BIN/sleep" <<'EOF'
+#!/bin/sh
+[ "$#" -eq 1 ] && [ "$1" = 2 ] || exit 93
+printf '%s\n' "$1" >>"$SLEEP_CALLS"
+EOF
+cat >"$BIN/rm" <<'EOF'
+#!/bin/sh
+[ "$#" -eq 2 ] && [ "$1" = -f ] && [ "$2" = /var/run/nut-secrets/killpower ] || exit 92
+printf '%s\n' "$*" >>"$RM_CALLS"
+EOF
+chmod +x "$BIN/timeout" "$BIN/dbus-send" "$BIN/sleep" "$BIN/rm"
+
+run_shutdown() {
+  : >"$DBUS_CALLS"
+  : >"$TIMEOUT_CALLS"
+  : >"$SLEEP_CALLS"
+  : >"$RM_CALLS"
+  printf '%s\n' "$@" >"$DBUS_RESULTS"
+  RUN_RC=0
+  "$HOST_TIMEOUT" 3 env PATH="$BIN:$PATH" DBUS_CALLS="$DBUS_CALLS" \
+    TIMEOUT_CALLS="$TIMEOUT_CALLS" SLEEP_CALLS="$SLEEP_CALLS" \
+    RM_CALLS="$RM_CALLS" DBUS_RESULTS="$DBUS_RESULTS" DBUS_ARGS="$DBUS_ARGS" \
+    sh "$ENTRYPOINT" >"$OUT" 2>"$ERR" || RUN_RC=$?
+}
+
+run_shutdown success
+if [ "$RUN_RC" -eq 0 ] \
+  && [ "$(wc -l <"$DBUS_CALLS")" -eq 1 ] \
+  && [ "$(wc -l <"$TIMEOUT_CALLS")" -eq 1 ] \
+  && [ ! -s "$SLEEP_CALLS" ] \
+  && [ ! -s "$RM_CALLS" ] \
+  && grep -qF 'host poweroff dispatched via D-Bus" attempt=1' "$ERR" \
+  && ! grep -qF 'retrying' "$ERR"; then
+  ok 'first-attempt success exits after one bounded D-Bus call without retrying'
+else
+  no 'first-attempt success' "rc=$RUN_RC dbus=$(wc -l <"$DBUS_CALLS") timeout=$(wc -l <"$TIMEOUT_CALLS") sleeps=$(wc -l <"$SLEEP_CALLS"); stderr: $(tr '\n' ' ' <"$ERR")"
+fi
+
+run_shutdown failure success
+if [ "$RUN_RC" -eq 0 ] \
+  && [ "$(wc -l <"$DBUS_CALLS")" -eq 2 ] \
+  && [ "$(wc -l <"$TIMEOUT_CALLS")" -eq 2 ] \
+  && [ "$(cat "$SLEEP_CALLS")" = 2 ] \
+  && [ ! -s "$RM_CALLS" ] \
+  && [ "$(grep -cF 'D-Bus poweroff failed, retrying" attempt=1' "$ERR")" -eq 1 ] \
+  && grep -qF 'host poweroff dispatched via D-Bus" attempt=2' "$ERR"; then
+  ok 'a transient failure records attempt 1, sleeps once, and stops on attempt 2 success'
+else
+  no 'failure then success' "rc=$RUN_RC dbus=$(wc -l <"$DBUS_CALLS") timeout=$(wc -l <"$TIMEOUT_CALLS") sleeps=$(tr '\n' ' ' <"$SLEEP_CALLS"); stderr: $(tr '\n' ' ' <"$ERR")"
+fi
+
+run_shutdown failure failure failure
+if [ "$RUN_RC" -eq 1 ] \
+  && [ "$(wc -l <"$DBUS_CALLS")" -eq 3 ] \
+  && [ "$(wc -l <"$TIMEOUT_CALLS")" -eq 3 ] \
+  && [ "$(wc -l <"$SLEEP_CALLS")" -eq 2 ] \
+  && [ "$(grep -cF 'D-Bus poweroff failed, retrying"' "$ERR")" -eq 2 ] \
+  && grep -qF 'failed after 3 attempts' "$ERR"; then
+  ok 'three failures make exactly three bounded calls, sleep only between them, and exit 1'
+else
+  no 'three failures' "rc=$RUN_RC dbus=$(wc -l <"$DBUS_CALLS") timeout=$(wc -l <"$TIMEOUT_CALLS") sleeps=$(wc -l <"$SLEEP_CALLS"); stderr: $(tr '\n' ' ' <"$ERR")"
+fi
+
+report
