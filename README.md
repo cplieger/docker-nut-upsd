@@ -7,6 +7,7 @@
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/docker-nut-upsd/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/docker-nut-upsd)
 [![SBOM](https://img.shields.io/badge/SBOM-SPDX-1D4ED8)](https://github.com/cplieger/docker-nut-upsd/releases)
 
+<!-- hub-overview BEGIN -->
 Monitor your UPS and let networked machines shut down gracefully during power outages.
 
 ## What it does
@@ -30,6 +31,7 @@ The container runs the Network UPS Tools (NUT) upsd daemon in Alpine Linux. The 
 - **Single container replaces three daemons**: bundles the NUT driver, `upsd`, and `upsmon` so you deploy one service instead of three
 - **Minimal Alpine base**: only the packages NUT needs, nothing that widens the attack surface
 - **Compiled from upstream sources**: NUT, libmodbus, and net-snmp built from latest upstream, not distro packages; see [Security](#security) for the resulting CVE posture
+<!-- hub-overview END -->
 
 ## Quick start
 
