@@ -12,10 +12,10 @@ readonly DBUS_PROBE_REPLY_TIMEOUT_MS=3000
 readonly STOP_CMD_TIMEOUT=3
 
 # Shared temp-file capture lifecycle for bounded subprocess output. Capture via
-# a regular file, never $(): a TERM-ignoring child can hold a pipe's write end
-# open past timeout's signal and block the reader forever. Files live in the
-# root-only /var/run/nut-secrets; if mktemp fails the caller still runs with
-# output discarded to /dev/null. The prefixes are constants because the
+# a regular file, never $(): a grandchild timeout never signals can hold a
+# pipe's write end open past the bound and block the reader forever. Files live
+# in the root-only /var/run/nut-secrets; if mktemp fails the caller still runs
+# with output discarded to /dev/null. The prefixes are constants because the
 # entrypoint's leaked-temp cleanup globs "$PREFIX".* — a literal respelled
 # there would silently stop matching if a label changed (same rationale as the
 # password.sh cache-path constants that cleanup already uses).
@@ -136,19 +136,13 @@ wait_for_pidfile() {
 # stale comms and re-homes the driver onto the current node. The README ("USB
 # hotplug & comms recovery") owns the prerequisites and what an operator sees.
 
-# upsd_probe_host: host for the loopback protocol probes. upsd binds the LISTEN
-# address in upsd.conf, which is generated from API_ADDRESS unless
-# upsd.conf.user is mounted — then the operator owns it and must keep the two in
-# step (the README's override list). A specific bind address must therefore be
-# probed at that address — probing 127.0.0.1 would fail
-# permanently (driver bounced forever by the watchdog, container fatally
-# exited by the supervision loop). Only the wildcard binds map to loopback;
-# every specific bind passes through and is probed exactly where upsd listens
-# — 127.0.0.2-style loopback addresses, which a 127.0.0.1 probe cannot reach,
-# and "localhost", which upsd binds to the FIRST address the name resolves to
-# and warns as much, while upsc tries every resolved address. Every IPv6
-# literal is bracketed (the wildcard as [::1], specific addresses as [<addr>])
-# because NUT's host:port syntax requires brackets around any colon-bearing host.
+# upsd_probe_host: the host the loopback protocol probes must use.
+# Only the wildcard binds map to loopback; a specific bind is probed
+# where upsd actually listens, because a 127.0.0.1 probe of it would
+# fail permanently and the watchdog would bounce the driver forever.
+# "localhost" is a specific bind: upsd binds the FIRST resolved
+# address while upsc tries every one. Colon-bearing hosts are
+# bracketed, as NUT's host:port syntax requires.
 upsd_probe_host() {
   case "$API_ADDRESS" in
     0.0.0.0) printf '127.0.0.1' ;;
@@ -162,7 +156,7 @@ upsd_probe_host() {
 # stale/unreachable. upsc prints the requested variable on fresh data and an
 # error ("Data stale" / connection refused) otherwise.
 comms_fresh() {
-  timeout 3 upsc "${UPS_NAME}@$(upsd_probe_host):${API_PORT}" ups.status >/dev/null 2>&1
+  timeout 3 upsc "${UPS_NAME}@$(upsd_probe_host):${API_PORT}" ups.status
 }
 
 # upsd_responsive: return 0 when upsd answers the NUT protocol (LIST UPS),
@@ -174,7 +168,7 @@ upsd_responsive() {
   # to 14s, past Docker's 10s stop budget (see STOP_CMD_TIMEOUT above).
   # The orphaned upsc self-terminates within its own 5s timeout.
   timeout 5 upsc -l "$(upsd_probe_host):${API_PORT}" >/dev/null 2>&1 &
-  wait $!
+  wait "$!"
 }
 
 # watchdog_epoch: monotonic seconds since boot (/proc/uptime), so an NTP clock
@@ -231,9 +225,6 @@ kill_stale_driver_from_pidfile() {
   _ksd_pf=$1
   # Read the PID once: re-cat'ing after `upsdrvctl stop` risks acting on a
   # pidfile whose process already exited (and whose PID may have been reused).
-  # The pidfile lives in the nut-writable /var/run/nut: read_pidfile caps the
-  # bytes root will ingest/log, refuses symlinks/special files, and drops to
-  # nut before opening so a raced symlink cannot leak root-only content.
   _ksd_pid=$(read_pidfile "$_ksd_pf")
   # Confused-deputy guard: the pidfile lives in the nut-writable /var/run/nut,
   # so a compromised nut process can plant an arbitrary PID (1, upsmon, or
@@ -279,10 +270,11 @@ kill_stale_driver_from_pidfile() {
 # start_recovered_driver: bounded restart of the UPS driver with captured,
 # size-bounded output.
 start_recovered_driver() {
-  # 90s > NUT's 75s default maxstartdelay, so timeout only fires on a genuine wedge.
-  # -k 5 hard-kills a TERM-ignoring upsdrvctl as the boot path does. The
-  # write-end holder that makes the file capture necessary here is a wedged
-  # pre-daemonize driver grandchild. Capture helpers own file-not-$().
+  # This 90s outer bound catches upsdrvctl itself wedging. At NUT defaults,
+  # upsdrvctl bounds this one section with maxstartdelay and exits non-zero if
+  # it never starts. A mounted section can raise maxstartdelay/maxretry beyond
+  # 90s and make a healthy configuration report restart failure; -k 5 still
+  # hard-kills a TERM-ignoring upsdrvctl. Capture helpers own file-not-$().
   _srd_out_file=$(capture_tmpfile "$WD_RESTART_CAPTURE_PREFIX")
   if timeout -k 5 90 /usr/sbin/upsdrvctl start "$UPS_NAME" >"$_srd_out_file" 2>&1; then
     printf 'level=info msg="comms watchdog driver restart issued" ups=%s\n' "$UPS_NAME" >&2
@@ -305,9 +297,7 @@ start_recovered_driver() {
 # the driver's own reconnect can open a freshly created root:root node, then
 # bounces the driver. upsdrvctl re-opens the device while still root and the
 # driver drops to nut only AFTER opening, which is why the restart succeeds
-# whatever the new node's group. A wedged driver is hard-killed by pidfile
-# because `upsdrvctl stop` alone has been observed to fail to reap it
-# ("Stopping ...pid failed: Permission denied"). Non-USB: no group re-assert.
+# whatever the new node's group. Non-USB: no group re-assert.
 restart_ups_driver() {
   _attempt=${1:-1}
   # Stand down only when a real host poweroff is in progress. upsmon (primary)
@@ -367,7 +357,7 @@ comms_watchdog() {
   # not silently terminate the loop and disable USB recovery for the container's life.
   while true; do
     sleep "$COMMS_CHECK_INTERVAL" || true
-    if comms_fresh; then
+    if comms_fresh >/dev/null 2>&1; then
       if [ "$_restarts" -gt 0 ]; then
         # Total outage = elapsed since the FIRST stale probe of the outage,
         # not the last post-restart window (_stale resets on every bounce).
@@ -436,8 +426,8 @@ dbus_poweroff_path_ok() {
     _dbus_detail="socket missing"
     return 1
   }
-  # $() capture is safe here for the same reason nut-shutdown.sh gives: dbus-send
-  # spawns no fd-holding grandchildren.
+  # dbus-send spawns no fd-holding grandchildren, so this capture cannot wait
+  # past the bounded command.
   _dbus_reply=$(timeout 5 dbus-send --system --print-reply \
     --reply-timeout="$DBUS_PROBE_REPLY_TIMEOUT_MS" \
     --dest=org.freedesktop.login1 /org/freedesktop/login1 \

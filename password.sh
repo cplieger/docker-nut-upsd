@@ -82,7 +82,7 @@ _resolve_cached_password() {
   # mktemp in the root-only dir gives an O_EXCL, unpredictable temp name so
   # a compromised `nut` process cannot plant a symlink at the write target.
   if _rcp_tmp=$(mktemp "${_rcp_file}.tmp.XXXXXX" 2>/dev/null) \
-    && (umask 077 && printf '%s' "$_rcp_pw" >"$_rcp_tmp") && _replace_file "$_rcp_tmp" "$_rcp_file"; then
+    && printf '%s' "$_rcp_pw" >"$_rcp_tmp" && _replace_file "$_rcp_tmp" "$_rcp_file"; then
     printf 'level=info msg="generated %s; cached for intra-container restarts" path=%s\n' \
       "$_rcp_label" "$_rcp_file" >&2
   else
@@ -145,7 +145,7 @@ readonly TLS_CERT_DAYS=825
 # upsd fatalx()es on either half (server/netssl.c:715-722).
 tls_cert_parses() {
   openssl x509 -in "$1" -noout >/dev/null 2>&1 \
-    && openssl pkey -in "$1" -noout >/dev/null 2>&1
+    && openssl pkey -in "$1" -noout -passin pass: >/dev/null 2>&1
 }
 
 tls_cert_fresh() {
@@ -194,20 +194,24 @@ _generate_selfsigned_cert() {
     rm -f "$_gc_key" "$_gc_crt"
     return 1
   }
-  if _gc_err=$(openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
+  if ! _gc_err=$(openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
     -keyout "$_gc_key" -out "$_gc_crt" -days "$TLS_CERT_DAYS" -nodes \
-    -subj "/CN=nut-upsd" -addext "subjectAltName=DNS:nut-upsd" 2>&1 >/dev/null) \
-    && cat "$_gc_crt" "$_gc_key" >"$_gc_pem" \
-    && _replace_file "$_gc_pem" "$TLS_CERT_CACHE"; then
-    rm -f "$_gc_key" "$_gc_crt"
-    printf 'level=info msg="generated self-signed TLS certificate; cached for intra-container restarts (not persisted across recreations)" path=%s validity_days=%d\n' \
-      "$TLS_CERT_CACHE" "$TLS_CERT_DAYS" >&2
-    return 0
+    -subj "/CN=nut-upsd" -addext "subjectAltName=DNS:nut-upsd" 2>&1 >/dev/null); then
+    rm -f "$_gc_key" "$_gc_crt" "$_gc_pem"
+    printf 'level=error msg="self-signed TLS certificate keygen failed" path=%s err="%s"\n' \
+      "$TLS_CERT_CACHE" "$(log_value "$(printf '%s' "$_gc_err" | head -c 512)")" >&2
+    return 1
   fi
-  rm -f "$_gc_key" "$_gc_crt" "$_gc_pem"
-  printf 'level=error msg="self-signed TLS certificate generation failed" path=%s err="%s"\n' \
-    "$TLS_CERT_CACHE" "$(log_value "$(printf '%s' "$_gc_err" | head -c 512)")" >&2
-  return 1
+  if ! _gc_err=$(cat "$_gc_crt" "$_gc_key" 2>&1 >"$_gc_pem") \
+    || ! _replace_file "$_gc_pem" "$TLS_CERT_CACHE"; then
+    rm -f "$_gc_key" "$_gc_crt" "$_gc_pem"
+    printf 'level=error msg="self-signed TLS certificate generation failed" path=%s err="%s"\n' \
+      "$TLS_CERT_CACHE" "$(log_value "$(printf '%s' "$_gc_err" | head -c 512)")" >&2
+    return 1
+  fi
+  rm -f "$_gc_key" "$_gc_crt"
+  printf 'level=info msg="generated self-signed TLS certificate; cached for intra-container restarts (not persisted across recreations)" path=%s validity_days=%d\n' \
+    "$TLS_CERT_CACHE" "$TLS_CERT_DAYS" >&2
 }
 
 # _install_cert_working_copy SRC DST: root:nut 640 working copy of SRC at DST
@@ -221,14 +225,15 @@ _install_cert_working_copy() {
   _ic_src="$1"
   _ic_dst="$2"
   _ic_tmp=$(_tls_mktemp "$_ic_dst") || return 1
-  if cat "$_ic_src" >"$_ic_tmp" \
-    && chown root:nut "$_ic_tmp" && chmod 640 "$_ic_tmp" \
+  if _ic_err=$({ cat "$_ic_src" >"$_ic_tmp" \
+    && chown root:nut "$_ic_tmp" \
+    && chmod 640 "$_ic_tmp"; } 2>&1) \
     && _replace_file "$_ic_tmp" "$_ic_dst"; then
     return 0
   fi
   rm -f "$_ic_tmp"
-  printf 'level=error msg="failed to install TLS certificate working copy for upsd" source=%s path=%s\n' \
-    "$_ic_src" "$_ic_dst" >&2
+  printf 'level=error msg="failed to install TLS certificate working copy for upsd" source=%s path=%s err="%s"\n' \
+    "$_ic_src" "$_ic_dst" "$(log_value "$(printf '%s' "$_ic_err" | head -c 512)")" >&2
   return 1
 }
 
@@ -257,13 +262,13 @@ resolve_tls_cert() {
         "$TLS_CERT_MOUNT" >&2
       return 1
     fi
-    # The content is still served as-is, but the two failures it can carry have
-    # opposite outcomes: upsd fatalx()es on a parse failure
-    # (server/netssl.c:715-722), while an expired pair loads and only a
-    # verifying client refuses it.
+    # A parse failure makes upsd fatalx() during startup
+    # (server/netssl.c:715-722); an expired pair loads but verifying clients
+    # refuse it.
     if ! tls_cert_parses "$TLS_CERT_MOUNT"; then
       printf 'level=error msg="mounted TLS certificate is not one PEM holding a certificate and its private key; upsd will exit at startup" path=%s\n' \
         "$TLS_CERT_MOUNT" >&2
+      return 1
     elif ! tls_cert_fresh "$TLS_CERT_MOUNT"; then
       printf 'level=warn msg="mounted TLS certificate expires within a day; upsd will still serve it, but verifying clients will refuse the handshake" path=%s\n' \
         "$TLS_CERT_MOUNT" >&2

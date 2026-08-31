@@ -7,8 +7,8 @@
 # real forced shutdown, because during one it can no longer be fixed. That makes
 # its log line a contract: UPSPowerOffPathBroken matches the literal
 # `D-Bus poweroff path unreachable` (copied verbatim from alerts.yaml below), and
-# it matches with count_over_time(...[15m]) > 0 -- so the line must RECUR while the
-# path is broken, not fire once and go quiet. Both properties are asserted here.
+# it matches while the path is broken, so the line must RECUR rather than fire
+# once and go quiet. Both properties are asserted here.
 #
 # tests/smoke.sh checks that this function is defined, and covers
 # dbus_poweroff_path_ok's negative case; the loop's own state machine and its log
@@ -114,9 +114,9 @@ grep -qF -- "msg=\"$M_DBUS_PHRASE" "$LOG" \
 # transition would let the alert resolve itself while the path is still broken.
 # Three broken ticks must produce three lines.
 run_probe 3 broken
-[ "$(count 'D-Bus poweroff path unreachable')" -eq 3 ] \
+[ "$(count "$M_DBUS_PHRASE")" -eq 3 ] \
   && ok 'the error line repeats on every failed probe (keeps the 15m alert firing)' \
-  || no 'recurring error line' "expected 3 lines, got $(count 'D-Bus poweroff path unreachable')"
+  || no 'recurring error line' "expected 3 lines, got $(count "$M_DBUS_PHRASE")"
 
 # --- 3. recovery is reported ONCE ------------------------------------------------
 #
@@ -124,7 +124,7 @@ run_probe 3 broken
 # afterwards. Without the _dbus_broken latch the healthy loop would log a recovery
 # line every interval forever.
 run_probe 3 recovering
-[ "$(count 'D-Bus poweroff path unreachable')" -eq 1 ] \
+[ "$(count "$M_DBUS_PHRASE")" -eq 1 ] \
   && [ "$(count 'level=info msg="D-Bus poweroff path recovered"')" -eq 1 ] \
   && ok 'recovery logs one info line across two healthy probes, after one error line' \
   || no 'recovery logged once' "log: $(tr '\n' '|' <"$LOG")"
@@ -150,8 +150,9 @@ if (
   no 'missing DBUS_PROBE_INTERVAL' 'the probe started with no interval configured'
 else
   grep -q 'DBUS_PROBE_INTERVAL' "$LOG" \
+    && [ "$(count 'D-Bus poweroff path unreachable')" -eq 0 ] \
     && ok 'the probe refuses to start without DBUS_PROBE_INTERVAL rather than spinning' \
-    || no 'missing DBUS_PROBE_INTERVAL' "aborted without naming the variable: $(head -c 200 "$LOG")"
+    || no 'missing DBUS_PROBE_INTERVAL' "did not fail cleanly at the required-variable guard: $(head -c 200 "$LOG")"
 fi
 
 report

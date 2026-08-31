@@ -186,16 +186,30 @@ else
 fi
 unset -f base64
 
-# --- 8. the control for case 7: the wrapper still works ---------------------------
+# --- 8. a fresh cache is generated without a corruption warning ----------------
 rm -f "$CACHE"
-if (
-  ADMIN_PASSWORD=""
-  resolve_admin_password 2>/dev/null
-  [ "${#ADMIN_PASSWORD}" -eq "$PASSWORD_LENGTH" ]
-); then
-  ok 'resolve_admin_password sets a full-length ADMIN_PASSWORD when generation succeeds'
+: >"$ERR"
+ADMIN_PASSWORD=""
+if resolve_admin_password 2>"$ERR"; then
+  [ "${#ADMIN_PASSWORD}" -eq "$PASSWORD_LENGTH" ] && [ -f "$CACHE" ] \
+    && grep -q 'generated ADMIN_PASSWORD; cached for intra-container restarts' "$ERR" \
+    && ! grep -q 'cached ADMIN_PASSWORD invalid' "$ERR" \
+    && ok 'a missing cache generates ADMIN_PASSWORD without claiming corruption' \
+    || no 'fresh-cache generation' "value_len=${#ADMIN_PASSWORD} cache_exists=$([ -e "$CACHE" ] && printf yes || printf no); log: $(head -c 200 "$ERR")"
 else
-  no 'wrapper happy path' 'resolve_admin_password did not set a full-length password'
+  no 'fresh-cache generation' "resolve_admin_password returned non-zero: $(head -c 200 "$ERR")"
+fi
+
+# --- 9. an operator-supplied password bypasses generation -----------------------
+rm -f "$CACHE"
+: >"$ERR"
+ADMIN_PASSWORD='operator supplied 123'
+if resolve_admin_password 2>"$ERR"; then
+  [ "$ADMIN_PASSWORD" = 'operator supplied 123' ] && [ ! -e "$CACHE" ] \
+    && ok 'a non-empty ADMIN_PASSWORD passes through byte-for-byte without creating a cache' \
+    || no 'operator password pass-through' "value=[$ADMIN_PASSWORD] cache_exists=$([ -e "$CACHE" ] && printf yes || printf no)"
+else
+  no 'operator password pass-through' "resolver returned non-zero: $(head -c 200 "$ERR")"
 fi
 
 report

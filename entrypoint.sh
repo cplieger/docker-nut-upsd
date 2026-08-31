@@ -30,7 +30,7 @@ set -eu
 # object type, not just regular files: a symlink, FIFO, socket or directory
 # planted there by the nut user survives -type f and obstructs — or, followed,
 # redirects — the root daemon's later pidfile write. `|| true`: a find failure
-# must read as "nothing listed", not a set -e boot abort.
+# must not abort PID 1 under set -e.
 stale_nut_pid_paths() {
   find /var/run/nut -maxdepth 1 -name '*.pid' "$@" 2>/dev/null || true
 }
@@ -80,7 +80,10 @@ fi
 # so the nut user cannot plant it (see generate-config.sh).
 if [ -e "$POWERDOWNFLAG_FILE" ]; then
   printf 'level=info msg="clearing stale killpower flag from previous lifecycle" path=%s\n' "$POWERDOWNFLAG_FILE" >&2
-  rm -f "$POWERDOWNFLAG_FILE"
+  rm -f "$POWERDOWNFLAG_FILE" || {
+    printf 'level=error msg="failed to clear the stale killpower flag; refusing to start" path=%s\n' "$POWERDOWNFLAG_FILE" >&2
+    exit 1
+  }
 fi
 
 # Must precede the := defaults below: an LF-only value (env-file artifact) is
@@ -116,12 +119,8 @@ canonicalize_validated_values
 : "${NOCOMMWARNTIME:=300}"
 : "${RBWARNTIME:=43200}"
 
-# USB comms recovery watchdog. Devices like the CyberPower Elite PFC re-enumerate
-# their USB link on their own firmware resets, which leaves the driver "Data
-# stale" until the container is recreated. The watchdog (see lifecycle.sh)
-# re-homes the driver onto the re-enumerated node after COMMS_RECOVERY_TIMEOUT
-# seconds of stale comms. Requires the bus passed as a live bind + a cgroup rule
-# (c 189:* rmw) so the new node is visible/accessible — see the README.
+# USB comms-recovery watchdog cadence (mechanism: lifecycle.sh comms_watchdog;
+# bus live-bind + cgroup-rule prerequisites: README "USB hotplug & comms recovery").
 : "${COMMS_WATCHDOG:=true}"
 : "${COMMS_CHECK_INTERVAL:=15}"
 : "${COMMS_RECOVERY_TIMEOUT:=90}"
@@ -144,6 +143,7 @@ resolve_admin_password
 # upsmon.conf are generated (see the credential-topology block in
 # generate-config.sh); with an override mounted for either file, the
 # generated half uses the legacy API pair and no internal secret is needed.
+decide_user_overrides
 if local_upsmon_credential_active; then
   resolve_local_upsmon_password
 fi
@@ -247,9 +247,15 @@ generate_all_configs
 # they fail with EROFS and would abort the boot under set -e).
 # resolve_tls_cert (password.sh) serves a root:nut 640 working copy inside
 # /etc/nut instead, which this sweep normalizes like any generated file.
-find /etc/nut ! -name '*.user' ! -name "${TLS_CERT_MOUNT##*/}" -exec chown root:nut {} +
-find /etc/nut -type d ! -name '*.user' ! -name "${TLS_CERT_MOUNT##*/}" -exec chmod 750 {} +
-find /etc/nut -type f ! -name '*.user' ! -name "${TLS_CERT_MOUNT##*/}" -exec chmod 640 {} +
+if ! _perm_err=$(
+  find /etc/nut -name '*.user' -prune -o -name "${TLS_CERT_MOUNT##*/}" -prune -o -exec chown root:nut {} + 2>&1 \
+    && find /etc/nut -name '*.user' -prune -o -name "${TLS_CERT_MOUNT##*/}" -prune -o -type d -exec chmod 750 {} + 2>&1 \
+    && find /etc/nut -name '*.user' -prune -o -name "${TLS_CERT_MOUNT##*/}" -prune -o -type f -exec chmod 640 {} + 2>&1
+); then
+  printf 'level=error msg="could not normalize /etc/nut ownership and modes; refusing to start" err="%s"\n' \
+    "$(log_value "$(printf '%s' "$_perm_err" | head -c 512)")" >&2
+  exit 1
+fi
 if usb_bus_required; then
   if chgrp -R nut /dev/bus/usb 2>/dev/null; then
     printf 'level=info msg="chgrp nut:/dev/bus/usb applied (host device nodes)"\n' >&2
@@ -272,33 +278,25 @@ stop_bg_pid() {
   wait "$1" 2>/dev/null || true
 }
 
-# Background comms-watchdog PID (empty until started below). stop_watchdog is
-# safe to call before the watchdog starts and after it has exited.
+# Background comms-watchdog PID and background D-Bus poweroff-path probe PID
+# (each empty until its loop is started below).
 WATCHDOG_PID=""
-stop_watchdog() {
-  # Reap the watchdog subshell before the caller runs stop_services. Note: a SIGTERM
-  # that lands while the subshell is mid-`upsdrvctl start` kills the subshell
-  # immediately and orphans that child, so `wait` reaps the subshell but the orphan
-  # may briefly race stop_services' `upsdrvctl stop`. Harmless at teardown —
-  # next boot clears stale pidfiles.
-  stop_bg_pid "${WATCHDOG_PID:-}"
-  WATCHDOG_PID=""
-}
-
-# Background D-Bus poweroff-path probe PID (empty unless host shutdown is
-# enabled). Same lifecycle contract as stop_watchdog above.
 DBUS_PROBE_PID=""
-stop_dbus_probe() {
-  stop_bg_pid "${DBUS_PROBE_PID:-}"
-  DBUS_PROBE_PID=""
-}
 
 # teardown_all: the one teardown sequence every exit path shares (signal
 # trap, upsd-unresponsive exit, upsmon-exit path) - reap both background
 # loops, then stop the NUT daemons. Exit codes stay with the callers.
+# stop_bg_pid no-ops on a loop that never started. A SIGTERM landing while
+# the watchdog subshell is mid-`upsdrvctl start` orphans that child, so
+# `wait` reaps the subshell but the orphan may briefly race stop_services'
+# `upsdrvctl stop` - harmless, since the next boot clears stale pidfiles.
 teardown_all() {
-  stop_watchdog
-  stop_dbus_probe
+  # Not restartable from the top by a signal landing inside it: the
+  # sequence is bounded at 3 x STOP_CMD_TIMEOUT against Docker's stop
+  # budget, and the caller owns the exit status.
+  trap '' TERM INT QUIT HUP
+  stop_bg_pid "${WATCHDOG_PID:-}"
+  stop_bg_pid "${DBUS_PROBE_PID:-}"
   stop_services
 }
 
@@ -327,28 +325,31 @@ start_nut_daemon() {
   shift 2
   printf 'level=info msg="starting %s"\n' "$_sd_label" >&2
   timeout -k 5 "$_sd_timeout" "$@" &
-  if wait $!; then
+  if wait "$!"; then
     :
   else
     _sd_rc=$?
     printf 'level=error msg="%s start failed or timed out at boot" rc=%d\n' "$_sd_label" "$_sd_rc" >&2
-    stop_services
+    teardown_all
     exit 1
   fi
 }
 
-# timeout 90 > NUT's 75s default maxstartdelay (matches the watchdog's restart
-# path), so it only fires on a genuine wedge.
+# This 90s outer bound catches upsdrvctl itself wedging. At NUT defaults, the
+# generated single-section config fits because upsdrvctl bounds each driver
+# with maxstartdelay and exits non-zero if it never starts. A mounted ups.conf.user
+# with more sections or raised maxstartdelay/maxretry can exceed this bound and
+# make a healthy configuration fail boot.
 start_nut_daemon "upsdrvctl" 90 /usr/sbin/upsdrvctl start
 # NUT drivers write /var/run/nut/<driver>-<ups>.pid on successful start.
 wait_for_pidfile "UPS driver" "$(driver_pidfile)" "$(driver_binary)" || {
-  stop_services
+  teardown_all
   exit 1
 }
 
 start_nut_daemon "upsd" 30 /usr/sbin/upsd
 wait_for_pidfile "upsd" "/var/run/nut/upsd.pid" /usr/sbin/upsd || {
-  stop_services
+  teardown_all
   exit 1
 }
 
@@ -410,7 +411,7 @@ while kill -0 "$UPSMON_PID" 2>/dev/null; do
   # foreground sleep (past Docker's default 10s stop budget). `|| true`: the
   # signal-interrupted wait must not kill PID 1 under set -e.
   sleep "$UPSD_PROBE_INTERVAL" &
-  wait $! || true
+  wait "$!" || true
   kill -0 "$UPSMON_PID" 2>/dev/null || break
   # Both background workers are supervised here as well: an external SIGKILL
   # (a host OOM kill; the published compose example sets no memory limit) took

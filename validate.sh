@@ -148,8 +148,9 @@ validate_no_whitespace() {
 validate_nut_word() {
   # NUT parseconf silently ALTERS a value it will not preserve, and this app's
   # env-var-to-config mapping is the only place that can name the variable:
-  # common/parseconf.c addchar() discards every byte outside 0x20-0x7E
-  # (CVE-2012-2944) and stops appending at PCONF_DEFAULT_WORDLEN_LIMIT (512).
+  # common/parseconf.c addchar() discards every byte below 0x20 or above 0x7F
+  # (CVE-2012-2944, one byte wider than this check) and stops appending at
+  # PCONF_DEFAULT_WORDLEN_LIMIT (512), silently.
   # For a credential the result is an account whose stored password is not the
   # one that was set.
   case "$2" in
@@ -223,12 +224,14 @@ normalize_bool() {
 #   net   — network drivers whose port is a host[:port] endpoint (no local device)
 #   other — serial or dual-mode drivers; the UPS_PORT shape decides what device
 #           access is needed (see usb_bus_required)
+# Both censuses are hand-copied from the pinned NUT tree's drivers/Makefile.am
+# (USB_LIBUSB_DRIVERLIST; SNMP_DRIVERLIST plus apcupsd-ups from NUTSW_DRIVERLIST).
 driver_transport() {
   case "${UPS_DRIVER:-}" in
-    snmp-ups)
+    snmp-ups | apcupsd-ups)
       printf 'net'
       ;;
-    usbhid-ups | blazer_usb | tripplite_usb | bcmxcp_usb | richcomm_usb | riello_usb | nutdrv_atcl_usb)
+    usbhid-ups | blazer_usb | tripplite_usb | bcmxcp_usb | richcomm_usb | riello_usb | powervar_cx_usb | nutdrv_atcl_usb)
       printf 'usb'
       ;;
     *)
@@ -263,12 +266,14 @@ usb_bus_required() {
 
 # Each line: VAR_NAME:check1,check2,...
 # Supported checks: control, quotes, backslash, hash, nospace, nut_word, brackets, identifier, numeric, positive, port, percent
-# A row DECLARES every injection hazard the value's write form has
-# (CONTRIBUTING.md "Adding or validating an environment variable"), then its
-# domain check. A declared hazard stays even where the domain check already
-# subsumes it: the table is what the write-form rules are audited against, and
-# the hazard check reports the invisible-byte case precisely ("contains control
-# characters", not "must be a non-negative integer").
+# A row lists the hazards its write form carries (CONTRIBUTING.md "Adding or
+# validating an environment variable") plus whatever domain checks bound the
+# value. identifier and the numeric family admit one alphabet only and so
+# subsume every hazard; nut_word admits ", \ and #, which is why both
+# credential rows name those three. A subsumed hazard is still listed where
+# the refusal must NAME the injection case: `control` everywhere (an invisible
+# byte reports as itself, not as a domain error), quotes/brackets on the two
+# section-header rows.
 VALIDATION_TABLE='
 UPS_NAME:control,quotes,brackets,identifier
 UPS_DESC:control,quotes,backslash,hash
@@ -377,11 +382,9 @@ _run_table() {
     esac
     _var="${_line%%:*}"
     _checks="${_line#*:}"
-    # A row with an empty check list -- "VAR:" -- is the one malformed shape that
-    # dispatches nothing: `set -- $_checks` yields no positional parameters and
-    # the loop below runs no iterations, so the variable would go unvalidated with
-    # nothing logged. Every other malformed shape already fails closed.
-    if [ -z "$_checks" ]; then
+    # Empty and trailing-comma check lists lose a field when `set --` splits
+    # them, so the variable would otherwise pass without every declared check.
+    if [ -z "$_checks" ] || [ "${_checks%,}" != "$_checks" ]; then
       printf 'level=error msg="validation table row declares no checks" var=%s\n' "$_var" >&2
       exit 1
     fi
@@ -449,6 +452,18 @@ run_validations() {
   _run_table "$VALIDATION_TABLE" 0
   _run_table "$VALIDATION_TABLE_OPTIONAL" 1
 
+  # Both zero thresholds arm ignorelb but make its two derived LB paths
+  # unreachable. The UPS's own LB flag is then discarded, so shutdown never
+  # fires on low battery (tier 2: data-loss consequence).
+  if [ -n "${LOWBATT_PERCENT:-}" ] && [ -n "${LOWBATT_RUNTIME:-}" ]; then
+    _lowbatt_percent=$(strip_leading_zeros "$LOWBATT_PERCENT")
+    _lowbatt_runtime=$(strip_leading_zeros "$LOWBATT_RUNTIME")
+    if [ "$_lowbatt_percent" -eq 0 ] && [ "$_lowbatt_runtime" -eq 0 ]; then
+      printf 'level=error msg="LOWBATT_PERCENT and LOWBATT_RUNTIME must not both be zero; zero disables that axis and ignorelb discards the UPS low-battery flag"\n' >&2
+      exit 1
+    fi
+  fi
+
   # COMMS_RECOVERY_TIMEOUT and COMMS_BACKOFF_FACTOR are the one validated pair
   # that gets MULTIPLIED in shell arithmetic (lifecycle.sh's stage-2 backoff
   # threshold). Each is individually bounded to 18 digits by validate_numeric,
@@ -467,8 +482,8 @@ run_validations() {
   # (clients/upsmon.c:1712), and with SHUTDOWN_ON_BATTERY_CRITICAL=true that
   # state powers the host off during a mains blip — while this image's own comms
   # watchdog makes a late poll ordinary. Upstream only ADVISES a multiple of the
-  # poll intervals; this app refuses anything below the larger of them. Both are
-  # validated `positive` above, so the floor is >= 1.
+  # poll intervals; this app refuses anything below the larger of them in the
+  # GENERATED upsmon.conf, which a mounted upsmon.conf.user replaces wholesale.
   _deadtime=$(strip_leading_zeros "$DEADTIME")
   _pollfreq=$(strip_leading_zeros "$POLLFREQ")
   _pollalert=$(strip_leading_zeros "$POLLFREQALERT")
@@ -511,10 +526,10 @@ run_validations() {
   # a hardcoded [admin] (the FSD/set-capable account) and — when both
   # upsd.users and upsmon.conf are generated — the reserved internal monitor
   # account [local_upsmon] (the bundled upsmon's `upsmon primary` credential;
-  # see generate-config.sh). A second section generated from API_USER with
-  # either name would merge into the reserved stanza and clobber its
-  # credential with API_PASSWORD, exposing that account's authority under the
-  # weaker network-facing password.
+  # see generate-config.sh). upsd keeps the FIRST stanza of a repeated name and
+  # reports the collision on its own stderr (server/user.c user_add,
+  # user_password), so the API pair would authenticate no account while its
+  # `upsmon` line grants that type to the stanza parsed before it.
   if [ "$API_USER" = "admin" ]; then
     printf 'level=error msg="API_USER must not be admin (reserved for the internal NUT admin user)"\n' >&2
     exit 1

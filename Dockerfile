@@ -84,8 +84,8 @@ RUN wget -qO nut.tar.gz \
     && tar xz --strip-components=1 -f nut.tar.gz \
     && rm nut.tar.gz \
     && patch -p1 --fuzz=0 -i /build/patches/cve-2026-54161-notifycmd-execvp.patch \
-    && patch -p1 --fuzz=0 -i /build/patches/libusb-rdlens-oob-read.patch \
     && patch -p1 --fuzz=0 -i /build/patches/libusb-exit-reconnect-deadlock.patch \
+    && patch -p1 --fuzz=0 -i /build/patches/libusb-rdlens-oob-read.patch \
     && patch -p1 --fuzz=0 -i /build/patches/richcomm-libusb-context-reopen.patch \
     && PKG_CONFIG_LIBDIR="/usr/lib/pkgconfig" \
        LIBS="-lssl -lcrypto" \
@@ -115,7 +115,6 @@ RUN wget -qO nut.tar.gz \
     && cp -d /usr/lib/libmodbus.so* /out/usr/lib/ \
     && cp -d /usr/lib/libnetsnmp.so* /out/usr/lib/
 
-# ---------------------------------------------------------------------------
 # Syft inventories an Alpine image from the APK database alone, so the three
 # source-built payloads reach neither the signed release SBOM nor scanners.
 # Generated from the same Renovate-tracked ARGs the builds use, so a bump
@@ -186,6 +185,9 @@ RUN echo "OS package refresh: ${PKG_REFRESH}" \
         dbus \
         libusb \
         openssl \
+        # util-linux-misc provides `wall`: the shipped upsmon popen()s it in
+        # doshutdown() and for every notify type keeping NUT's default WALL bit, so
+        # without it /bin/sh writes `wall: not found` onto upsmon's stderr mid-outage.
         util-linux-misc \
     && addgroup -S nut \
     && adduser -S -G nut -h /var/run/nut -s /sbin/nologin nut \
@@ -201,10 +203,8 @@ COPY --from=builder /out/usr/sbin/upsd \
 COPY --from=builder /out/usr/bin/upsc /usr/bin/
 COPY --from=builder /out/usr/lib/nut/ /usr/lib/nut/
 COPY --from=builder /out/usr/share/cmdvartab /usr/share/cmdvartab
-# CycloneDX SBOM fragment for the source-built components (generated in the
-# builder stage from the Renovate-tracked version ARGs). Placed where Syft's
-# *.cdx.json cataloger inventories it, so SBOMs and scanners see NUT,
-# libmodbus, and net-snmp alongside the APK packages.
+# Placed where Syft's *.cdx.json cataloger inventories it, so SBOMs and scanners
+# see NUT, libmodbus, and net-snmp alongside the APK packages.
 COPY --from=builder /out/nut-upsd.cdx.json /usr/share/sbom/nut-upsd.cdx.json
 
 # NUT_DEBUG_SYSLOG=stderr keeps upsd and the UPS driver logging to stderr after
@@ -225,21 +225,13 @@ COPY --chmod=755 nut-shutdown.sh /usr/local/bin/nut-shutdown.sh
 COPY --chmod=755 nut-shutdown-noop.sh /usr/local/bin/nut-shutdown-noop.sh
 EXPOSE 3493
 
-# ---------------------------------------------------------------------------
-# Test stage — runs the build-time smoke test (NUT binaries run; the
-# entrypoint's env -> config generation and input-validation guards behave).
-# A failure here fails the centralized `ci / validate` docker build gate,
-# because the final stage below depends on this stage's marker.
-# ---------------------------------------------------------------------------
+# The /tests-passed marker below is the only graph edge that makes a
+# default-target build execute tests/smoke.sh, so a smoke failure fails the build.
 FROM runtime AS test
 COPY tests/smoke.sh /tmp/tests/smoke.sh
 RUN sh /tmp/tests/smoke.sh && touch /tests-passed
 
-# ---------------------------------------------------------------------------
-# Final stage — the runtime image. Must remain last so the CI build gate
-# (which builds the default target) produces it; the marker COPY forces the
-# test stage to build and pass first.
-# ---------------------------------------------------------------------------
+# Must remain the LAST stage: the CI build gate builds the default target.
 FROM runtime AS final
 COPY --from=test /tests-passed /tests-passed
 
@@ -263,11 +255,5 @@ HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=15s \
         UPS_NAME=$(printf '%s' "${UPS_NAME:-}"); : "${UPS_NAME:=ups}"; \
         API_PORT=$(printf '%s' "${API_PORT:-}"); : "${API_PORT:=3493}"; \
         API_ADDRESS=$(printf '%s' "${API_ADDRESS:-}"); : "${API_ADDRESS:=0.0.0.0}"; \
-        timeout 3 upsc "${UPS_NAME}@$(upsd_probe_host):${API_PORT}" ups.status || exit 1
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=15s \
-    CMD . /usr/local/bin/lifecycle.sh; \
-        UPS_NAME=$(printf '%s' "${UPS_NAME:-}"); : "${UPS_NAME:=ups}"; \
-        API_PORT=$(printf '%s' "${API_PORT:-}"); : "${API_PORT:=3493}"; \
-        API_ADDRESS=$(printf '%s' "${API_ADDRESS:-}"); : "${API_ADDRESS:=0.0.0.0}"; \
-        timeout 3 upsc "${UPS_NAME}@$(upsd_probe_host):${API_PORT}" | grep -q 'ups.status' || exit 1
+        comms_fresh || exit 1
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

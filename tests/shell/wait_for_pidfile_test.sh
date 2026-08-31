@@ -6,10 +6,9 @@
 # The pidfile it reads lives in the nut-writable /var/run/nut, so the gate is a
 # trust boundary as much as a readiness check: accepting a planted or garbage PID
 # means boot continues past a driver/upsd that never started, with upsd.users and
-# upsmon.conf already installed and no working driver behind them. Its four
-# refusal arms (empty/partial write, non-numeric, all-zero, live-but-not-the-
-# expected-binary) are reached by nothing else -- tests/smoke.sh covers
-# read_pidfile and pid_matches_binary in isolation, never this gate.
+# upsmon.conf already installed and no working driver behind them. Its refusal
+# paths are reached by nothing else -- tests/smoke.sh covers read_pidfile and
+# pid_matches_binary in isolation, never this gate.
 #
 # As in kill_stale_driver_test.sh, pid_matches_binary is stubbed to SUCCEED in the
 # content-refusal cases so the identity requirement cannot be what refuses them,

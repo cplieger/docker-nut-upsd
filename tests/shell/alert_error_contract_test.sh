@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Holds UPSContainerError's anchored prefix and event exclusion against the
+# structured records emitted by the shipped shell.
+# shellcheck disable=SC2016  # backticks below are literal LogQL delimiters.
+set -u
+
+# shellcheck source-path=SCRIPTDIR
+. "$(dirname -- "$0")/lib.sh"
+
+ALERTS="${ALERTS:-$REPO_ROOT/alerts.yaml}"
+SHELL_ROOT="${SHELL_ROOT:-$REPO_ROOT}"
+RULE=$(awk '
+  /- alert: UPSContainerError$/ { inrule = 1; next }
+  inrule && /- alert: / { exit }
+  inrule { print }
+' "$ALERTS")
+PREFIX_PATTERN=$(printf '%s\n' "$RULE" | sed -n 's/.*|~ `\([^`]*\)`.*/\1/p' | head -1)
+EXCLUSION=$(printf '%s\n' "$RULE" | sed -n 's/.*!= `\([^`]*\)`.*/\1/p' | head -1)
+case "$PREFIX_PATTERN|$EXCLUSION" in
+  '^level=error |msg="UPS event"') ;;
+  *)
+    printf 'harness error: unexpected UPSContainerError matcher: prefix=%s exclusion=%s\n' \
+      "${PREFIX_PATTERN:-<empty>}" "${EXCLUSION:-<empty>}" >&2
+    exit 1
+    ;;
+esac
+
+PREFIX=${PREFIX_PATTERN#^}
+bad=""
+seen=0
+while IFS= read -r record; do
+  source_line=${record#*:*:}
+  format=${source_line#*printf \'}
+  format=${format%%\'*}
+  seen=$((seen + 1))
+  case "$format" in
+    "$PREFIX"*) ;;
+    *) bad="$bad ${record%%:*}:${record#*:}" ;;
+  esac
+done < <(grep -nHE "printf '[^']*level=error" "$SHELL_ROOT"/*.sh)
+
+if [ "$seen" -gt 0 ] && [ -z "$bad" ]; then
+  ok "every literal structured error format opens with the prefix UPSContainerError reads from alerts.yaml"
+else
+  no 'UPSContainerError anchored prefix' "checked=$seen formats; nonmatching:$bad"
+fi
+
+notify_line=$(NOTIFYTYPE=FSD UPSNAME=ups sh "$REPO_ROOT/nut-notify.sh" 'forced shutdown' 2>&1)
+container_line=$(SHUTDOWN_ON_BATTERY_CRITICAL=false sh "$REPO_ROOT/nut-shutdown-noop.sh" 2>&1)
+if printf '%s\n' "$notify_line" | grep -Eq -- "$PREFIX_PATTERN" \
+  && printf '%s\n' "$notify_line" | grep -Fq -- "$EXCLUSION" \
+  && printf '%s\n' "$container_line" | grep -Eq -- "$PREFIX_PATTERN" \
+  && ! printf '%s\n' "$container_line" | grep -Fq -- "$EXCLUSION"; then
+  ok 'the forced-shutdown event is excluded while a container-owned error remains matched'
+else
+  no 'UPSContainerError event exclusion' "notify=[$notify_line] container=[$container_line]"
+fi
+
+report

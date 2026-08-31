@@ -64,7 +64,9 @@ consts=$(extract_range '^readonly SHELL_SAFE_INTEGER_MAX=' '^$') || exit 1
 # stubbed: a dispatch test whose validators are fakes proves only that the fakes
 # ran.
 for fn in log_value strip_leading_zeros validate_no_control_chars validate_identifier \
-  validate_no_hash validate_numeric validate_percent _dispatch_check _resolve_var _run_table; do
+  validate_no_hash validate_no_quotes validate_no_backslash validate_no_whitespace \
+  validate_nut_word validate_no_brackets validate_numeric validate_positive validate_port \
+  validate_percent _dispatch_check _resolve_var _run_table driver_transport run_validations; do
   load_function "$fn"
 done
 
@@ -197,6 +199,63 @@ else
   grep -q 'must be 0-100' "$ERR" \
     && ok 'a SET optional variable is validated (the skip is emptiness-only)' \
     || no 'optional set value validated' "failed for another reason: $(head -c 200 "$ERR")"
+fi
+
+# --- 9b. jointly disabled low-battery thresholds fail closed ---------------------
+#
+# Each row accepts zero because zero disables only that axis. The pair is unsafe:
+# ignorelb discards the UPS low-battery flag while both derived paths can never
+# assert. Drive run_validations so this exercises the cross-field boundary.
+lowbatt_required_table=$(extract_range "^VALIDATION_TABLE='" "^'\$" "$WORK/lowbatt-required-table.sh") || exit 1
+lowbatt_optional_table=$(extract_range "^VALIDATION_TABLE_OPTIONAL='" "^'\$" "$WORK/lowbatt-optional-table.sh") || exit 1
+. "$lowbatt_required_table"
+. "$lowbatt_optional_table"
+
+run_lowbatt_validation() (
+  UPS_NAME=ups
+  UPS_DESC='Test UPS'
+  UPS_DRIVER=usbhid-ups
+  UPS_PORT=auto
+  API_USER=monuser
+  API_PASSWORD=secret
+  API_ADDRESS=0.0.0.0
+  API_PORT=3493
+  API_TLS=true
+  ADMIN_PASSWORD=adminpass
+  SHUTDOWN_ON_BATTERY_CRITICAL=false
+  DBUS_PROBE_INTERVAL=300
+  POLLFREQ=5
+  POLLFREQALERT=5
+  DEADTIME=15
+  FINALDELAY=5
+  HOSTSYNC=15
+  NOCOMMWARNTIME=300
+  RBWARNTIME=43200
+  COMMS_WATCHDOG=true
+  COMMS_CHECK_INTERVAL=15
+  COMMS_RECOVERY_TIMEOUT=90
+  COMMS_FAST_RETRIES=3
+  COMMS_BACKOFF_FACTOR=5
+  LOWBATT_PERCENT=$1
+  LOWBATT_RUNTIME=$2
+  run_validations
+)
+
+for zero in 0 00 000; do
+  if run_lowbatt_validation "$zero" "$zero" 2>"$ERR"; then
+    no "both low-battery thresholds at $zero refused" 'the configuration disabled every low-battery path'
+  elif grep -q 'LOWBATT_PERCENT and LOWBATT_RUNTIME must not both be zero' "$ERR"; then
+    ok "both low-battery thresholds at $zero are refused by the cross-field rule"
+  else
+    no "both low-battery thresholds at $zero refused" "wrong refusal: $(head -c 200 "$ERR")"
+  fi
+done
+
+if run_lowbatt_validation 0 300 2>"$ERR" \
+  && run_lowbatt_validation 20 0 2>"$ERR"; then
+  ok 'a zero threshold stays valid when the other low-battery axis is active'
+else
+  no 'single disabled low-battery axis accepted' "a coherent single-axis configuration was refused: $(head -c 200 "$ERR")"
 fi
 
 # --- 10. the three hand-maintained inventories agree -----------------------------

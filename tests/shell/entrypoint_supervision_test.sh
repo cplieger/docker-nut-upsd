@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # The top-level supervisor counts consecutive upsd failures, restarts a
 # background worker that died, and preserves upsmon's status through teardown.
+# The image health probe delegates its freshness query to comms_fresh, the same
+# owner the watchdog calls.
 # SC2015: ok/no always return zero. SC2016: the single-quoted range
 # delimiter is a literal sed expression and must not expand the parent's rc.
 # shellcheck disable=SC2015,SC2016
@@ -133,5 +135,61 @@ run_scenario clean
   && [ "$(wc -l <"$WORK/teardown" | tr -d ' ')" -eq 1 ] \
   && ok 'a zero upsmon status remains zero after teardown' \
   || no 'clean upsmon status propagation' "rc=$RUN_RC stderr=$(cat "$WORK/stderr")"
+
+STOP_BG=$(extract_function stop_bg_pid "$WORK/stop_bg_pid.sh") || exit 1
+TEARDOWN=$(extract_function teardown_all "$WORK/teardown_all.sh") || exit 1
+
+cat >"$WORK/drive-teardown.sh" <<'DRIVER'
+#!/usr/bin/env bash
+set -eu
+WATCHDOG_PID=5151
+DBUS_PROBE_PID=6262
+
+kill() { printf 'kill %s\n' "$1" >>"$EVENTS"; }
+wait() { printf 'wait %s\n' "$1" >>"$EVENTS"; }
+stop_services() { printf 'stop-services\n' >>"$EVENTS"; }
+
+. "$STOP_BG"
+. "$TEARDOWN"
+teardown_all
+DRIVER
+chmod +x "$WORK/drive-teardown.sh"
+
+: >"$WORK/events"
+: >"$WORK/stderr"
+if env STOP_BG="$STOP_BG" TEARDOWN="$TEARDOWN" EVENTS="$WORK/events" \
+  bash "$WORK/drive-teardown.sh" >"$WORK/stdout" 2>"$WORK/stderr"; then
+  RUN_RC=0
+else
+  RUN_RC=$?
+fi
+
+cat >"$WORK/expected-teardown-events" <<'EXPECTED'
+kill 5151
+wait 5151
+kill 6262
+wait 6262
+stop-services
+EXPECTED
+
+[ "$RUN_RC" -eq 0 ] \
+  && cmp -s "$WORK/expected-teardown-events" "$WORK/events" \
+  && ok 'teardown_all signals and reaps workers before services' \
+  || no 'teardown_all worker lifecycle ordering' "rc=$RUN_RC events=$(tr '\n' ' ' <"$WORK/events") stderr=$(cat "$WORK/stderr")"
+
+DOCKERFILE="${DOCKERFILE:-$REPO_ROOT/Dockerfile}"
+healthcheck=$(awk '
+  /^FROM runtime AS final$/ { final = 1; next }
+  final && /^HEALTHCHECK / { in_healthcheck = 1 }
+  final && in_healthcheck && /^[A-Z][A-Z0-9_]*[[:space:]]/ && $1 != "HEALTHCHECK" { exit }
+  final && in_healthcheck { print }
+' "$DOCKERFILE")
+if [ -z "$healthcheck" ]; then
+  printf 'harness error: final image stage has no HEALTHCHECK in %s\n' "$DOCKERFILE" >&2
+  exit 1
+fi
+printf '%s\n' "$healthcheck" | grep -Eq '^[[:space:]]*comms_fresh \|\| exit 1$' \
+  && ok 'the final image healthcheck delegates the freshness query to comms_fresh' \
+  || no 'healthcheck freshness owner' "final-stage HEALTHCHECK: $healthcheck"
 
 report

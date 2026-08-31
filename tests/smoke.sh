@@ -35,8 +35,45 @@ for b in upsd upsc upsmon upsdrvctl; do
   fi
 done
 
+for b in dbus-send timeout; do
+  if ! command -v "$b" >/dev/null 2>&1; then
+    err "FAIL: nut-shutdown runtime command missing from PATH: $b"
+    fail=1
+  fi
+done
+
+if ! command -v wall >/dev/null 2>&1; then
+  err "FAIL: upsmon notification dependency missing from PATH: wall"
+  fail=1
+fi
+
 if [ ! -x /usr/lib/nut/usbhid-ups ]; then
   err "FAIL: default UPS driver missing or not executable: /usr/lib/nut/usbhid-ups"
+  fail=1
+fi
+
+for driver in snmp-ups apc_modbus; do
+  if [ ! -x "/usr/lib/nut/$driver" ]; then
+    err "FAIL: documented UPS driver missing or not executable: /usr/lib/nut/$driver"
+    fail=1
+  fi
+done
+
+shutdown_default=$(awk '
+  /^[[:space:]]*SHUTDOWN_CMD=/ {
+    value = $0
+    sub(/^[^=]*=/, "", value)
+    gsub(/^"|"$/, "", value)
+    print value
+    exit
+  }
+' /usr/local/bin/entrypoint.sh)
+
+if [ -z "$shutdown_default" ]; then
+  err "FAIL: could not read the disabled-host SHUTDOWNCMD default from the installed entrypoint"
+  fail=1
+elif [ ! -x "$shutdown_default" ]; then
+  err "FAIL: disabled-host SHUTDOWNCMD missing or not executable: $shutdown_default"
   fail=1
 fi
 
@@ -80,6 +117,7 @@ if ! resolve_tls_cert 2>/dev/null; then
   fail=1
 fi
 
+decide_user_overrides
 generate_all_configs
 for f in ups.conf upsd.conf upsd.users upsmon.conf; do
   if [ ! -s "/etc/nut/$f" ]; then
@@ -87,6 +125,26 @@ for f in ups.conf upsd.conf upsd.users upsmon.conf; do
     fail=1
   fi
 done
+if ! (
+  POLLFREQ=11
+  POLLFREQALERT=13
+  DEADTIME=17
+  FINALDELAY=19
+  HOSTSYNC=23
+  NOCOMMWARNTIME=29
+  RBWARNTIME=31
+  generate_upsmon_conf >/dev/null 2>&1
+  grep -q '^POLLFREQ 11$' /etc/nut/upsmon.conf \
+    && grep -q '^POLLFREQALERT 13$' /etc/nut/upsmon.conf \
+    && grep -q '^DEADTIME 17$' /etc/nut/upsmon.conf \
+    && grep -q '^FINALDELAY 19$' /etc/nut/upsmon.conf \
+    && grep -q '^HOSTSYNC 23$' /etc/nut/upsmon.conf \
+    && grep -q '^NOCOMMWARNTIME 29$' /etc/nut/upsmon.conf \
+    && grep -q '^RBWARNTIME 31$' /etc/nut/upsmon.conf
+); then
+  err "FAIL: non-default upsmon timing values did not reach every generated directive"
+  fail=1
+fi
 grep -q '^\[ups\]' /etc/nut/ups.conf || {
   err "FAIL: ups.conf missing [ups] section"
   fail=1
@@ -99,6 +157,15 @@ grep -q 'pollonly' /etc/nut/ups.conf || {
   err "FAIL: ups.conf missing pollonly for usbhid driver"
   fail=1
 }
+# NUT storeval aborts when a driver receives a flag absent from its vartab.
+if ! (
+  UPS_DRIVER=apc_modbus
+  generate_ups_conf >/dev/null 2>&1
+  ! grep -q '^    pollonly$' /etc/nut/ups.conf
+); then
+  err "FAIL: ups.conf emitted pollonly for a non-usbhid driver"
+  fail=1
+fi
 # Battery thresholds: with no overrides, preserve the UPS hardware LB flag;
 # with LOWBATT_PERCENT set, emit NUT's low-charge override and arm ignorelb.
 if ! (
@@ -120,6 +187,32 @@ if ! (
   err "FAIL: LOWBATT_PERCENT did not emit one ignorelb and the NUT low-charge override"
   fail=1
 fi
+if (
+  LOWBATT_PERCENT=0
+  LOWBATT_RUNTIME=0
+  run_validations
+) >/dev/null 2>&1; then
+  err "FAIL: LOWBATT_PERCENT=0 with LOWBATT_RUNTIME=0 disabled every low-battery path but was accepted"
+  fail=1
+fi
+BATT_ERR=$(mktemp)
+if ! (
+  LOWBATT_PERCENT=0
+  LOWBATT_RUNTIME=300
+  run_validations >/dev/null 2>&1 || exit 1
+  generate_ups_conf >/dev/null 2>"$BATT_ERR"
+  [ "$(grep -c '^    ignorelb$' /etc/nut/ups.conf)" -eq 1 ] \
+    && grep -q '^    override\.battery\.charge\.low = 0$' /etc/nut/ups.conf \
+    && grep -q '^    override\.battery\.runtime\.low = 300$' /etc/nut/ups.conf
+); then
+  err "FAIL: a disabled percentage axis with an active runtime threshold did not generate the coherent single-axis config"
+  fail=1
+fi
+if ! grep -q 'level=warn msg="battery percentage threshold disabled; low battery uses the runtime threshold" low_pct=DISABLED low_rt=300' "$BATT_ERR"; then
+  err "FAIL: a disabled percentage axis was not identified in the battery-threshold warning"
+  fail=1
+fi
+rm -f "$BATT_ERR"
 (
   unset LOWBATT_PERCENT LOWBATT_RUNTIME CRITBATT_PERCENT CRITBATT_RUNTIME
   generate_ups_conf >/dev/null 2>&1
@@ -150,6 +243,17 @@ upsd_users_role() {
     insec && $1 == "upsmon" { print $2 }
   ' /etc/nut/upsd.users
 }
+upsd_users_password() {
+  awk -v want="[$1]" '
+    $0 == want { insec = 1; next }
+    /^\[/ { insec = 0 }
+    insec && /^[[:space:]]*password[[:space:]]*=/ {
+      sub(/^[[:space:]]*password[[:space:]]*=[[:space:]]*"/, "")
+      sub(/"$/, "")
+      print
+    }
+  ' /etc/nut/upsd.users
+}
 grep -q '^\[local_upsmon\]$' /etc/nut/upsd.users || {
   err "FAIL: generated upsd.users missing the reserved [local_upsmon] section"
   fail=1
@@ -166,6 +270,30 @@ grep -q '^MONITOR ups@127.0.0.1:3493 1 "local_upsmon" "localmonpass" primary$' /
   err "FAIL: generated upsmon.conf MONITOR does not authenticate with the internal local_upsmon credential"
   fail=1
 }
+if [ "$(upsd_users_password admin)" != "$ADMIN_PASSWORD" ]; then
+  err "FAIL: generated [admin] password does not equal ADMIN_PASSWORD"
+  fail=1
+fi
+if [ "$(upsd_users_password "$API_USER")" != "$API_PASSWORD" ]; then
+  err "FAIL: generated [$API_USER] password does not equal API_PASSWORD"
+  fail=1
+fi
+upsmon_stored_password=$(awk '
+  $1 == "MONITOR" {
+    line = $0
+    sub(/^MONITOR [^ ]+ 1 "[^"]*" "/, "", line)
+    sub(/" primary$/, "", line)
+    print line
+  }
+' /etc/nut/upsmon.conf)
+if [ "$(upsd_users_password local_upsmon)" != "$LOCAL_UPSMON_PASSWORD" ]; then
+  err "FAIL: generated [local_upsmon] password does not equal LOCAL_UPSMON_PASSWORD"
+  fail=1
+fi
+if [ "$(upsd_users_password local_upsmon)" != "$upsmon_stored_password" ]; then
+  err "FAIL: generated upsd.users and upsmon.conf disagree on the local upsmon password"
+  fail=1
+fi
 
 # A single trailing LF (env-file artifact) is harmless only because the
 # entrypoint strips it from every validated var BEFORE validation and config
@@ -177,6 +305,7 @@ if ! (
   UPS_DESC=${UPS_DESC%x}
   canonicalize_validated_values
   run_validations >/dev/null 2>&1 || exit 1
+  decide_user_overrides
   generate_all_configs >/dev/null 2>&1
   grep -q '^    desc = "desc"$' /etc/nut/ups.conf
 ); then
@@ -191,6 +320,7 @@ if ! (
   API_PORT=${API_PORT%x}
   canonicalize_validated_values
   run_validations >/dev/null 2>&1 || exit 1
+  decide_user_overrides
   generate_all_configs >/dev/null 2>&1
   grep -q '^MONITOR ups@127.0.0.1:3493 1 "local_upsmon" "localmonpass" primary$' /etc/nut/upsmon.conf
 ); then
@@ -294,6 +424,7 @@ fi
 # to the legacy API pair and the fallback must be logged at level=warn.
 printf '# override fixture\n' >/etc/nut/upsd.users.user
 FALLBACK_ERR=$(mktemp)
+decide_user_overrides
 generate_all_configs >/dev/null 2>"$FALLBACK_ERR"
 if ! grep -q '^MONITOR ups@127.0.0.1:3493 1 "monuser" "secret" primary$' /etc/nut/upsmon.conf; then
   err "FAIL: with upsd.users.user mounted, generated MONITOR did not fall back to the API user/password pair"
@@ -309,6 +440,7 @@ rm -f /etc/nut/upsd.users.user "$FALLBACK_ERR"
 #    authenticates with the API pair) and no [local_upsmon] stanza may exist.
 printf '# override fixture\n' >/etc/nut/upsmon.conf.user
 FALLBACK_ERR=$(mktemp)
+decide_user_overrides
 generate_all_configs >/dev/null 2>"$FALLBACK_ERR"
 if [ "$(upsd_users_role monuser)" != "primary" ]; then
   err "FAIL: with upsmon.conf.user mounted, generated [monuser] did not keep 'upsmon primary'"
@@ -323,6 +455,61 @@ if ! grep -q 'level=warn msg="upsmon.conf.user mounted without upsd.users.user' 
   fail=1
 fi
 rm -f /etc/nut/upsmon.conf.user "$FALLBACK_ERR"
+
+printf '# override fixture\n' >/etc/nut/ups.conf.user
+printf '# override fixture\n' >/etc/nut/upsd.conf.user
+printf '# override fixture\n' >/etc/nut/upsd.users.user
+printf '# override fixture\n' >/etc/nut/upsmon.conf.user
+printf '# override fixture\n' >/etc/nut/ignored.conf.user
+OVERRIDE_SWEEP_ERR=$(mktemp)
+decide_user_overrides
+if ! generate_all_configs >/dev/null 2>"$OVERRIDE_SWEEP_ERR"; then
+  err "FAIL: config generation failed while checking mounted-override diagnostics"
+  fail=1
+fi
+override_warn_count=$(grep -cF 'level=warn msg="mounted override is not a file this image applies; ignoring it"' "$OVERRIDE_SWEEP_ERR" || :)
+if [ "$override_warn_count" -ne 1 ]; then
+  err "FAIL: mounted-override sweep emitted $override_warn_count ignored-file warnings, want 1"
+  fail=1
+fi
+if ! grep -F 'level=warn msg="mounted override is not a file this image applies; ignoring it"' "$OVERRIDE_SWEEP_ERR" \
+  | grep -q 'ignored\.conf\.user'; then
+  err "FAIL: mounted-override sweep did not name ignored.conf.user in its warning"
+  fail=1
+fi
+rm -f /etc/nut/ups.conf.user /etc/nut/upsd.conf.user \
+  /etc/nut/upsd.users.user /etc/nut/upsmon.conf.user \
+  /etc/nut/ignored.conf.user "$OVERRIDE_SWEEP_ERR"
+decide_user_overrides
+generate_all_configs >/dev/null 2>&1
+
+# One decision must govern both generated credential files even if an override
+# appears between them.
+decide_user_overrides
+generate_upsd_users >/dev/null 2>&1
+printf '# appeared after the decision\n' >/etc/nut/upsd.users.user
+generate_upsmon_conf >/dev/null 2>&1
+if [ "$(upsd_users_role local_upsmon)" != primary ] \
+  || ! grep -q '^MONITOR ups@127.0.0.1:3493 1 "local_upsmon" "localmonpass" primary$' /etc/nut/upsmon.conf; then
+  err "FAIL: an override appearing mid-generation split the recorded internal credential topology"
+  fail=1
+fi
+rm -f /etc/nut/upsd.users.user
+
+# The mirror mutation must keep the mounted/API topology after its source
+# disappears; the installed destination remains the first half of the pair.
+printf '[monuser]\n    password = "secret"\n    upsmon primary\n' >/etc/nut/upsd.users.user
+decide_user_overrides
+generate_upsd_users >/dev/null 2>&1
+rm -f /etc/nut/upsd.users.user
+generate_upsmon_conf >/dev/null 2>&1
+if [ "$(upsd_users_role monuser)" != primary ] \
+  || grep -q '^\[local_upsmon\]$' /etc/nut/upsd.users \
+  || ! grep -q '^MONITOR ups@127.0.0.1:3493 1 "monuser" "secret" primary$' /etc/nut/upsmon.conf; then
+  err "FAIL: an override disappearing mid-generation split the recorded mounted credential topology"
+  fail=1
+fi
+decide_user_overrides
 #    Non-regular override refusal (use_user_override): a FIFO planted at an
 #    override path passes a bare existence check and cp then blocks forever
 #    waiting for a writer, hanging config generation with no diagnostic. The
@@ -335,7 +522,7 @@ rm -f /etc/nut/upsmon.conf.user "$FALLBACK_ERR"
 mkfifo /etc/nut/ups.conf.user
 FIFO_ERR=$(mktemp)
 fifo_rc=0
-timeout 2 sh -c '. /usr/local/bin/generate-config.sh; generate_ups_conf' \
+timeout 2 sh -c '. /usr/local/bin/generate-config.sh; decide_user_overrides; generate_ups_conf' \
   >/dev/null 2>"$FIFO_ERR" || fifo_rc=$?
 if [ "$fifo_rc" -eq 0 ] || [ "$fifo_rc" -eq 124 ] || [ "$fifo_rc" -eq 143 ]; then
   err "FAIL: FIFO at /etc/nut/ups.conf.user was not refused before cp (rc=$fifo_rc; 124/143 = cp blocked until timeout)"
@@ -351,6 +538,7 @@ rm -f /etc/nut/ups.conf.user "$FIFO_ERR"
 #    rather than dropped silently.
 ln -s /etc/nut/does-not-exist /etc/nut/ups.conf.user
 DANGLE_ERR=$(mktemp)
+decide_user_overrides
 if ! generate_ups_conf >/dev/null 2>"$DANGLE_ERR"; then
   err "FAIL: dangling-symlink ups.conf.user aborted generation instead of falling back"
   fail=1
@@ -377,7 +565,7 @@ rm -f /etc/nut/ups.conf
 mkdir /etc/nut/ups.conf
 DIRDST_ERR=$(mktemp)
 dirdst_rc=0
-timeout 2 sh -c '. /usr/local/bin/password.sh; . /usr/local/bin/generate-config.sh; generate_ups_conf' \
+timeout 2 sh -c '. /usr/local/bin/password.sh; . /usr/local/bin/generate-config.sh; decide_user_overrides; generate_ups_conf' \
   >/dev/null 2>"$DIRDST_ERR" || dirdst_rc=$?
 if [ "$dirdst_rc" -eq 0 ] || [ "$dirdst_rc" -eq 124 ] || [ "$dirdst_rc" -eq 143 ]; then
   err "FAIL: directory at /etc/nut/ups.conf was not refused promptly (rc=$dirdst_rc; 124/143 = install blocked until timeout)"
@@ -396,6 +584,7 @@ rm -f /etc/nut/ups.conf.user /etc/nut/ups.conf.tmp.* "$DIRDST_ERR"
 #    A best-effort success diagnostic must not turn a completed override install
 #    into generation fallback when stderr is unavailable.
 printf '[ups]\n    driver = dummy-ups\n    port = /tmp/operator.dev\n' >/etc/nut/ups.conf.user
+decide_user_overrides
 if ! use_user_override ups.conf 2>&-; then
   err "FAIL: applied ups.conf.user returned failure when its success diagnostic could not write"
   fail=1
@@ -458,6 +647,7 @@ rmdir /var/run/nut-secrets/local_upsmon_password
 rm -f "$DIRCACHE_ERR"
 
 # Regenerate with the baseline env so later steps see the section-2 configs.
+decide_user_overrides
 generate_all_configs >/dev/null 2>&1
 
 # 3. Validation rejects config-injection attempts (run_validations exits non-
@@ -478,6 +668,8 @@ rejected_table_value() {
     control) printf 'bad\rvalue' ;;
     quote) printf 'bad"value' ;;
     backslash) printf 'bad\\value' ;;
+    hash) printf 'bad#value' ;;
+    nut_word) printf '%600s' '' | tr ' ' 'a' ;;
     bracket) printf 'bad]value' ;;
     identifier) printf 'bad value' ;;
     numeric) printf 'not-a-number' ;;
@@ -492,6 +684,8 @@ rejected_table_message() {
     control) printf 'contains control characters' ;;
     quote) printf 'contains double-quote' ;;
     backslash) printf 'contains backslash' ;;
+    hash) printf 'contains hash character' ;;
+    nut_word) printf 'longer than NUT 512-byte word limit' ;;
     bracket) printf 'contains bracket characters' ;;
     identifier) printf 'is not a valid identifier' ;;
     numeric) printf 'must be a non-negative integer' ;;
@@ -538,25 +732,44 @@ UPS_NAME|identifier|0
 UPS_DESC|control|0
 UPS_DESC|quote|0
 UPS_DESC|backslash|0
+UPS_DESC|hash|0
 UPS_DRIVER|control|0
 UPS_DRIVER|identifier|0
 UPS_PORT|control|0
 UPS_PORT|backslash|0
+UPS_PORT|hash|0
 API_USER|control|0
 API_USER|bracket|0
 API_PASSWORD|control|0
 API_PASSWORD|quote|0
 API_PASSWORD|backslash|0
+API_PASSWORD|hash|0
+API_PASSWORD|nut_word|0
 API_ADDRESS|control|0
 API_ADDRESS|quote|0
 API_ADDRESS|backslash|0
 API_ADDRESS|bracket|0
+API_ADDRESS|hash|0
 API_PORT|control|0
 API_PORT|port|0
+DBUS_PROBE_INTERVAL|control|0
+POLLFREQ|control|0
+POLLFREQALERT|control|0
+DEADTIME|control|0
+FINALDELAY|control|0
+HOSTSYNC|control|0
+NOCOMMWARNTIME|control|0
+RBWARNTIME|control|0
+COMMS_CHECK_INTERVAL|control|0
+COMMS_RECOVERY_TIMEOUT|control|0
+COMMS_FAST_RETRIES|control|0
+COMMS_BACKOFF_FACTOR|control|0
 API_TLS|control|0
 ADMIN_PASSWORD|control|0
 ADMIN_PASSWORD|quote|0
 ADMIN_PASSWORD|backslash|0
+ADMIN_PASSWORD|hash|0
+ADMIN_PASSWORD|nut_word|0
 SHUTDOWN_ON_BATTERY_CRITICAL|control|0
 DBUS_PROBE_INTERVAL|numeric|0
 POLLFREQ|positive|0
@@ -575,6 +788,30 @@ LOWBATT_PERCENT|control|1
 LOWBATT_PERCENT|percent|1
 LOWBATT_RUNTIME|control|1
 LOWBATT_RUNTIME|numeric|1
+CASES
+
+while IFS='|' read -r _ws_var _ws_value; do
+  [ -n "$_ws_var" ] || continue
+  if _ws_out=$(
+    (
+      UPS_DRIVER=usbhid-ups
+      UPS_PORT=auto
+      API_ADDRESS=0.0.0.0
+      export "$_ws_var=$_ws_value"
+      run_validations
+    ) 2>&1
+  ); then
+    err "FAIL: $_ws_var accepted embedded whitespace: $_ws_value"
+    fail=1
+  elif ! printf '%s\n' "$_ws_out" | grep -Fq 'msg="env var contains whitespace"' \
+    || ! printf '%s\n' "$_ws_out" | grep -Fq "var=$_ws_var"; then
+    err "FAIL: $_ws_var was not refused by its whitespace boundary"
+    err "$_ws_out"
+    fail=1
+  fi
+done <<'CASES'
+UPS_PORT|/dev/ttyS0 extra
+API_ADDRESS|0.0.0.0 4444
 CASES
 
 if (
@@ -639,6 +876,43 @@ if (
   err "FAIL: COMMS_RECOVERY_TIMEOUT x COMMS_BACKOFF_FACTOR product overflow was accepted"
   fail=1
 fi
+while IFS='|' read -r _dt_poll _dt_alert _dt_dead _dt_expect; do
+  [ -n "$_dt_poll" ] || continue
+  if _dt_out=$(
+    (
+      POLLFREQ="$_dt_poll"
+      POLLFREQALERT="$_dt_alert"
+      DEADTIME="$_dt_dead"
+      run_validations
+    ) 2>&1
+  ); then
+    if [ "$_dt_expect" = reject ]; then
+      err "FAIL: DEADTIME=$_dt_dead accepted below POLLFREQ=$_dt_poll / POLLFREQALERT=$_dt_alert"
+      fail=1
+    fi
+  elif [ "$_dt_expect" = accept ]; then
+    err "FAIL: DEADTIME=$_dt_dead rejected at the larger poll interval ($_dt_poll / $_dt_alert)"
+    err "$_dt_out"
+    fail=1
+  else
+    _dt_norm_poll=$(strip_leading_zeros "$_dt_poll")
+    _dt_norm_alert=$(strip_leading_zeros "$_dt_alert")
+    _dt_norm_dead=$(strip_leading_zeros "$_dt_dead")
+    if ! printf '%s\n' "$_dt_out" | grep -Fq 'DEADTIME must be at least the larger of POLLFREQ and POLLFREQALERT' \
+      || ! printf '%s\n' "$_dt_out" | grep -Fq "deadtime=$_dt_norm_dead pollfreq=$_dt_norm_poll pollfreqalert=$_dt_norm_alert"; then
+      err "FAIL: DEADTIME poll-floor refusal did not report the normalized cross-field diagnostic"
+      err "$_dt_out"
+      fail=1
+    fi
+  fi
+done <<'CASES'
+5|7|6|reject
+7|5|6|reject
+5|7|7|accept
+7|5|7|accept
+05|07|06|reject
+05|07|07|accept
+CASES
 if (
   COMMS_CHECK_INTERVAL='notanumber'
   run_validations
@@ -672,63 +946,13 @@ if (
   err "FAIL: backslash-injection API_PASSWORD was accepted"
   fail=1
 fi
-# An unescaped `#` must be refused in every value that reaches a NUT config
-# field: parseconf hard-errors on it inside a double-quoted value and reads it
-# as a comment introducer outside one, and the consumer then DROPS the line and
-# carries on — so an ordinary `Rack #1 UPS` silently yields an account that
-# cannot authenticate, or a LISTEN line on a different port, on a healthy-looking
-# boot. The backslash refusal above closes the only escape route.
-if (
-  UPS_DESC='Rack #1 UPS'
-  run_validations
-) >/dev/null 2>&1; then
-  err "FAIL: a # in UPS_DESC was accepted"
-  fail=1
-fi
-if (
-  UPS_PORT='/dev/ttyS0#x'
-  run_validations
-) >/dev/null 2>&1; then
-  err "FAIL: a # in UPS_PORT was accepted"
-  fail=1
-fi
-if (
-  API_PASSWORD='pass#word'
-  run_validations
-) >/dev/null 2>&1; then
-  err "FAIL: a # in API_PASSWORD was accepted"
-  fail=1
-fi
-if (
-  API_ADDRESS='0.0.0.0#x'
-  run_validations
-) >/dev/null 2>&1; then
-  err "FAIL: a # in API_ADDRESS was accepted"
-  fail=1
-fi
-if (
-  ADMIN_PASSWORD='admin#pw'
-  run_validations
-) >/dev/null 2>&1; then
-  err "FAIL: a # in ADMIN_PASSWORD was accepted"
-  fail=1
-fi
 # A credential NUT will not preserve must be refused rather than stored altered:
-# parseconf's addchar() discards every byte outside 0x20-0x7E (CVE-2012-2944) and
-# stops appending at its 512-byte word limit, both silently, so the account would
-# enforce a password the operator never set.
+# parseconf's addchar() silently discards bytes outside 0x20-0x7E (CVE-2012-2944).
 if (
   API_PASSWORD="$(printf 'p\303\244ssword')"
   run_validations
 ) >/dev/null 2>&1; then
   err "FAIL: a non-ASCII API_PASSWORD was accepted (NUT stores it with the byte dropped)"
-  fail=1
-fi
-if (
-  ADMIN_PASSWORD=$(printf '%600s' '' | tr ' ' 'a')
-  run_validations
-) >/dev/null 2>&1; then
-  err "FAIL: a 600-byte ADMIN_PASSWORD was accepted (NUT truncates at 512)"
   fail=1
 fi
 # API_USER is written unquoted as a `[$API_USER]` section header in upsd.users,
@@ -799,19 +1023,20 @@ if [ "$_log_value_got" != "$_log_value_want" ]; then
   err "FAIL: log_value byte contract: got '$_log_value_got', want '$_log_value_want'"
   fail=1
 fi
-
-# 4. Watchdog / D-Bus / credential helpers are defined (sourced from
-#    lifecycle.sh, generate-config.sh, and password.sh). stop_watchdog and
-#    stop_dbus_probe live in entrypoint.sh and are not asserted here.
-for fn in upsd_probe_host comms_fresh upsd_responsive restart_ups_driver comms_watchdog watchdog_epoch \
-  dbus_poweroff_path_ok dbus_liveness_probe read_pidfile \
-  local_upsmon_credential_active resolve_admin_password resolve_local_upsmon_password \
-  resolve_tls_cert pid_matches_binary; do
-  if ! command -v "$fn" >/dev/null 2>&1; then
-    err "FAIL: helper function missing: $fn"
-    fail=1
-  fi
-done
+_log_value_512=$(head -c 512 /dev/zero | tr '\0' a)
+_log_value_600=$(head -c 600 /dev/zero | tr '\0' a)
+_log_value_509=$(head -c 509 /dev/zero | tr '\0' a)
+_log_value_long_want="${_log_value_509}..."
+_log_value_512_got=$(log_value "$_log_value_512")
+_log_value_600_got=$(log_value "$_log_value_600")
+if [ "$_log_value_512_got" != "$_log_value_512" ]; then
+  err "FAIL: log_value truncated a 512-character value"
+  fail=1
+fi
+if [ "$_log_value_600_got" != "$_log_value_long_want" ]; then
+  err "FAIL: log_value did not cap a long value at 509 characters plus ellipsis"
+  fail=1
+fi
 
 STANDALONE_OUT=$(mktemp)
 STANDALONE_ERR=$(mktemp)
@@ -830,6 +1055,46 @@ elif [ -s "$STANDALONE_OUT" ] || [ -s "$STANDALONE_ERR" ]; then
   fail=1
 fi
 rm -f "$STANDALONE_OUT" "$STANDALONE_ERR"
+
+# The three NUT controls share Docker's 10-second stop grace. Drive the real
+# sequence with a fake clock so a widened bound or an added control cannot push
+# upsdrvctl stop past SIGKILL.
+STOP_BUDGET_TRACE=$(mktemp)
+(
+  elapsed=0
+  # Invoked indirectly by the extracted stop_nut_cmd path.
+  # shellcheck disable=SC2329
+  timeout() {
+    if [ "${1-}" != "-s" ] || [ "${2-}" != "KILL" ]; then
+      printf 'invalid\t%s\n' "$*" >>"$STOP_BUDGET_TRACE"
+      return 0
+    fi
+    case "${3-}" in
+      '' | *[!0-9]*)
+        printf 'invalid\t%s\n' "$*" >>"$STOP_BUDGET_TRACE"
+        return 0
+        ;;
+    esac
+    delay=$3
+    shift 3
+    elapsed=$((elapsed + delay))
+    printf 'ok\t%d\t%s\n' "$elapsed" "$*" >>"$STOP_BUDGET_TRACE"
+  }
+  stop_services 2>/dev/null
+)
+last_elapsed=$(awk -F '\t' '$1 == "ok" { value = $2 } END { print value }' "$STOP_BUDGET_TRACE")
+upsdrv_elapsed=$(awk -F '\t' '$1 == "ok" && $3 == "/usr/sbin/upsdrvctl stop" { print $2; exit }' "$STOP_BUDGET_TRACE")
+if grep -q '^invalid' "$STOP_BUDGET_TRACE"; then
+  err "FAIL: a NUT stop control lost timeout -s KILL"
+  fail=1
+elif printf '%s\n%s\n' "$last_elapsed" "$upsdrv_elapsed" | grep -Eqv '^[0-9]+$'; then
+  err "FAIL: the bounded stop sequence or upsdrvctl stop was not observed"
+  fail=1
+elif [ "$last_elapsed" -ge 10 ] || [ "$upsdrv_elapsed" -ge 10 ]; then
+  err "FAIL: NUT stop sequence exceeds Docker's 10s grace (total=${last_elapsed}s upsdrvctl=${upsdrv_elapsed}s)"
+  fail=1
+fi
+rm -f "$STOP_BUDGET_TRACE"
 
 # Capture cleanup preserves /dev/null on allocation failure but removes real paths.
 CAPTURE_RM_CALLS=$(mktemp)
@@ -1089,13 +1354,13 @@ KILLPOWER_ERR=$(mktemp)
 if (
   # shellcheck disable=SC2034  # consumed by restart_ups_driver (sourced lifecycle.sh)
   SHUTDOWN_ON_BATTERY_CRITICAL=true
-  touch /var/run/nut-secrets/killpower
+  touch "$POWERDOWNFLAG_FILE"
   restart_ups_driver 1
 ) 2>"$KILLPOWER_ERR"; then
   err "FAIL: restart_ups_driver did not stand down with killpower set"
   fail=1
 fi
-rm -f /var/run/nut-secrets/killpower
+rm -f "$POWERDOWNFLAG_FILE"
 if ! grep -q 'standing down' "$KILLPOWER_ERR"; then
   err "FAIL: killpower stand-down not logged"
   fail=1
@@ -1147,6 +1412,14 @@ if ! (
   usb_bus_required
 ); then
   err "FAIL: usb_bus_required denies the bus to a dual-mode driver on auto"
+  fail=1
+fi
+if ! (
+  UPS_DRIVER='apc_modbus'
+  UPS_PORT='/dev/bus/usb/001/003'
+  usb_bus_required
+); then
+  err "FAIL: usb_bus_required denies the bus to a dual-mode driver using a USB bus node"
   fail=1
 fi
 # No D-Bus socket is mounted in the test stage, so the poweroff-path gate
@@ -1210,6 +1483,60 @@ if [ -z "$tls_fp_regen" ] || [ "$tls_fp_regen" = "$tls_fp_first" ]; then
   fail=1
 fi
 
+# A parseable certificate inside the 24-hour horizon must not be reused from the
+# self-signed cache; the same operator-mounted PEM remains usable but warns.
+tls_exp_key=$(mktemp)
+tls_exp_crt=$(mktemp)
+tls_exp_pem=$(mktemp)
+tls_exp_err=$(mktemp)
+if ! openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
+  -keyout "$tls_exp_key" -out "$tls_exp_crt" -days 1 -nodes \
+  -subj '/CN=nut-upsd' -addext 'subjectAltName=DNS:nut-upsd' >/dev/null 2>&1 \
+  || ! cat "$tls_exp_crt" "$tls_exp_key" >"$tls_exp_pem"; then
+  err "FAIL: could not create the expiring TLS fixture"
+  fail=1
+elif ! tls_cert_parses "$tls_exp_pem" || tls_cert_fresh "$tls_exp_pem"; then
+  err "FAIL: expiring TLS fixture does not isolate freshness from parsing"
+  fail=1
+else
+  cp "$tls_exp_pem" /var/run/nut-secrets/upsd-selfsigned.pem
+  tls_fp_expiring=$(tls_cert_fingerprint /var/run/nut-secrets/upsd-selfsigned.pem)
+  : >"$tls_exp_err"
+  if ! resolve_tls_cert 2>"$tls_exp_err"; then
+    err "FAIL: resolve_tls_cert failed to replace an expiring cached certificate"
+    fail=1
+  else
+    tls_fp_refreshed=$(tls_cert_fingerprint /var/run/nut-secrets/upsd-selfsigned.pem)
+    if [ -z "$tls_fp_refreshed" ] || [ "$tls_fp_refreshed" = "$tls_fp_expiring" ]; then
+      err "FAIL: expiring cached TLS certificate was reused instead of regenerated"
+      fail=1
+    fi
+    if ! grep -q 'cached self-signed TLS certificate invalid or expiring; regenerating' "$tls_exp_err"; then
+      err "FAIL: expiring cached TLS certificate did not log regeneration"
+      fail=1
+    fi
+  fi
+
+  cp "$tls_exp_pem" /etc/nut/upsd.pem
+  : >"$tls_exp_err"
+  if ! resolve_tls_cert 2>"$tls_exp_err"; then
+    err "FAIL: resolve_tls_cert rejected an expiring operator-mounted certificate"
+    fail=1
+  else
+    if ! grep -q 'mounted TLS certificate expires within a day' "$tls_exp_err"; then
+      err "FAIL: expiring mounted TLS certificate did not log its warning"
+      fail=1
+    fi
+    if [ "$TLS_CERT_PATH" != "/etc/nut/upsd-mounted.pem" ] \
+      || ! cmp -s "$tls_exp_pem" /etc/nut/upsd-mounted.pem; then
+      err "FAIL: expiring mounted TLS certificate was not served through its working copy"
+      fail=1
+    fi
+  fi
+  rm -f /etc/nut/upsd.pem /etc/nut/upsd-mounted.pem
+fi
+rm -f "$tls_exp_key" "$tls_exp_crt" "$tls_exp_pem" "$tls_exp_err"
+
 #    Operator-mounted PEM (/etc/nut/upsd.pem): served via a root:nut 640
 #    working copy at /etc/nut/upsd-mounted.pem — TLS_CERT_PATH points at the
 #    copy (same content), and the MOUNT file itself is never touched: owner,
@@ -1245,6 +1572,7 @@ if [ "$(sha256sum /etc/nut/upsd.pem | awk '{print $1}')" != "$tls_sha_mounted" ]
 fi
 if ! (
   resolve_tls_cert >/dev/null 2>&1
+  decide_user_overrides
   generate_all_configs >/dev/null 2>&1
   grep -q '^CERTFILE /etc/nut/upsd-mounted.pem$' /etc/nut/upsd.conf
 ); then
@@ -1270,20 +1598,21 @@ fi
 rmdir /etc/nut/upsd.pem
 rm -f "$NONREG_ERR"
 
-#    Unparseable mounted PEM: non-fatal — resolve_tls_cert must log the parse
-#    error but still serve the mounted content (upsd stays authoritative).
+#    Unparseable mounted PEM: fatal — resolve_tls_cert must log the parse error
+#    and refuse to publish a working copy.
 printf 'not a pem\n' >/etc/nut/upsd.pem
-# Pre-call digest: the post-call source-vs-copy cmp alone cannot prove the
-# SOURCE itself survived (both sides could have been rewritten identically).
 tls_sha_badpem=$(sha256sum /etc/nut/upsd.pem | awk '{print $1}')
 BADPEM_ERR=$(mktemp)
-if ! (
-  resolve_tls_cert 2>"$BADPEM_ERR" || exit 1
-  [ "$TLS_CERT_PATH" = "/etc/nut/upsd-mounted.pem" ] || exit 1
-  [ "$(sha256sum /etc/nut/upsd.pem | awk '{print $1}')" = "$tls_sha_badpem" ] || exit 1
-  cmp -s /etc/nut/upsd.pem /etc/nut/upsd-mounted.pem
-); then
-  err "FAIL: unparseable mounted PEM was not served as-is (non-fatal gate regressed to fatal)"
+if resolve_tls_cert 2>"$BADPEM_ERR"; then
+  err "FAIL: resolve_tls_cert accepted an unparseable mounted PEM"
+  fail=1
+fi
+if [ "$(sha256sum /etc/nut/upsd.pem | awk '{print $1}')" != "$tls_sha_badpem" ]; then
+  err "FAIL: resolve_tls_cert rewrote the unparseable mounted PEM"
+  fail=1
+fi
+if [ -e /etc/nut/upsd-mounted.pem ]; then
+  err "FAIL: resolve_tls_cert published a working copy of an unparseable mounted PEM"
   fail=1
 fi
 if ! grep -q 'level=error msg="mounted TLS certificate is not one PEM holding a certificate and its private key' "$BADPEM_ERR"; then
@@ -1390,6 +1719,7 @@ fi
 #    byte-identical to the pre-TLS-feature output.
 if ! (
   API_TLS=false
+  decide_user_overrides
   generate_all_configs >/dev/null 2>&1
   printf 'LISTEN 0.0.0.0 3493\n' | cmp -s - /etc/nut/upsd.conf
 ); then
@@ -1448,6 +1778,7 @@ else
 fi
 
 # Restore the section-2 baseline configs for any future sections.
+decide_user_overrides
 generate_all_configs >/dev/null 2>&1
 
 [ "$fail" -eq 0 ] && log "nut-upsd smoke: ok"

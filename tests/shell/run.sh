@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs every entrypoint.sh unit test in this directory.
+# Runs every shell unit test in this directory.
 #
 # This filename is the contract: cplieger/ci's shell-ci.yaml runs
 # `tests/shell/run.sh` when it exists, and skips otherwise, so a repo opts into
@@ -22,26 +22,12 @@
 # arch. So every guard it covers costs a full from-source image build to check,
 # and the guards it does NOT cover are checked nowhere at all.
 #
-# This suite is scoped to that second set: re-testing the injection matrix would be
-# duplication that leaves the real gap untested. The scoping is to the FAIL-CLOSED
-# and error paths, not zero overlap — a handful of positive controls here do cover
-# ground smoke.sh also walks (a valid credential-cache reuse, a clean TLS
-# selection), and they are kept deliberately, because without them every refusal
-# assertion beside them would also pass against a function that refuses everything.
-# What lives here is the shipped shell's most consequential uncovered surface:
-#   - kill_stale_driver_from_pidfile's confused-deputy guards, which stand
-#     between a nut-writable pidfile and a root `kill -9`;
-#   - wait_for_pidfile's startup trust gate;
-#   - the credential-cache guards that decide whether upsd's set/FSD account
-#     boots with a corrupt or short password;
-#   - reconcile_tls_working_copies' failure return, which refuses to leave
-#     withdrawn private-key material nut-readable;
-#   - the validation table's fail-closed dispatch rules, where a silently
-#     skipped row would drop a security check with no log line anywhere;
-#   - the log lines alerts.yaml keys on, which stop firing SILENTLY when
-#     their shape changes;
-#   - nut-shutdown.sh's retry state machine, whose attempt bound, early success
-#     exit and between-attempt sleep decide whether an FSD reaches a poweroff.
+# This suite targets production paths that tests/smoke.sh cannot exercise
+# cheaply: fail-closed lifecycle guards, recovery and shutdown state machines,
+# credential and TLS refusals, validation dispatch, and contracts shared by
+# lifecycle.sh, the image health probe, and the alert rules. Positive controls
+# intentionally overlap smoke coverage where a refusal test would otherwise
+# pass against code that rejects every input.
 #
 # Each *_test.sh is a separate process, so one test's stubs, traps and shell
 # options cannot leak into another's. All of them run even when an early one
@@ -72,7 +58,7 @@ for t in ./*_test.sh; do
 done
 
 if [ "$failed" -ne 0 ]; then
-  printf 'FAILED: %d of %d entrypoint test files failed\n' "$failed" "$ran" >&2
+  printf 'FAILED: %d of %d shell test files failed\n' "$failed" "$ran" >&2
   exit 1
 fi
-printf 'all %d entrypoint test files passed\n' "$ran"
+printf 'all %d shell test files passed\n' "$ran"

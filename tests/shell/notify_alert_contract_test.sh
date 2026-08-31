@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# nut-notify.sh: the NOTIFYCMD upsmon runs for every UPS event, and the only
-# source of the log lines five of this repo's six alert rules match.
+# nut-notify.sh: the NOTIFYCMD upsmon runs for every UPS event, and the source
+# of the log lines that this repo's alert rules match.
 #
 # WHY THIS IS A CONTRACT AND NOT A FORMATTING PREFERENCE: alerts.yaml parses
 # these lines with logfmt and filters on the PARSED event label -- ONBATT,
@@ -207,6 +207,12 @@ printf '%s\n' "$_line" | grep -q '^level=warn ' \
   && ok 'the record carries level, msg, event, ups and detail as one logfmt line' \
   || no 'record shape' "line: $_line"
 
+_upsmon_system='ups@127.0.0.1:3493'
+_upsmon_line=$(notify ONBATT "$_upsmon_system" 'UPS ups is on battery')
+[ "$(logfmt_field ups "$_upsmon_line")" = ups ] \
+  && ok 'upsmon system words bind the bare UPS name in the log record' \
+  || no 'UPSNAME system-word normalization' "UPSNAME=$_upsmon_system, line: $_upsmon_line"
+
 # --- 3. severity classification, per class ----------------------------------------
 #
 # The severity is what routes the alert; a class that silently degrades to warn
@@ -228,7 +234,7 @@ all_match '^level=error ' FSD SHUTDOWN \
 # NUT adds notification types across releases. Without the catch-all arm, `level`
 # would be unset and the line would either abort or lose its severity -- so a new
 # upstream event would go unreported rather than merely unclassified.
-notify BATTERYCHARGED | grep -q '^level=warn msg="UPS event" event=BATTERYCHARGED ' \
+notify BATTERYCHARGED | grep -q '^level=warn msg="UPS event" event="BATTERYCHARGED" ' \
   && ok 'an unrecognized NOTIFYTYPE still emits a complete warn-level record (default arm)' \
   || no 'default arm' "line: $(notify BATTERYCHARGED)"
 
@@ -236,7 +242,7 @@ notify BATTERYCHARGED | grep -q '^level=warn msg="UPS event" event=BATTERYCHARGE
 #
 # `event=` with nothing after it matches none of the alert rules and parses as an
 # empty label; "unknown" is at least visible in a log search.
-notify_no_type | grep -q 'event=unknown ' \
+notify_no_type | grep -q 'event="unknown" ' \
   && ok 'a missing NOTIFYTYPE logs event=unknown rather than an empty field' \
   || no 'missing NOTIFYTYPE' "line: $(notify_no_type)"
 
@@ -280,7 +286,7 @@ fi
 OUT="$WORK/noop-stdout"
 ERR="$WORK/noop-stderr"
 EXPECTED="$WORK/noop-expected"
-printf '%s\n' 'level=error msg="UPS forced shutdown (FSD) triggered; SHUTDOWN_ON_BATTERY_CRITICAL=false, host will NOT be powered off"' >"$EXPECTED"
+printf '%s\n' 'level=error msg="UPS forced shutdown (FSD) triggered; host will NOT be powered off" shutdown_on_battery_critical=false' >"$EXPECTED"
 
 SHUTDOWN_ON_BATTERY_CRITICAL=false sh "$NOOP_SHUTDOWN" >"$OUT" 2>"$ERR" || :
 
