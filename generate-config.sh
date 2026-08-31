@@ -325,12 +325,21 @@ generate_all_configs() {
   for _uo_file in /etc/nut/*.user; do
     [ -e "$_uo_file" ] || [ -L "$_uo_file" ] || continue
     _uo_name=${_uo_file##*/}
-    case " $_uo_probed " in
-      *" ${_uo_name%.user} "*) ;;
-      *)
-        printf 'level=warn msg="mounted override is not a file this image applies; ignoring it" file="%s"\n' \
+    _uo_was_probed=false
+    for _uo_probed_name in $_uo_probed; do
+      if [ "$_uo_probed_name" = "${_uo_name%.user}" ]; then
+        _uo_was_probed=true
+        break
+      fi
+    done
+    if [ "$_uo_was_probed" = true ]; then
+      if [ -e "$_uo_file" ] && ! _user_override_present "${_uo_name%.user}"; then
+        printf 'level=warn msg="mounted override appeared after boot read the override topology; ignoring it for this boot (a container restart applies it)" file="%s"\n' \
           "$(log_value "$_uo_name")" >&2
-        ;;
-    esac
+      fi
+    else
+      printf 'level=warn msg="mounted override is not a file this image applies; ignoring it" file="%s"\n' \
+        "$(log_value "$_uo_name")" >&2
+    fi
   done
 }

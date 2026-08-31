@@ -335,11 +335,9 @@ start_nut_daemon() {
   fi
 }
 
-# This 90s outer bound catches upsdrvctl itself wedging. At NUT defaults, the
-# generated single-section config fits because upsdrvctl bounds each driver
-# with maxstartdelay and exits non-zero if it never starts. A mounted ups.conf.user
-# with more sections or raised maxstartdelay/maxretry can exceed this bound and
-# make a healthy configuration fail boot.
+# 90s outer bound on upsdrvctl itself wedging, sized above NUT's own per-driver
+# maxstartdelay (75s default) with maxretry at its default 1 attempt. A mounted
+# ups.conf.user can raise either past it — README "Custom config override".
 start_nut_daemon "upsdrvctl" 90 /usr/sbin/upsdrvctl start
 # NUT drivers write /var/run/nut/<driver>-<ups>.pid on successful start.
 wait_for_pidfile "UPS driver" "$(driver_pidfile)" "$(driver_binary)" || {
