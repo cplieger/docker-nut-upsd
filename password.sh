@@ -15,11 +15,10 @@ readonly LOCAL_UPSMON_PASSWORD_FILE=/var/run/nut-secrets/local_upsmon_password
 # _replace_file SRC DST: atomic-install rename with a directory-destination
 # guard, shared by every mktemp + rename site below. Plain mv treats an
 # existing directory at DST as a container (POSIX mv destination-directory
-# semantics): the rename "succeeds" by placing SRC INSIDE the directory, so a
-# stale or Docker-created directory at a cache or working-copy path would
-# silently break the file-at-DST contract while the caller logs success.
-# Rejecting the directory up front routes such a boot through the caller's
-# existing cleanup/warn/error branch instead.
+# semantics), so a stale or Docker-created directory at a cache or
+# working-copy path would silently break the file-at-DST contract while the
+# caller logs success. Rejecting the directory routes such a boot through
+# the caller's existing cleanup/warn/error branch instead.
 _replace_file() {
   _rf_src="$1"
   _rf_dst="$2"
@@ -36,23 +35,21 @@ _replace_file() {
 }
 
 # _resolve_cached_password LABEL CACHE_FILE: shared engine for the credentials
-# this container generates itself. Prints the resolved password on stdout (all
-# logging goes to stderr); returns 1 when a strong password cannot be
-# produced. The cache keeps the value stable across in-container restarts. It
-# lives in the root-only /var/run/nut-secrets runtime directory (mode 700,
-# owner root) so the lower-privileged `nut` service user cannot pre-create or
-# replace the temp/cache paths (symlink/clobber hardening).
+# this container generates itself. Prints the resolved password on stdout;
+# returns 1 when a strong password cannot be produced. The cache keeps the
+# value stable across in-container restarts, in the root-only
+# /var/run/nut-secrets runtime directory so the lower-privileged `nut`
+# service user cannot pre-create or replace the temp/cache paths.
 _resolve_cached_password() {
   _rcp_label="$1"
   _rcp_file="$2"
   # Bounded, validated cache read: generation below always writes exactly
-  # PASSWORD_LENGTH bytes, so only a cache of exactly that size is trusted,
-  # and the read itself is capped at PASSWORD_LENGTH bytes. An unbounded
-  # `cat` of a corrupted or grown cache in the reused writable layer would
-  # let PID 1 consume memory proportional to the file and repeat the OOM on
-  # every restart. Trust only generation's own alphabet (A-Za-z0-9), so a cache
-  # holding whitespace, a stripped trailing newline, or the quote/backslash/control
-  # bytes that break out of generate-config.sh's quoted password fields regenerates.
+  # PASSWORD_LENGTH bytes, so only a cache of exactly that size is trusted.
+  # An unbounded `cat` of a corrupted or grown cache would let PID 1 consume
+  # memory proportional to the file and repeat the OOM on every restart.
+  # Trust only generation's own alphabet (A-Za-z0-9), so a cache holding
+  # whitespace or the quote/backslash/control bytes that break out of
+  # generate-config.sh's quoted password fields regenerates.
   _rcp_size=$(stat -c %s "$_rcp_file" 2>/dev/null) || _rcp_size=""
   if [ "$_rcp_size" = "$PASSWORD_LENGTH" ] \
     && _rcp_pw=$(head -c "$PASSWORD_LENGTH" "$_rcp_file" 2>/dev/null) \
@@ -67,13 +64,12 @@ _resolve_cached_password() {
     printf 'level=warn msg="cached %s invalid (wrong size, unreadable, or not from the generated alphabet); regenerating" path=%s size=%s expected=%s\n' \
       "$_rcp_label" "$_rcp_file" "${_rcp_size:-unreadable}" "$PASSWORD_LENGTH" >&2
   fi
-  # Pull more entropy than we need so stripping `/+=` still leaves
-  # >=PASSWORD_LENGTH usable characters; head -c then gives a stable length.
+  # Pull more entropy than needed so stripping `/+=` still leaves
+  # >=PASSWORD_LENGTH usable characters.
   _rcp_pw=$(head -c "$PASSWORD_RAW_BYTES" /dev/urandom | base64 | tr -d '/+=' | head -c "$PASSWORD_LENGTH")
   # Never cache or use a short password: stripping `/+=` can in principle
-  # leave fewer than PASSWORD_LENGTH characters, and a short read from
-  # /dev/urandom would too. Fail loudly (entrypoint runs under set -e)
-  # rather than silently starting with weakened credentials.
+  # leave fewer than PASSWORD_LENGTH characters. Fail loudly rather than
+  # silently starting with weakened credentials.
   if [ "${#_rcp_pw}" -ne "$PASSWORD_LENGTH" ]; then
     printf 'level=error msg="generated %s has unexpected length; refusing weak credentials" got=%d expected=%d\n' \
       "$_rcp_label" "${#_rcp_pw}" "$PASSWORD_LENGTH" >&2
@@ -103,13 +99,10 @@ resolve_admin_password() {
 }
 
 # LOCAL_UPSMON_PASSWORD: secret of the reserved [local_upsmon] account — the
-# bundled upsmon's own `upsmon primary` credential in the generated
-# upsd.users/upsmon.conf pair (see the credential-topology block in
-# generate-config.sh). Purely internal: it is never taken from the
-# environment (there is nothing for an operator to configure; the *.user
-# override files are the escape hatch), so any inherited LOCAL_UPSMON_PASSWORD
-# env value is ignored and overwritten. Cached at
-# /var/run/nut-secrets/local_upsmon_password exactly like ADMIN_PASSWORD.
+# bundled upsmon's own `upsmon primary` credential (see the credential-topology
+# block in generate-config.sh). Purely internal: never taken from the
+# environment, so any inherited LOCAL_UPSMON_PASSWORD env value is ignored and
+# overwritten.
 resolve_local_upsmon_password() {
   # shellcheck disable=SC2034  # consumed by sourced generate-config.sh
   LOCAL_UPSMON_PASSWORD=$(_resolve_cached_password LOCAL_UPSMON_PASSWORD "$LOCAL_UPSMON_PASSWORD_FILE") || return 1
@@ -132,9 +125,9 @@ warn_weak_api_password() {
 # ---------------------------------------------------------------------------
 # upsd's CERTFILE is ONE PEM: certificate then private key (NUT
 # docs/security.txt) — hence _generate_selfsigned_cert's crt-then-key cat.
-# Placement subtlety: upsd reads it as the dropped nut user, not root (ssl_init
-# runs after become_user, server/upsd.c), so both sources install as a root:nut
-# 640 copy in /etc/nut; _install_cert_working_copy owns why only the copy is chowned.
+# upsd reads it as the dropped nut user, not root (ssl_init runs after
+# become_user, server/upsd.c), so both sources install as a root:nut 640 copy
+# in /etc/nut.
 readonly TLS_CERT_MOUNT=/etc/nut/upsd.pem
 readonly TLS_CERT_CACHE=/var/run/nut-secrets/upsd-selfsigned.pem
 readonly TLS_CERT_RUNTIME=/etc/nut/upsd-selfsigned.pem
@@ -153,9 +146,8 @@ tls_cert_fresh() {
 }
 
 # tls_cert_valid FILE: the gate for reusing the cached self-signed PEM
-# (regenerate on anything less). States what it checks and no more: a
-# certificate and key that parse but do not match each other pass, and upsd's
-# own ssl_init is what refuses that (see the mounted arm below).
+# (regenerate on anything less). A certificate and key that parse but do not
+# match each other pass; upsd's own ssl_init is what refuses that.
 tls_cert_valid() {
   tls_cert_parses "$1" && tls_cert_fresh "$1"
 }
@@ -166,10 +158,9 @@ tls_cert_fingerprint() {
   openssl x509 -in "$1" -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2
 }
 
-# _tls_mktemp PREFIX: mktemp PREFIX.tmp.XXXXXX with a structured failure
-# log. Every other failure exit in TLS provisioning logs level=error before
-# the boot aborts; a bare `mktemp || return 1` would exit the container with
-# only mktemp's own unstructured stderr as the diagnostic.
+# _tls_mktemp PREFIX: mktemp PREFIX.tmp.XXXXXX with a structured failure log
+# (a bare `mktemp || return 1` would leave only mktemp's own unstructured
+# stderr as the diagnostic).
 _tls_mktemp() {
   mktemp "$1.tmp.XXXXXX" 2>/dev/null || {
     printf 'level=error msg="mktemp failed while provisioning the TLS certificate" prefix=%s\n' "$1" >&2
@@ -178,12 +169,10 @@ _tls_mktemp() {
 }
 
 # _generate_selfsigned_cert: mint a fresh self-signed cert+key PEM into the
-# root-only cache. EC P-256 over RSA 2048: keygen completes in milliseconds even
-# on small ARM hosts (RSA 2048 keygen is slower and CPU-variable at boot).
-# mktemp in the root-only dir gives O_EXCL 0600 temp files a compromised nut
-# process cannot pre-plant (same rationale as _resolve_cached_password);
-# cert-then-key order is NUT's documented CERTFILE layout
-# (`cat upsd.crt upsd.key > upsd.pem`).
+# root-only cache. EC P-256 over RSA 2048: keygen completes in milliseconds
+# even on small ARM hosts. mktemp in the root-only dir gives O_EXCL 0600 temp
+# files a compromised nut process cannot pre-plant; cert-then-key order is
+# NUT's documented CERTFILE layout (`cat upsd.crt upsd.key > upsd.pem`).
 _generate_selfsigned_cert() {
   _gc_key=$(_tls_mktemp "$TLS_CERT_CACHE") || return 1
   _gc_crt=$(_tls_mktemp "$TLS_CERT_CACHE") || {
@@ -214,13 +203,10 @@ _generate_selfsigned_cert() {
     "$TLS_CERT_CACHE" "$TLS_CERT_DAYS" >&2
 }
 
-# _install_cert_working_copy SRC DST: root:nut 640 working copy of SRC at DST
-# (nut-readable — see the placement subtlety above). Shared by the self-signed
-# path (cache -> TLS_CERT_RUNTIME) and the mounted-PEM path (mount ->
-# TLS_CERT_MOUNTED_RUNTIME); only the copy is ever chowned, so the source —
-# in particular an operator's bind mount — is never mutated. /etc/nut has no
-# unprivileged writer (750 root:nut), but mktemp + rename keeps the install
-# atomic anyway.
+# _install_cert_working_copy SRC DST: root:nut 640 working copy of SRC at DST.
+# Shared by the self-signed path (cache -> TLS_CERT_RUNTIME) and the
+# mounted-PEM path (mount -> TLS_CERT_MOUNTED_RUNTIME); only the copy is ever
+# chowned, so an operator's bind mount is never mutated.
 _install_cert_working_copy() {
   _ic_src="$1"
   _ic_dst="$2"
@@ -238,25 +224,22 @@ _install_cert_working_copy() {
 }
 
 # resolve_tls_cert: point TLS_CERT_PATH (consumed by generate_upsd_conf) at a
-# PEM upsd can serve. Runs whenever API_TLS=true — even with a mounted
+# PEM upsd can serve. Runs whenever API_TLS=true, even with a mounted
 # upsd.conf.user, whose author may reference either cert path. Returns 1 when
-# no usable PEM could be provisioned (the entrypoint fails the boot: a TLS
-# endpoint the operator left default-on must not silently degrade to
-# cleartext).
+# no usable PEM could be provisioned (the boot fails rather than silently
+# degrading to cleartext).
 resolve_tls_cert() {
-  # Same dangling-symlink diagnostic as use_user_override (generate-config.sh):
-  # -e follows the link, so a broken symlink at the mount path would silently
-  # fall through to the self-signed certificate.
+  # -e follows the link, so a broken symlink at the mount path would
+  # silently fall through to the self-signed certificate.
   if [ ! -e "$TLS_CERT_MOUNT" ] && [ -L "$TLS_CERT_MOUNT" ]; then
     printf 'level=warn msg="mounted TLS certificate path is a dangling symlink; ignoring it and provisioning the self-signed certificate" path=%s\n' "$TLS_CERT_MOUNT" >&2
   fi
   if [ -e "$TLS_CERT_MOUNT" ]; then
     # Refuse a non-regular mount (directory, FIFO, device node) up front: a
-    # writer-less FIFO would block openssl/the working-copy cat forever and hang the
-    # boot with no log line, and a directory (Docker auto-creates one when a
-    # host bind source is missing) only fails later at ssl_init with a
-    # misleading perms error. A non-regular PEM has never worked, so failing
-    # fail-closed here is behavior-preserving (mirrors read_pidfile).
+    # writer-less FIFO would block openssl/the working-copy cat forever with
+    # no log line, and a directory (Docker auto-creates one when a host bind
+    # source is missing) only fails later at ssl_init with a misleading
+    # perms error.
     if [ ! -f "$TLS_CERT_MOUNT" ]; then
       printf 'level=error msg="mounted TLS certificate path is not a regular file (a missing host bind source makes Docker create a directory here); mount an existing PEM file or unset the mount" path=%s\n' \
         "$TLS_CERT_MOUNT" >&2
@@ -274,12 +257,9 @@ resolve_tls_cert() {
         "$TLS_CERT_MOUNT" >&2
     fi
     # Operator-mounted PEM: copied on every boot to a root:nut 640 working
-    # copy inside /etc/nut, never chowned/chmodded in place (on a rw bind
-    # mount that would mutate the HOST file — see the placement subtlety
-    # above). Root always reads the mount regardless of its perms, so a
-    # 600 root:root read-only mount works; the copy is nut-readable by
-    # construction, and a cert rotated on the host is picked up at the next
-    # restart.
+    # copy inside /etc/nut, never chowned/chmodded in place (that would
+    # mutate the HOST file on a rw bind mount). Root always reads the mount
+    # regardless of its perms, so a 600 root:root read-only mount works.
     _install_cert_working_copy "$TLS_CERT_MOUNT" "$TLS_CERT_MOUNTED_RUNTIME" || return 1
     TLS_CERT_PATH="$TLS_CERT_MOUNTED_RUNTIME"
     printf 'level=info msg="TLS enabled with operator-mounted certificate (working copy; mount is never modified, a 600 root:root read-only mount is fine)" certfile=%s source=%s fingerprint="%s"\n' \
@@ -305,9 +285,7 @@ resolve_tls_cert() {
 
 # reconcile_tls_working_copies: remove whichever managed working copies the
 # current boot did not provision — always, even with an upsd.conf.user
-# override mounted (see the entrypoint call site for the full rationale).
-# set -u safe: $TLS_CERT_PATH is only read when API_TLS=true, where
-# resolve_tls_cert guarantees it is set.
+# override mounted.
 reconcile_tls_working_copies() {
   if [ "$API_TLS" != "true" ]; then
     _rw_stale="$TLS_CERT_MOUNTED_RUNTIME $TLS_CERT_RUNTIME"

@@ -831,10 +831,8 @@ if (
   err "FAIL: bracketed-IPv6 API_ADDRESS was accepted"
   fail=1
 fi
-# A dash-leading UPS_NAME must fail fast at boot: every CLI consumer passes
-# the name as the first getopt-parsed argument (healthcheck `upsc -foo@...`,
-# comms_fresh, `upsdrvctl stop -foo`), so it parses as options and the
-# container would boot into a permanently-broken state.
+# UPS_NAME is the first getopt-parsed arg of every CLI consumer (healthcheck,
+# comms_fresh, upsdrvctl); dash-leading parses as options, not a name.
 if (
   UPS_NAME='-foo'
   run_validations

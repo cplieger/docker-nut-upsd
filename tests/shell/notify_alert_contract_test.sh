@@ -1,28 +1,25 @@
 #!/usr/bin/env bash
 # nut-notify.sh: the NOTIFYCMD upsmon runs for every UPS event, and the source
-# of the log lines that this repo's alert rules match.
+# of the log lines this repo's alert rules match.
 #
-# WHY THIS IS A CONTRACT AND NOT A FORMATTING PREFERENCE: alerts.yaml parses
-# these lines with logfmt and filters on the PARSED event label -- ONBATT,
-# ONLINE, LOWBATT, FSD|SHUTDOWN, NOCOMM, REPLBATT|ALARM. Rename the field, emit
-# a second event= keyval ahead of the real one, or drop the default case arm,
-# and UPSOnBattery / UPSLowBattery / UPSForcedShutdown / UPSCommsLost /
-# UPSHardwareFault stop firing SILENTLY: nothing errors, no test fails, the
-# dashboards stay green, and the gap is discovered during a real outage. The
-# event names below are read OUT of alerts.yaml rather than named here, so a
-# divergence between the two files fails.
+# WHY THIS IS A CONTRACT, NOT A FORMATTING PREFERENCE: alerts.yaml parses these
+# lines with logfmt and filters on the PARSED event label. Rename the field,
+# emit a second event= keyval ahead of the real one, or drop the default case
+# arm, and UPSOnBattery / UPSLowBattery / UPSForcedShutdown / UPSCommsLost /
+# UPSHardwareFault stop firing SILENTLY: nothing errors, no test fails, and
+# the gap surfaces during a real outage. Event names are read OUT of
+# alerts.yaml rather than named here, so a divergence between the two files
+# fails.
 #
-# This script is not covered by tests/smoke.sh at all. It runs standalone (upsmon
-# execs it, so it cannot source the shared helper), needs no privileges, and is
-# executed here as the real script rather than extracted -- the whole file IS the
-# unit.
-# Lint directives for this whole file, each against a stated guarantee rather than
-# an assumption:
-#   SC2015 - the assertion form `[ cond ] && ok "..." || no "..."` cannot mis-fire,
-#     because lib.sh's ok/no return 0 unconditionally by design (see their comment).
-#   SC2016 - the backtick pattern that reads a matcher out of alerts.yaml must stay
-#     single-quoted: it matches the LITERAL backticks LogQL wraps a line filter in,
-#     and double quotes would run it as a command substitution.
+# Not covered by tests/smoke.sh: this script runs standalone (upsmon execs
+# it, so it cannot source the shared helper) and is executed here as the
+# real script rather than extracted.
+#
+# Lint directives for this whole file, each against a stated guarantee:
+#   SC2015 - ok/no return 0 unconditionally, so `[ cond ] && ok || no` cannot mis-fire.
+#   SC2016 - the backtick pattern reading a matcher out of alerts.yaml must stay
+#     single-quoted: it matches the LITERAL backticks LogQL wraps a line filter
+#     in, and double quotes would run it as a command substitution.
 # shellcheck disable=SC2015,SC2016
 set -u
 
@@ -30,13 +27,10 @@ set -u
 . "$(dirname -- "$0")/lib.sh"
 new_workdir >/dev/null
 
-# The file under test; a caller who SET ENTRYPOINT wins, which is the red-check:
+# The file under test; a caller who SET ENTRYPOINT wins (the red-check):
 #   ENTRYPOINT=/tmp/mut-notify.sh bash tests/shell/notify_alert_contract_test.sh
 [ "$ENTRYPOINT" = "$REPO_ROOT/entrypoint.sh" ] && ENTRYPOINT="$REPO_ROOT/nut-notify.sh"
 
-# Same validation lib.sh applies before every extraction: a mistyped or stale
-# override must name itself instead of surfacing as a script that produced no
-# output, which every assertion below would read as a missing field.
 if [ ! -f "$ENTRYPOINT" ] || [ ! -r "$ENTRYPOINT" ]; then
   printf 'harness error: ENTRYPOINT is not a readable file: %s\n' "$ENTRYPOINT" >&2
   exit 1
@@ -63,35 +57,30 @@ all_match() {
 }
 
 # --- 1. the LogQL matchers, read FROM alerts.yaml ---------------------------------
-# The matcher literal is extracted from the rule file at run time, so EITHER side
-# of the contract failing fails here: rename the log field and the emitted line
-# stops matching; edit the alert expression and the extracted literal changes out
-# from under the emitter. A hard-coded copy of the matcher would only ever see the
-# first half.
+# The matcher literal is extracted from the rule file at run time, so EITHER
+# side of the contract failing fails here.
 ALERTS="$REPO_ROOT/alerts.yaml"
 
 # rule_events <alert-name> -> every NUT event name that rule's label filter
-# selects, deduplicated (UPSOnBattery names each event once per arm).
+# selects, deduplicated.
 #
-# The rules read a PARSED logfmt field (`| logfmt | event="X"`, or `event=~"A|B"`
-# for the pairs), so there is no backtick line-filter literal left to extract and
-# a whole-line grep would no longer prove what the rule matches. The range still
-# ends at the NEXT rule (or EOF) rather than at a window literal, so a window
-# change cannot overrun it into the following rule.
+# The rules read a PARSED logfmt field (`| logfmt | event="X"`, or
+# `event=~"A|B"` for the pairs), so a whole-line grep would no longer prove
+# what the rule matches. The range ends at the NEXT rule (or EOF) rather than
+# a window literal, so a window change cannot overrun it.
 rule_events() {
   awk -v want="- alert: $1" '
     $0 ~ want { inrule = 1; next }
     inrule && /- alert: / { exit }
     inrule { print }
-  ' "$ALERTS" |
-    sed -n 's/.*| logfmt | event=~*"\([^"]*\)".*/\1/p' |
-    tr '|' '\n' | sort -u
+  ' "$ALERTS" \
+    | sed -n 's/.*| logfmt | event=~*"\([^"]*\)".*/\1/p' \
+    | tr '|' '\n' | sort -u
 }
 
 # logfmt_field <key> <line> -> the value a logfmt parser binds to <key>. The
-# FIRST occurrence wins, which is exactly why field order is load-bearing:
-# a value that could inject a second event= keyval must not be able to precede
-# the real field. Surrounding double quotes are stripped, as the parser does.
+# FIRST occurrence wins, which is why field order is load-bearing: a value
+# that could inject a second event= keyval must not precede the real field.
 logfmt_field() {
   printf '%s\n' "$2" | awk -v k="$1" '{
     for (i = 1; i <= NF; i++) {
@@ -112,8 +101,7 @@ E_NOCOMM=$(rule_events UPSCommsLost)
 E_FAULT=$(rule_events UPSHardwareFault)
 E_ONBATT_PAIR=$(rule_events UPSOnBattery)
 
-# Non-emptiness is not enough: an empty event name would make the comparison
-# below assert nothing, and a name extracted from the WRONG rule would be
+# Non-emptiness is not enough: a name extracted from the WRONG rule would be
 # non-empty but meaningless. Every NUT notify type is upper-case ASCII, so the
 # SHAPE is the guard that catches both.
 for _ev in $E_LOWBATT $E_FSD $E_NOCOMM $E_FAULT $E_ONBATT_PAIR; do
@@ -129,9 +117,7 @@ for _ev in $E_LOWBATT $E_FSD $E_NOCOMM $E_FAULT $E_ONBATT_PAIR; do
 done
 
 # emits_event <event> -> 0 when the handler's record binds that event to the
-# parsed event label. Asserting the FIELD, not a substring: after the matchers
-# became label filters, a token sitting anywhere else on the line no longer
-# matches, and neither should this test.
+# parsed event label, not merely a substring anywhere on the line.
 emits_event() {
   [ "$(logfmt_field event "$(notify "$1")")" = "$1" ]
 }
@@ -162,9 +148,9 @@ emits_event "$E_NOCOMM" \
   || no 'UPSHardwareFault event labels' "not bound:$(unbound_events "$E_FAULT")"
 
 # UPSOnBattery needs BOTH halves of the pair to reach the log: with ONLINE
-# missing the rule can never resolve, and with ONBATT missing it can never fire.
-# The COUNT is pinned too: an arm deleted from the expression would otherwise
-# quietly reduce this to whichever event survived.
+# missing the rule can never resolve, and with ONBATT missing it can never
+# fire. The COUNT is pinned too, so a deleted arm cannot quietly reduce this
+# to whichever event survived.
 _pair_n=0
 for _ev in $E_ONBATT_PAIR; do
   _pair_n=$((_pair_n + 1))
@@ -175,13 +161,11 @@ _pair_seen=$(printf '%s' "$E_ONBATT_PAIR" | tr '\n' ' ')
   || no 'UPSOnBattery event pair' "alerts.yaml should name 2 events, got $_pair_n ($_pair_seen); not bound:$(unbound_events "$E_ONBATT_PAIR")"
 
 # --- 1b. every matched NUT event is actually routed to this handler ----------------
-# This script only runs when upsmon's NOTIFYFLAG for the event carries EXEC, and
-# that list lives in generate-config.sh. So an alert can key on a perfectly-shaped
-# event= literal that NUT will never hand to the handler -- ALARM was exactly that
-# case before it was wired. Read BOTH sides here: the event names out of the alert
-# matchers, and the EXEC routing out of the generator, so dropping either one
-# fails. Scoped per event name rather than a file-wide grep for "EXEC", which would
-# stay green while the specific flag line was deleted.
+# This script only runs when upsmon's NOTIFYFLAG for the event carries EXEC
+# (generate-config.sh) -- ALARM was matched by an alert but not wired to EXEC
+# before this test existed. Read BOTH sides: event names out of the alert
+# matchers, EXEC routing out of the generator, so dropping either fails.
+# Scoped per event name, not a file-wide grep for "EXEC".
 GENERATOR="$REPO_ROOT/generate-config.sh"
 _unrouted=""
 for _ev in $E_LOWBATT $E_FSD $E_NOCOMM $E_FAULT $E_ONBATT_PAIR; do
@@ -193,10 +177,9 @@ done
 
 # --- 2. the record fields the logfmt parser and the matchers both depend on --------
 #
-# Field presence AND, for event, position: logfmt binds the first occurrence of a
-# key, so the genuine event= must precede anything an untrusted value could add.
-# That is why the event assertions above read the parsed field rather than grep
-# the line. One record, every field, each in logfmt shape.
+# Field presence AND, for event, position: logfmt binds the first occurrence
+# of a key, so the genuine event= must precede anything an untrusted value
+# could add.
 _line=$(notify LOWBATT ups 'UPS ups battery low')
 printf '%s\n' "$_line" | grep -q '^level=warn ' \
   && printf '%s' "$_line" | grep -q 'msg="UPS event"' \
@@ -231,9 +214,9 @@ all_match '^level=error ' FSD SHUTDOWN \
 
 # --- 4. the default arm: an event this image has never seen still reports ----------
 #
-# NUT adds notification types across releases. Without the catch-all arm, `level`
-# would be unset and the line would either abort or lose its severity -- so a new
-# upstream event would go unreported rather than merely unclassified.
+# NUT adds notification types across releases. Without the catch-all arm,
+# `level` would be unset and a new upstream event would go unreported rather
+# than merely unclassified.
 notify BATTERYCHARGED | grep -q '^level=warn msg="UPS event" event="BATTERYCHARGED" ' \
   && ok 'an unrecognized NOTIFYTYPE still emits a complete warn-level record (default arm)' \
   || no 'default arm' "line: $(notify BATTERYCHARGED)"
@@ -252,11 +235,9 @@ NOTIFYTYPE=ONBATT sh "$ENTRYPOINT" 'no ups name' 2>&1 | grep -q 'ups="unknown"' 
 
 # --- 6. the sanitizer's three copies cannot drift apart ---------------------------
 # log_value exists in validate.sh, nut-shutdown.sh AND here, byte-identical by
-# deliberate design: the standalone handlers are exec'd by upsmon and cannot source
-# the shared helper. tests/smoke.sh exercises only validate.sh's copy, so a drifted
-# copy HERE would corrupt this script's logfmt records -- and the alert matchers
-# with them -- while every other suite stayed green. Byte-parity is the contract
-# that keeps the smoke coverage transferable to this copy.
+# deliberate design: the standalone handlers are exec'd by upsmon and cannot
+# source the shared helper. Byte-parity is the contract that keeps smoke.sh's
+# validate.sh coverage transferable to this copy.
 _lv_notify=$(extract_function log_value "$WORK/lv1.sh")
 _lv_validate=$(ENTRYPOINT="$REPO_ROOT/validate.sh" extract_function log_value "$WORK/lv2.sh")
 _lv_shutdown=$(ENTRYPOINT="$REPO_ROOT/nut-shutdown.sh" extract_function log_value "$WORK/lv3.sh")
@@ -270,12 +251,11 @@ else
 fi
 
 # The sanitizer's byte behaviour is unasserted here by DIALECT: this harness's
-# GNU tr cannot tell the shipped octal range from the simplified class, so any
-# assertion would stay green with the guard removed. smoke.sh asserts those
-# bytes under the image's BusyBox; the parity case above transfers that here.
+# GNU tr cannot tell the shipped octal range from the simplified class.
+# smoke.sh asserts those bytes under the image's BusyBox.
 
 # --- 7. disabled host poweroff has its own operator-facing FSD record -------------
-# This is distinct from nut-notify.sh's generic event=FSD record above: it states
+# Distinct from nut-notify.sh's generic event=FSD record above: this states
 # that the configured shutdown command deliberately leaves the host powered on.
 NOOP_SHUTDOWN="${NOOP_SHUTDOWN:-$REPO_ROOT/nut-shutdown-noop.sh}"
 if [ ! -f "$NOOP_SHUTDOWN" ] || [ ! -r "$NOOP_SHUTDOWN" ]; then

@@ -3,24 +3,17 @@
 # Sourced by entrypoint.sh; not executed directly.
 
 # Digit-count ceiling for every numeric env var: the largest all-nines value
-# inside a signed 64-bit long, so any value validate_numeric accepts (<= 18
-# digits) still compares safely in $(( )) and test(1). run_validations bounds
-# the one multiplied pair so its product stays under it too.
+# inside a signed 64-bit long, so any value validate_numeric accepts still
+# compares safely in $(( )) and test(1).
 readonly SHELL_SAFE_INTEGER_MAX=999999999999999999
-
-# ---------------------------------------------------------------------------
-# Validation functions
-# ---------------------------------------------------------------------------
 
 # log_value: sanitize a rejected raw value before interpolating it into a
 # logfmt value="..." field — strip double quotes/backslashes and flatten
 # everything outside printable ASCII to spaces so a malformed value cannot
 # also corrupt or split the error line that reports it. The octal RANGE
 # \040-\176 is deliberate: BusyBox tr treats a complemented character CLASS
-# (tr -c '[:print:]') as a literal set, mangling every value — do not
-# "simplify" this back to a class. LC_ALL=C pins the byte semantics. The 512-byte
-# cap is the same bound the entrypoint puts on captured output: a rejected value
-# is operator-supplied and unbounded, and this runs on a boot path that restarts.
+# (tr -c '[:print:]') as a literal set, mangling every value. LC_ALL=C pins
+# the byte semantics.
 log_value() {
   _lv=$(printf '%s' "$1" | tr -d '\\"' | LC_ALL=C tr -c '\040-\176' ' ' | cut -c 1-513)
   if [ "${#_lv}" -le 512 ]; then
@@ -31,11 +24,8 @@ log_value() {
 }
 
 validate_no_control_chars() {
-  # Control characters (CR, LF, tab, ...) inject or alter NUT config
-  # directives. Trailing-newline tolerance is owned by
-  # canonicalize_validated_values, which the entrypoint runs BEFORE
-  # validation — so a trailing LF that reaches this check un-stripped is
-  # rejected fail-closed rather than silently tolerated.
+  # Trailing-newline tolerance is owned by canonicalize_validated_values,
+  # which runs BEFORE validation — so a surviving LF is rejected fail-closed.
   case "$2" in
     *[[:cntrl:]]*)
       printf 'level=error msg="env var contains control characters" var=%s\n' "$1" >&2
@@ -52,12 +42,11 @@ validate_numeric() {
       ;;
   esac
   # Reject digit strings too long to compare as shell integers, BEFORE
-  # normalizing: beyond LONG_MAX, BusyBox test(1) errors with status 2 — which
+  # normalizing: beyond LONG_MAX, BusyBox test(1) errors with status 2, which
   # an enclosing `if` swallows, so the range validators below would silently
-  # accept the value and unbounded numbers would reach lifecycle.sh arithmetic.
-  # Bounding the RAW value also bounds strip_leading_zeros, whose
-  # one-byte-at-a-time loop is quadratic in the leading-zero run under BusyBox
-  # ash (measured: 54.7s at 40000 zeros, and the value was ACCEPTED).
+  # accept the value. Bounding the RAW value also bounds strip_leading_zeros,
+  # whose one-byte-at-a-time loop is quadratic in the leading-zero run under
+  # BusyBox ash (measured: 54.7s at 40000 zeros, and the value was accepted).
   if [ "${#2}" -gt "${#SHELL_SAFE_INTEGER_MAX}" ]; then
     printf 'level=error msg="env var numeric value has too many digits" var=%s length=%d\n' "$1" "${#2}" >&2
     return 1
@@ -120,11 +109,9 @@ validate_no_backslash() {
 
 validate_no_hash() {
   # NUT's parseconf hard-errors on an unescaped `#` inside a double-quoted
-  # value and treats it as a comment introducer outside quotes; either way the
-  # consumer drops the config line and carries on, so an ordinary value yields
-  # an account that cannot authenticate or a LISTEN line on a different port.
-  # Escaping `\#` at the write sites is possible but the backslash refusal
-  # above closes that route, so refusal at this boundary is the whole remedy.
+  # value and treats it as a comment introducer outside quotes; either way
+  # the consumer drops the config line, yielding an account that cannot
+  # authenticate or a LISTEN line on a different port.
   case "$2" in
     *'#'*)
       printf 'level=error msg="env var contains hash character" var=%s\n' "$1" >&2
@@ -135,8 +122,7 @@ validate_no_hash() {
 
 validate_no_whitespace() {
   # Whitespace splits a value written UNQUOTED into a config file into extra
-  # directive tokens, and an extra getopt argument for the CLI consumers that
-  # take UPS_NAME positionally.
+  # directive tokens.
   case "$2" in
     *[[:space:]]*)
       printf 'level=error msg="env var contains whitespace" var=%s value="%s"\n' "$1" "$(log_value "$2")" >&2
@@ -146,13 +132,11 @@ validate_no_whitespace() {
 }
 
 validate_nut_word() {
-  # NUT parseconf silently ALTERS a value it will not preserve, and this app's
-  # env-var-to-config mapping is the only place that can name the variable:
+  # NUT parseconf silently ALTERS a value it will not preserve:
   # common/parseconf.c addchar() discards every byte below 0x20 or above 0x7F
-  # (CVE-2012-2944, one byte wider than this check) and stops appending at
-  # PCONF_DEFAULT_WORDLEN_LIMIT (512), silently.
-  # For a credential the result is an account whose stored password is not the
-  # one that was set.
+  # (CVE-2012-2944) and silently truncates at PCONF_DEFAULT_WORDLEN_LIMIT
+  # (512). For a credential the result is an account whose stored password is
+  # not the one that was set.
   case "$2" in
     *[!' '-'~']*)
       printf 'level=error msg="env var contains a byte NUT will not preserve (ASCII 0x20-0x7E only)" var=%s\n' "$1" >&2
@@ -172,15 +156,11 @@ validate_identifier() {
       return 1
       ;;
   esac
-  # Position rule: reject a leading dash for every identifier this check
-  # covers (UPS_NAME, UPS_DRIVER, API_USER). CLI consumers pass UPS_NAME as
-  # the FIRST getopt-parsed argument (the HEALTHCHECK's `upsc $UPS_NAME@...`,
-  # the watchdog's comms probe, `upsdrvctl stop $UPS_NAME`), so a dash-leading
+  # Reject a leading dash for every identifier this check covers (UPS_NAME,
+  # UPS_DRIVER, API_USER): CLI consumers pass UPS_NAME as the first
+  # getopt-parsed argument (the HEALTHCHECK's `upsc $UPS_NAME@...`, the
+  # watchdog's comms probe, `upsdrvctl stop $UPS_NAME`), so a dash-leading
   # name parses as options and fails every one of them while boot succeeds.
-  # UPS_DRIVER and API_USER have no getopt-positional exposure (API_USER is
-  # written as an unquoted [$API_USER] section header and a quoted MONITOR
-  # credential), but a leading dash is not a meaningful identifier for either,
-  # so the shared check stays uniform.
   case "$2" in
     -*)
       printf 'level=error msg="env var must not start with a dash" var=%s value="%s"\n' "$1" "$(log_value "$2")" >&2
@@ -190,8 +170,8 @@ validate_identifier() {
 }
 
 # Normalize a validated numeric so arithmetic expansion treats it as base-10.
-# $(( )) reads a leading zero as octal: 08/09 error out (and under set -e kill the
-# comms-watchdog subshell, silently disabling USB recovery); 012 would mean 10.
+# $(( )) reads a leading zero as octal: 08/09 error out (and under set -e kill
+# the comms-watchdog subshell); 012 would mean 10.
 strip_leading_zeros() {
   _n="$1"
   while [ "${#_n}" -gt 1 ] && [ "${_n#0}" != "$_n" ]; do
@@ -224,8 +204,7 @@ normalize_bool() {
 #   net   — network drivers whose port is a host[:port] endpoint (no local device)
 #   other — serial or dual-mode drivers; the UPS_PORT shape decides what device
 #           access is needed (see usb_bus_required)
-# Both censuses are hand-copied from the pinned NUT tree's drivers/Makefile.am
-# (USB_LIBUSB_DRIVERLIST; SNMP_DRIVERLIST plus apcupsd-ups from NUTSW_DRIVERLIST).
+# Both censuses are hand-copied from the pinned NUT tree's drivers/Makefile.am.
 driver_transport() {
   case "${UPS_DRIVER:-}" in
     snmp-ups | apcupsd-ups)
@@ -240,12 +219,10 @@ driver_transport() {
   esac
 }
 
-# usb_bus_required: return 0 when this configuration needs /dev/bus/usb
-# (the live bus bind + cgroup rule from the README). Always for the usb
-# driver family, never for net, and for `other` when UPS_PORT is `auto`
-# or a /dev/bus/usb node -- `other` mixes serial-only and dual-mode
-# drivers with no way to tell them apart by name, so `auto` counts as
-# USB auto-detection for all of them.
+# usb_bus_required: return 0 when this configuration needs /dev/bus/usb.
+# Always for the usb driver family, never for net, and for `other` when
+# UPS_PORT is `auto` or a /dev/bus/usb node — `other` mixes serial-only and
+# dual-mode drivers with no way to tell them apart by name.
 usb_bus_required() {
   case "$(driver_transport)" in
     usb) return 0 ;;
@@ -270,10 +247,7 @@ usb_bus_required() {
 # validating an environment variable") plus whatever domain checks bound the
 # value. identifier and the numeric family admit one alphabet only and so
 # subsume every hazard; nut_word admits ", \ and #, which is why both
-# credential rows name those three. A subsumed hazard is still listed where
-# the refusal must NAME the injection case: `control` everywhere (an invisible
-# byte reports as itself, not as a domain error), quotes/brackets on the two
-# section-header rows.
+# credential rows name those three.
 VALIDATION_TABLE='
 UPS_NAME:control,quotes,brackets,identifier
 UPS_DESC:control,quotes,backslash,hash
@@ -376,7 +350,7 @@ _run_table() {
     # Skip the empty first/last lines of the table literal. Deliberately ONLY
     # the empty string: an accidentally indented row must fail loudly through
     # _resolve_var's unknown-variable error (fail-closed), never be skipped
-    # silently (fail-open) -- this loop dispatches the security validations.
+    # silently.
     case "$_line" in
       '') continue ;;
     esac
@@ -407,14 +381,11 @@ _run_table() {
 
 # canonicalize_validated_values: strip trailing newline bytes (env-file
 # artifacts) from every value whose PRESENTATION may safely change, by
-# assigning it through $(). MUST run BEFORE run_validations and before any
-# raw-value interpretation, so the validated, classified and written bytes are
-# identical: a surviving LF breaks mid-line config writes (upsmon.conf's
-# MONITOR host:$API_PORT) and raw-value cross-field checks (driver_transport
-# matches ${UPS_DRIVER} literally, so "snmp-ups<LF>" classifies as "other" and
-# dodges the network-transport UPS_PORT restrictions). It is also why
-# _resolve_var assigns rather than prints: a $() there would strip the LF for
-# the checks only. A no-op for every value with no trailing LF.
+# assigning it through $(). MUST run BEFORE run_validations: a surviving LF
+# breaks mid-line config writes (upsmon.conf's MONITOR host:$API_PORT) and
+# raw-value cross-field checks (driver_transport matches ${UPS_DRIVER}
+# literally, so "snmp-ups<LF>" classifies as "other"). A no-op for every
+# value with no trailing LF.
 canonicalize_validated_values() {
   UPS_NAME=$(printf '%s' "${UPS_NAME:-}")
   UPS_DESC=$(printf '%s' "${UPS_DESC:-}")
@@ -441,9 +412,8 @@ canonicalize_validated_values() {
   LOWBATT_PERCENT=$(printf '%s' "${LOWBATT_PERCENT:-}")
   LOWBATT_RUNTIME=$(printf '%s' "${LOWBATT_RUNTIME:-}")
   # API_PASSWORD/ADMIN_PASSWORD are enumerated but NOT canonicalized: a
-  # remote client reproduces them byte for byte, so a trailing LF is
-  # refused by the `control` check rather than silently stripped
-  # (env-validation.md, the no-repair rule).
+  # remote client reproduces them byte for byte, so a trailing LF is refused
+  # by the `control` check rather than silently stripped.
   API_PASSWORD="${API_PASSWORD:-}"
   ADMIN_PASSWORD="${ADMIN_PASSWORD:-}"
 }
@@ -466,10 +436,9 @@ run_validations() {
 
   # COMMS_RECOVERY_TIMEOUT and COMMS_BACKOFF_FACTOR are the one validated pair
   # that gets MULTIPLIED in shell arithmetic (lifecycle.sh's stage-2 backoff
-  # threshold). Each is individually bounded to 18 digits by validate_numeric,
-  # but their product can still overflow $(( )); bound the pair so the product
-  # stays representable. Both are validated `positive` above, so _backoff >= 1
-  # and the division is safe.
+  # threshold). Each is individually bounded to 18 digits, but their product
+  # can still overflow $(( )); bound the pair so the product stays
+  # representable. Both are `positive`, so _backoff >= 1 and division is safe.
   _recovery=$(strip_leading_zeros "$COMMS_RECOVERY_TIMEOUT")
   _backoff=$(strip_leading_zeros "$COMMS_BACKOFF_FACTOR")
   if [ "$_recovery" -gt $((SHELL_SAFE_INTEGER_MAX / _backoff)) ]; then
@@ -480,10 +449,10 @@ run_validations() {
   # DEADTIME below the larger poll interval arms an irreversible host poweroff:
   # upsmon promotes an on-battery UPS to OB+LB as soon as one poll is late
   # (clients/upsmon.c:1712), and with SHUTDOWN_ON_BATTERY_CRITICAL=true that
-  # state powers the host off during a mains blip — while this image's own comms
-  # watchdog makes a late poll ordinary. Upstream only ADVISES a multiple of the
-  # poll intervals; this app refuses anything below the larger of them in the
-  # GENERATED upsmon.conf, which a mounted upsmon.conf.user replaces wholesale.
+  # state powers the host off during a mains blip. Upstream only ADVISES a
+  # multiple of the poll intervals; this app refuses anything below the
+  # larger of them in the GENERATED upsmon.conf, which a mounted
+  # upsmon.conf.user replaces wholesale.
   _deadtime=$(strip_leading_zeros "$DEADTIME")
   _pollfreq=$(strip_leading_zeros "$POLLFREQ")
   _pollalert=$(strip_leading_zeros "$POLLFREQALERT")
@@ -499,9 +468,8 @@ run_validations() {
   # UPS_PORT's usable shape depends on the driver's transport (see
   # driver_transport): "auto"/`/dev/*` for usb and serial, a host or
   # host:port endpoint for net. These arms REFUSE the spelling each
-  # transport cannot use -- they do not establish the endpoint or
-  # device-node form, which the driver reports for itself. UPS_PORT's
-  # table row has already applied the unquoted-write guards.
+  # transport cannot use; they do not establish the endpoint or device-node
+  # form, which the driver reports for itself.
   case "$(driver_transport)" in
     usb)
       case "$UPS_PORT" in
@@ -523,13 +491,11 @@ run_validations() {
   esac
 
   # API_USER must not shadow a reserved generated account: upsd.users defines
-  # a hardcoded [admin] (the FSD/set-capable account) and — when both
-  # upsd.users and upsmon.conf are generated — the reserved internal monitor
-  # account [local_upsmon] (the bundled upsmon's `upsmon primary` credential;
-  # see generate-config.sh). upsd keeps the FIRST stanza of a repeated name and
-  # reports the collision on its own stderr (server/user.c user_add,
-  # user_password), so the API pair would authenticate no account while its
-  # `upsmon` line grants that type to the stanza parsed before it.
+  # a hardcoded [admin] and — when both upsd.users and upsmon.conf are
+  # generated — the reserved internal [local_upsmon] monitor account. upsd
+  # keeps the FIRST stanza of a repeated name (server/user.c user_add), so
+  # the API pair would authenticate no account while its `upsmon` line grants
+  # that type to the stanza parsed before it.
   if [ "$API_USER" = "admin" ]; then
     printf 'level=error msg="API_USER must not be admin (reserved for the internal NUT admin user)"\n' >&2
     exit 1

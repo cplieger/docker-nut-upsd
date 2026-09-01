@@ -2,38 +2,34 @@
 # The validation table's dispatch layer: _run_table(), _resolve_var(),
 # _dispatch_check().
 #
-# Every input-validation guard in this image is reached through these three
-# functions. tests/smoke.sh drives the guards themselves hard (the whole
-# injection matrix, through run_validations), but it can only ever observe "the
-# table as shipped rejected this value". What it cannot see is the dispatch
-# layer's own fail-closed rules -- the ones that decide whether a row runs AT ALL:
+# tests/smoke.sh drives the guards themselves through run_validations, but it
+# can only observe "the table as shipped rejected this value". This file
+# covers the dispatch layer's own fail-closed rules that decide whether a row
+# runs at all:
 #
-#   - a row whose variable name is not in _resolve_var must FAIL, not be skipped;
-#   - a row naming an unknown check must FAIL, not be skipped;
-#   - only the EMPTY line is skipped, so an accidentally indented row (a reformat,
-#     a bad merge) fails loudly instead of silently dropping that variable's
-#     checks -- which would reopen the config-injection surface with no log line
-#     anywhere and every existing test still green;
+#   - a row whose variable name is not in _resolve_var must FAIL, not skip;
+#   - a row naming an unknown check must FAIL, not skip;
+#   - only the EMPTY line is skipped, so an accidentally indented row (a
+#     reformat, a bad merge) fails loudly instead of silently dropping that
+#     variable's checks;
 #   - the optional table skips only genuinely EMPTY values.
 #
-# The bait for the skip rule is an INDENTED REAL VARIABLE NAME. A bogus name would
-# not distinguish the two rules: it fails on _resolve_var even under a lenient
-# skip, so the case would pass with the strict rule gone.
+# The bait for the skip rule is an INDENTED REAL VARIABLE NAME: a bogus name
+# would not distinguish the two rules, since it fails on _resolve_var even
+# under a lenient skip.
 #
-# _run_table exits (it is the entrypoint's fail-closed path), so every call here
-# runs in a subshell that IS the condition -- `if ( _run_table ... ); then`. The
-# naive `( fixture; if _run_table; then ...; fi )` form kills the fixture subshell
-# before either branch runs, and the assertion silently vanishes while the tally
-# still reads green.
-# Lint directives for this whole file, each against a stated guarantee rather than
-# an assumption:
-#   SC2015 - the assertion form `[ cond ] && ok "..." || no "..."` cannot mis-fire,
-#     because lib.sh's ok/no return 0 unconditionally by design (see their comment).
-#   SC2034 - the env vars assigned here (UPS_NAME, LOWBATT_PERCENT, the credential
-#     pair) are the INPUTS to validate.sh code that is extracted and sourced at
-#     RUNTIME, so shellcheck cannot see the reads.
-#   SC1090/SC1091 - the sourced paths are produced by the extraction step above,
-#     so there is nothing on disk for shellcheck to follow at lint time.
+# _run_table exits (the entrypoint's fail-closed path), so every call here
+# runs in a subshell that IS the condition -- `if ( _run_table ... ); then`.
+# The naive `( fixture; if _run_table; then ...; fi )` form kills the fixture
+# subshell before either branch runs, and the assertion silently vanishes
+# while the tally still reads green.
+#
+# Lint directives for this whole file, each against a stated guarantee:
+#   SC2015 - ok/no return 0 unconditionally, so `[ cond ] && ok || no` cannot mis-fire.
+#   SC2034 - the env vars assigned here are inputs to code extracted and
+#     sourced at runtime, so shellcheck cannot see the reads.
+#   SC1090/SC1091 - the sourced paths are produced by extraction, so there is
+#     nothing on disk for shellcheck to follow at lint time.
 # shellcheck disable=SC2015,SC2034,SC1090,SC1091
 set -u
 
@@ -41,16 +37,14 @@ set -u
 . "$(dirname -- "$0")/lib.sh"
 new_workdir >/dev/null
 
-# The file under test; a caller who SET ENTRYPOINT wins, which is the red-check:
+# The file under test; a caller who SET ENTRYPOINT wins (the red-check):
 #   ENTRYPOINT=/tmp/mut-validate.sh bash tests/shell/validation_dispatch_test.sh
 [ "$ENTRYPOINT" = "$REPO_ROOT/entrypoint.sh" ] && ENTRYPOINT="$REPO_ROOT/validate.sh"
 
-# The integer ceiling validate_numeric bounds against, sourced from the shipped
-# file rather than restated here. The range ENDS at the following blank line, not
-# at a repeat of the start pattern: sed does not re-test a regex end address on the
-# start line, and with no second copy of the declaration in the file the range ran
-# to EOF and sourced the whole of validate.sh -- which would mask a missing
-# dependency in the explicit load list below.
+# The range ends at the following blank line, not at a repeat of the start
+# pattern: sed does not re-test a regex end address on the start line, so with
+# no second copy of the declaration the range would run to EOF and source the
+# whole file, masking a missing dependency in the explicit load list below.
 consts=$(extract_range '^readonly SHELL_SAFE_INTEGER_MAX=' '^$') || exit 1
 . "$consts"
 [ -n "${SHELL_SAFE_INTEGER_MAX:-}" ] && [ "$(grep -c . "$consts")" -eq 1 ] \
@@ -76,8 +70,7 @@ LOWBATT_PERCENT=""
 
 # --- 1. an unknown CHECK name fails closed ---------------------------------------
 #
-# The table is edited by hand; a typo'd check name must not mean "this variable is
-# now unvalidated".
+# A typo'd check name must not mean "this variable is now unvalidated".
 if (_dispatch_check UPS_NAME ups notacheck) 2>"$ERR"; then
   no 'unknown check refused' 'a misspelled check name was silently accepted'
 else
@@ -95,9 +88,8 @@ fi
 
 # --- 3. dispatch routes to the RIGHT validator -----------------------------------
 #
-# Not just "some validator ran": the percent arm must reach validate_percent, whose
-# range message is the one an operator sees. The optional table's percent check
-# (LOWBATT_PERCENT) is reached by nothing else.
+# Not just "some validator ran": the percent arm must reach validate_percent,
+# whose range message is what an operator sees.
 if (_dispatch_check LOWBATT_PERCENT 101 percent) 2>"$ERR"; then
   no 'percent arm routes correctly' 'a 101% threshold was accepted'
 else
@@ -109,8 +101,8 @@ fi
 # --- 3b. ...and the hash arm reaches validate_no_hash ----------------------------
 #
 # `#` is a parseconf hard error inside a double-quoted NUT value and a comment
-# introducer outside one, so the five rows carrying `hash` depend on this arm.
-# Assert the hash message, not merely that something refused the value.
+# introducer outside one. Assert the hash message, not merely that something
+# refused the value.
 if (_dispatch_check UPS_DESC 'Rack #1 UPS' hash) 2>"$ERR"; then
   no 'hash arm routes correctly' 'a value containing # was accepted'
 else
@@ -130,9 +122,8 @@ fi
 
 # --- 5. the control: a known variable resolves to its value ----------------------
 #
-# The resolver ASSIGNS _value in the caller's shell rather than printing it, so a
-# command substitution here would prove nothing about what the checks see. Read
-# the variable it sets.
+# The resolver ASSIGNS _value in the caller's shell rather than printing it, so
+# a command substitution here would prove nothing about what the checks see.
 _value=""
 _resolve_var UPS_NAME 2>/dev/null
 [ "$_value" = "ups" ] \
@@ -142,11 +133,10 @@ _resolve_var UPS_NAME 2>/dev/null
 # --- 6. THE SKIP RULE: an indented real row fails loudly -------------------------
 #
 # "  UPS_NAME:control" is a row a reformat or a bad merge produces. If the loop
-# skipped anything that is not a clean row, UPS_NAME -- written into ups.conf as a
-# [section] header -- would stop being checked for control characters, brackets and
-# identifier shape, with nothing failing anywhere. The assertion is the
-# unknown-variable line, which proves the row was DISPATCHED (and rejected),
-# not skipped.
+# skipped anything that is not a clean row, UPS_NAME -- written into ups.conf as
+# a [section] header -- would stop being checked for control characters,
+# brackets and identifier shape, with nothing failing anywhere. The assertion
+# is the unknown-variable line, proving the row was DISPATCHED, not skipped.
 INDENTED_TABLE='
   UPS_NAME:control
 '
@@ -160,9 +150,8 @@ fi
 
 # --- 7. the other direction: the literal's own blank lines ARE skipped -----------
 #
-# Isolates the same `case '' ) continue` rule from the opposite side. Without it
-# every table would fail on its own leading and trailing newline, so this case is
-# what keeps case 6 from being satisfiable by simply deleting the skip.
+# Isolates the same `case '' ) continue` rule from the opposite side; without
+# it every table would fail on its own leading and trailing newline.
 CLEAN_TABLE='
 UPS_NAME:control,identifier
 '
@@ -187,9 +176,8 @@ fi
 
 # --- 9. ...and validates the ones that ARE set -----------------------------------
 #
-# The isolating pair for case 8: dropping the emptiness test from that condition
-# would skip every optional row, so a set-but-invalid threshold would reach
-# upsmon.conf unchecked.
+# Dropping the emptiness test from case 8's condition would skip every optional
+# row, so a set-but-invalid threshold would reach upsmon.conf unchecked.
 if (
   LOWBATT_PERCENT=250
   _run_table "$OPTIONAL_TABLE" 1
@@ -203,9 +191,10 @@ fi
 
 # --- 9b. jointly disabled low-battery thresholds fail closed ---------------------
 #
-# Each row accepts zero because zero disables only that axis. The pair is unsafe:
-# ignorelb discards the UPS low-battery flag while both derived paths can never
-# assert. Drive run_validations so this exercises the cross-field boundary.
+# Each row accepts zero because zero disables only that axis; the pair is
+# unsafe together because ignorelb discards the UPS low-battery flag while
+# both derived paths can never assert. Drives run_validations so this
+# exercises the cross-field boundary.
 lowbatt_required_table=$(extract_range "^VALIDATION_TABLE='" "^'\$" "$WORK/lowbatt-required-table.sh") || exit 1
 lowbatt_optional_table=$(extract_range "^VALIDATION_TABLE_OPTIONAL='" "^'\$" "$WORK/lowbatt-optional-table.sh") || exit 1
 . "$lowbatt_required_table"
@@ -260,11 +249,11 @@ fi
 
 # --- 10. the three hand-maintained inventories agree -----------------------------
 #
-# The same variable list is written out three times in the shipped file: rows in
-# the two tables, arms in _resolve_var, assignments in canonicalize_validated_values.
-# Omitting one -- a canonicalizer assignment, say -- leaves the variable validated
-# but written with its raw bytes, with nothing failing anywhere. Read all three out
-# of the production file rather than restating the expected names here.
+# The same variable list is written three times in the shipped file: rows in
+# the two tables, arms in _resolve_var, assignments in
+# canonicalize_validated_values. Omitting one leaves the variable validated
+# but written with its raw bytes, with nothing failing anywhere. Read all
+# three out of the production file rather than restating expected names here.
 table_vars=$(awk '
   /^VALIDATION_TABLE(_OPTIONAL)?=/ { in_table = 1; next }
   in_table && /^[A-Z_][A-Z0-9_]*:/ {
@@ -308,10 +297,9 @@ fi
 
 # --- 11. normalize_bool's canonical OUTPUT, not just its refusal ------------------
 #
-# Every production consumer compares the output with the literal `true`, so the
-# output is the contract and the spelling table is the implementation. smoke.sh
-# proves only that `banana` is refused: swapping an accepted spelling between the
-# two arms leaves that green while reversing a safety toggle.
+# Every production consumer compares the output with the literal `true`, so
+# the spelling table is the implementation and swapping an accepted spelling
+# between the two arms would reverse a safety toggle while smoke.sh stays green.
 load_function normalize_bool
 
 if [ "$(normalize_bool API_TLS true)" = "true" ] \
@@ -332,9 +320,9 @@ fi
 # --- 12. the credential rows refuse without disclosing the value -----------------
 #
 # The property is the PAIRING of the two credential rows with the three silent
-# validators, so the rows are read OUT of the shipped table rather than restated:
-# a routing change fails this. LeakMarker is the sentinel -- a validator that
-# starts printing the value it rejected fails here too.
+# validators, read out of the shipped table rather than restated: a routing
+# change fails this. LeakMarker is the sentinel -- a validator that starts
+# printing the value it rejected fails here too.
 load_function validate_no_quotes
 load_function validate_no_backslash
 load_function validate_nut_word
@@ -375,13 +363,12 @@ check_credential_refusal ADMIN_PASSWORD "LeakMarker$(printf '\r')suffix" 'contai
 
 # --- 13. the documented and the validated inventories agree ----------------------
 #
-# README.md's environment table is the operator-facing contract; the two shipped
-# table literals are what actually gets validated. Nothing reads both, so
-# documenting a new generated variable without adding its validation row -- or
-# retiring a row while leaving the variable documented -- puts an unchecked value
-# into a NUT config file with every other test green. Read both sides out of the
-# tracked files at run time so editing either alone fails, and compare as sets so
-# reordering either one does not.
+# README.md's environment table is the operator-facing contract; the two
+# shipped table literals are what actually gets validated. Documenting a new
+# generated variable without adding its validation row -- or retiring a row
+# while leaving the variable documented -- puts an unchecked value into a NUT
+# config file with every other test green. Read both sides out of the tracked
+# files at run time and compare as sets so reordering either does not matter.
 required_table=$(extract_range "^VALIDATION_TABLE='" "^'\$" "$WORK/required-table.sh") || exit 1
 optional_table=$(extract_range "^VALIDATION_TABLE_OPTIONAL='" "^'\$" "$WORK/optional-table.sh") || exit 1
 . "$required_table"
