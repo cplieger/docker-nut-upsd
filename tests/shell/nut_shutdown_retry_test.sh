@@ -27,6 +27,7 @@ OUT="$WORK/stdout"
 DBUS_ARGS='--system --print-reply --reply-timeout=3000 --dest=org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager.PowerOff boolean:false'
 SETTLE_ARGS='--system --print-reply --reply-timeout=3000 --dest=org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.DBus.Properties.Get string:org.freedesktop.login1.Manager string:PreparingForShutdown'
 INHIBITOR_ARGS='--system --print-reply --reply-timeout=3000 --dest=org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager.ListInhibitors'
+SETTLE_VALUE=true
 
 cat >"$BIN/timeout" <<'EOF'
 #!/bin/sh
@@ -43,7 +44,7 @@ if [ "$*" = "$INHIBITOR_ARGS" ]; then
   exit 0
 fi
 if [ "$*" = "$SETTLE_ARGS" ]; then
-  printf 'method return\n   variant boolean true\n'
+  printf 'method return\n   variant boolean %s\n' "$SETTLE_VALUE"
   exit 0
 fi
 [ "$*" = "$DBUS_ARGS" ] || exit 95
@@ -60,10 +61,9 @@ cat >"$BIN/sleep" <<'EOF'
 #!/bin/sh
 [ "$#" -eq 1 ] || exit 93
 case "$1" in
-  2)
+  2 | 8)
     printf '%s\n' "$1" >>"$SLEEP_CALLS"
     ;;
-  8) : ;;
   *) exit 93 ;;
 esac
 EOF
@@ -86,18 +86,19 @@ run_shutdown() {
     INHIBITOR_CALLS="$INHIBITOR_CALLS" INHIBITOR_ARGS="$INHIBITOR_ARGS" \
     TIMEOUT_CALLS="$TIMEOUT_CALLS" SLEEP_CALLS="$SLEEP_CALLS" \
     RM_CALLS="$RM_CALLS" DBUS_RESULTS="$DBUS_RESULTS" DBUS_ARGS="$DBUS_ARGS" \
-    SETTLE_ARGS="$SETTLE_ARGS" sh "$ENTRYPOINT" >"$OUT" 2>"$ERR" || RUN_RC=$?
+    SETTLE_ARGS="$SETTLE_ARGS" SETTLE_VALUE="$SETTLE_VALUE" \
+    sh "$ENTRYPOINT" >"$OUT" 2>"$ERR" || RUN_RC=$?
 }
 
 run_shutdown success
 if [ "$RUN_RC" -eq 0 ] \
   && [ "$(wc -l <"$DBUS_CALLS")" -eq 1 ] \
   && [ "$(wc -l <"$TIMEOUT_CALLS")" -eq 2 ] \
-  && [ ! -s "$SLEEP_CALLS" ] \
+  && [ "$(cat "$SLEEP_CALLS")" = 8 ] \
   && [ ! -s "$RM_CALLS" ] \
   && grep -qF 'host poweroff dispatched via D-Bus" attempt=1' "$ERR" \
   && ! grep -qF 'retrying' "$ERR"; then
-  ok 'first-attempt success makes one PowerOff request and one settle read without retrying'
+  ok 'first-attempt success makes one PowerOff request, waits to settle, and reads the property without retrying'
 else
   no 'first-attempt success' "rc=$RUN_RC dbus=$(wc -l <"$DBUS_CALLS") timeout=$(wc -l <"$TIMEOUT_CALLS") sleeps=$(wc -l <"$SLEEP_CALLS"); stderr: $(tr '\n' ' ' <"$ERR")"
 fi
@@ -106,7 +107,7 @@ run_shutdown failure success
 if [ "$RUN_RC" -eq 0 ] \
   && [ "$(wc -l <"$DBUS_CALLS")" -eq 2 ] \
   && [ "$(wc -l <"$TIMEOUT_CALLS")" -eq 3 ] \
-  && [ "$(cat "$SLEEP_CALLS")" = 2 ] \
+  && [ "$(cat "$SLEEP_CALLS")" = "$(printf '2\n8')" ] \
   && [ ! -s "$RM_CALLS" ] \
   && [ "$(grep -cF 'D-Bus poweroff failed, retrying" attempt=1' "$ERR")" -eq 1 ] \
   && grep -qF 'host poweroff dispatched via D-Bus" attempt=2' "$ERR"; then
@@ -159,6 +160,28 @@ if [ "$matched_messages" -eq 1 ] && [ "$matched_retries" -eq 0 ]; then
 else
   no 'UPSPowerOffFailed matcher contract' "matched=$matched_messages retry_matches=$matched_retries matcher=$poweroff_failed_matcher"
 fi
+
+SETTLE_VALUE=false
+run_shutdown success
+settle_sleep=$(cat "$SLEEP_CALLS")
+settle_message=$(sed -n 's/^level=[^ ]* msg="\([^"]*\)".*/\1/p' "$ERR" \
+  | grep -F 'D-Bus poweroff failed after logind accepted the request')
+settle_record='level=error msg="D-Bus poweroff failed after logind accepted the request; host poweroff NOT confirmed" attempt=1 detail="method return    variant boolean false"'
+if [ "$RUN_RC" -eq 1 ] \
+  && [ "$(wc -l <"$DBUS_CALLS")" -eq 1 ] \
+  && [ ! -s "$INHIBITOR_CALLS" ] \
+  && [ "$(wc -l <"$TIMEOUT_CALLS")" -eq 2 ] \
+  && [ "$settle_sleep" = 8 ] \
+  && [ "$settle_sleep" -gt 5 ] \
+  && [ "$(cat "$RM_CALLS")" = '-f /var/run/nut-secrets/killpower' ] \
+  && grep -qxF "$settle_record" "$ERR" \
+  && printf '%s\n' "$settle_message" | grep -Eq -- "^${poweroff_failed_matcher}$" \
+  && grep -qF 'cleared killpower flag after failed poweroff so USB comms recovery stays armed' "$ERR"; then
+  ok 'a rejected settle state waits past logind inhibition, clears killpower, and emits the UPSPowerOffFailed record'
+else
+  no 'settle-state failure' "rc=$RUN_RC dbus=$(wc -l <"$DBUS_CALLS") timeout=$(wc -l <"$TIMEOUT_CALLS") sleep=$settle_sleep rm=$(tr '\n' ' ' <"$RM_CALLS") matcher=$poweroff_failed_matcher; stderr: $(tr '\n' '|' <"$ERR")"
+fi
+SETTLE_VALUE=true
 
 cat >"$BIN/rm" <<'EOF'
 #!/bin/sh

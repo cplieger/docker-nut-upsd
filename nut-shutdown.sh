@@ -18,6 +18,17 @@ log_value() {
   fi
 }
 
+# clear_killpower: a latched POWERDOWNFLAG keeps restart_ups_driver
+# (lifecycle.sh) stood down for whatever container life remains after a
+# failed poweroff. Root-only path; upsmon's privileged parent runs this as root.
+clear_killpower() {
+  if rm -f /var/run/nut-secrets/killpower; then
+    printf 'level=warn msg="cleared killpower flag after failed poweroff so USB comms recovery stays armed"\n' >&2
+  else
+    printf 'level=error msg="failed to clear killpower flag after failed poweroff; USB comms recovery may stay disarmed"\n' >&2
+  fi
+}
+
 printf 'level=error msg="UPS forced shutdown triggered; powering off host"\n' >&2
 
 attempt=1
@@ -39,6 +50,7 @@ while [ "$attempt" -le "$DBUS_MAX_ATTEMPTS" ]; do
     case "$_settle" in
       *'boolean false'*)
         printf 'level=error msg="D-Bus poweroff failed after logind accepted the request; host poweroff NOT confirmed" attempt=%d detail="%s"\n' "$attempt" "$(log_value "$_settle")" >&2
+        clear_killpower
         exit 1
         ;;
     esac
@@ -56,12 +68,5 @@ _inhibitors=$({ timeout 5 dbus-send --system --print-reply --reply-timeout="$DBU
   --dest=org.freedesktop.login1 /org/freedesktop/login1 \
   org.freedesktop.login1.Manager.ListInhibitors; } 2>&1) || :
 printf 'level=error msg="D-Bus poweroff inhibitors at failure" detail="%s"\n' "$(log_value "$_inhibitors")" >&2
-# Clear NUT's POWERDOWNFLAG: a latched flag keeps restart_ups_driver
-# (lifecycle.sh) stood down for whatever container life remains after the
-# failed poweroff. Root-only path; upsmon's privileged parent runs this as root.
-if rm -f /var/run/nut-secrets/killpower; then
-  printf 'level=warn msg="cleared killpower flag after failed poweroff so USB comms recovery stays armed"\n' >&2
-else
-  printf 'level=error msg="failed to clear killpower flag after failed poweroff; USB comms recovery may stay disarmed"\n' >&2
-fi
+clear_killpower
 exit 1
