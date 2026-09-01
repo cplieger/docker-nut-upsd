@@ -1,7 +1,6 @@
 Backport of upstream NUT commit ce2364e2b1e79406248be50b01a031db67c1c9fd
 ("drivers: preserve libusb context across USB reopens (richcomm only)").
-No CVE was assigned, so this patch has no VEX entry and no SBOM-fragment
-analysis entry.
+No CVE was assigned.
 
 richcomm_usb is one of the three USB drivers in this build that do not go
 through the shared libusb-1.0 layer: it calls libusb_init(NULL) from its

@@ -51,12 +51,23 @@ validate_numeric() {
     printf 'level=error msg="env var numeric value has too many digits" var=%s length=%d\n' "$1" "${#2}" >&2
     return 1
   fi
+
+  # tier 2: every numeric here reaches a C int. upsmon reads DEADTIME,
+  # HOSTSYNC, NOCOMMWARNTIME and RBWARNTIME through a bare atoi(3) with no
+  # validity arm (clients/upsmon.c:2428-2460), so above INT_MAX the stored
+  # value is not the configured one -- atoi("2147483648") is negative and
+  # atoi("4294967296") is 0, and either makes `(now - lastpoll) > deadtime`
+  # (clients/upsmon.c:1712) true on every pass, promoting the first
+  # on-battery UPS to OB+LB and powering the host off when the opt-in is set.
+  if [ "$(strip_leading_zeros "$2")" -gt 2147483647 ]; then
+    printf 'level=error msg="env var exceeds 2147483647, the largest value its NUT consumer stores" var=%s value="%s"\n' "$1" "$(log_value "$2")" >&2
+    return 1
+  fi
 }
 
 validate_positive() {
   validate_numeric "$1" "$2" || return 1
-  _numeric=$(strip_leading_zeros "$2")
-  if [ "$_numeric" -lt 1 ]; then
+  if [ "$2" -lt 1 ]; then
     printf 'level=error msg="env var must be a positive integer (>= 1)" var=%s value="%s"\n' "$1" "$(log_value "$2")" >&2
     return 1
   fi
@@ -64,8 +75,7 @@ validate_positive() {
 
 validate_port() {
   validate_numeric "$1" "$2" || return 1
-  _numeric=$(strip_leading_zeros "$2")
-  if [ "$_numeric" -lt 1 ] || [ "$_numeric" -gt 65535 ]; then
+  if [ "$2" -lt 1 ] || [ "$2" -gt 65535 ]; then
     printf 'level=error msg="env var must be 1-65535" var=%s value="%s"\n' "$1" "$(log_value "$2")" >&2
     return 1
   fi
@@ -73,8 +83,7 @@ validate_port() {
 
 validate_percent() {
   validate_numeric "$1" "$2" || return 1
-  _numeric=$(strip_leading_zeros "$2")
-  if [ "$_numeric" -gt 100 ]; then
+  if [ "$2" -gt 100 ]; then
     printf 'level=error msg="env var must be 0-100" var=%s value="%s"\n' "$1" "$(log_value "$2")" >&2
     return 1
   fi
@@ -108,10 +117,10 @@ validate_no_backslash() {
 }
 
 validate_no_hash() {
-  # NUT's parseconf hard-errors on an unescaped `#` inside a double-quoted
-  # value and treats it as a comment introducer outside quotes; either way
-  # the consumer drops the config line, yielding an account that cannot
-  # authenticate or a LISTEN line on a different port.
+  # NUT parseconf hard-errors on an unescaped `#` inside a quoted value,
+  # then resumes at the byte after the error instead of the next line. The
+  # remainder is re-parsed in the active section: `desc = "evil #pollonly = 1 x"`
+  # injects `pollonly = 1` (tier 1 refusal).
   case "$2" in
     *'#'*)
       printf 'level=error msg="env var contains hash character" var=%s\n' "$1" >&2
@@ -132,11 +141,12 @@ validate_no_whitespace() {
 }
 
 validate_nut_word() {
-  # NUT parseconf silently ALTERS a value it will not preserve:
-  # common/parseconf.c addchar() discards every byte below 0x20 or above 0x7F
-  # (CVE-2012-2944) and silently truncates at PCONF_DEFAULT_WORDLEN_LIMIT
-  # (512). For a credential the result is an account whose stored password is
-  # not the one that was set.
+  # NUT parseconf will not preserve every byte, and this app's env-var-to-config
+  # mapping is the only place that can name the variable: common/parseconf.c
+  # addchar() discards every byte below 0x20 or above 0x7F (CVE-2012-2944, one
+  # byte wider than this check) printing only the byte, and stops appending at
+  # PCONF_DEFAULT_WORDLEN_LIMIT (512) with no message at all — so a credential
+  # is stored as a password no client can send.
   case "$2" in
     *[!' '-'~']*)
       printf 'level=error msg="env var contains a byte NUT will not preserve (ASCII 0x20-0x7E only)" var=%s\n' "$1" >&2
@@ -167,11 +177,19 @@ validate_identifier() {
       return 1
       ;;
   esac
+
+  # parseconf caps words at 512 bytes and silently drops overflow, so 510
+  # leaves room for both brackets in generated section headers.
+  if [ "${#2}" -gt 510 ]; then
+    printf 'level=error msg="env var is longer than the 510-byte NUT identifier limit" var=%s length=%d\n' "$1" "${#2}" >&2
+    return 1
+  fi
 }
 
 # Normalize a validated numeric so arithmetic expansion treats it as base-10.
-# $(( )) reads a leading zero as octal: 08/09 error out (and under set -e kill
-# the comms-watchdog subshell); 012 would mean 10.
+# test(1) compares decimal, so only $(( )) consumers and values printed in
+# canonical form need this call. A leading zero is octal in $(( )): 08/09
+# error out, and 012 means 10.
 strip_leading_zeros() {
   _n="$1"
   while [ "${#_n}" -gt 1 ] && [ "${_n#0}" != "$_n" ]; do
@@ -241,52 +259,21 @@ usb_bus_required() {
 # Table-driven validation dispatch
 # ---------------------------------------------------------------------------
 
-# Each line: VAR_NAME:check1,check2,...
-# Supported checks: control, quotes, backslash, hash, nospace, nut_word, brackets, identifier, numeric, positive, port, percent
-# A row lists the hazards its write form carries (CONTRIBUTING.md "Adding or
-# validating an environment variable") plus whatever domain checks bound the
-# value. identifier and the numeric family admit one alphabet only and so
-# subsume every hazard; nut_word admits ", \ and #, which is why both
-# credential rows name those three.
-VALIDATION_TABLE='
-UPS_NAME:control,quotes,brackets,identifier
-UPS_DESC:control,quotes,backslash,hash
-UPS_DRIVER:control,identifier
-UPS_PORT:control,quotes,backslash,hash,nospace
-API_USER:control,quotes,brackets,identifier
-API_PASSWORD:control,quotes,backslash,hash,nut_word
-API_ADDRESS:control,quotes,backslash,brackets,hash,nospace
-API_PORT:control,port
-API_TLS:control
-ADMIN_PASSWORD:control,quotes,backslash,hash,nut_word
-SHUTDOWN_ON_BATTERY_CRITICAL:control
-DBUS_PROBE_INTERVAL:control,numeric
-POLLFREQ:control,positive
-POLLFREQALERT:control,positive
-DEADTIME:control,positive
-FINALDELAY:control,numeric
-HOSTSYNC:control,numeric
-NOCOMMWARNTIME:control,numeric
-RBWARNTIME:control,numeric
-COMMS_WATCHDOG:control
-COMMS_CHECK_INTERVAL:control,numeric
-COMMS_RECOVERY_TIMEOUT:control,positive
-COMMS_FAST_RETRIES:control,positive
-COMMS_BACKOFF_FACTOR:control,positive
-'
-
-# Optional vars: only validated when non-empty.
-VALIDATION_TABLE_OPTIONAL='
-LOWBATT_PERCENT:control,percent
-LOWBATT_RUNTIME:control,numeric
-'
+# Each _check call names the variable, its value, and its checks.
+# _dispatch_check owns the legal names; CONTRIBUTING.md "Adding or validating
+# an environment variable" owns row composition. A row lists its write form's
+# hazards plus the domain checks that bound the value. identifier and the numeric
+# family admit one alphabet, so they subsume every BYTE hazard and no LENGTH
+# hazard; nut_word admits ", \ and #, hence those three on both credential rows.
+# A subsumed hazard stays listed where the refusal must NAME the injection case:
+# `control` everywhere, quotes/brackets on the two section-header rows.
 
 # Dispatch a single check for a variable.
 _dispatch_check() {
   _var="$1"
   _val="$2"
-  _check="$3"
-  case "$_check" in
+  _chk_name="$3"
+  case "$_chk_name" in
     control) validate_no_control_chars "$_var" "$_val" ;;
     quotes) validate_no_quotes "$_var" "$_val" ;;
     backslash) validate_no_backslash "$_var" "$_val" ;;
@@ -300,83 +287,58 @@ _dispatch_check() {
     port) validate_port "$_var" "$_val" ;;
     percent) validate_percent "$_var" "$_val" ;;
     *)
-      printf 'level=error msg="unknown validation check" check=%s var=%s\n' "$_check" "$_var" >&2
+      printf 'level=error msg="unknown validation check" check=%s var=%s\n' "$_chk_name" "$_var" >&2
       return 1
       ;;
   esac
 }
 
-# Resolve a variable name into _value without eval.
-_resolve_var() {
-  case "$1" in
-    UPS_NAME) _value="${UPS_NAME:-}" ;;
-    UPS_DESC) _value="${UPS_DESC:-}" ;;
-    UPS_DRIVER) _value="${UPS_DRIVER:-}" ;;
-    UPS_PORT) _value="${UPS_PORT:-}" ;;
-    API_USER) _value="${API_USER:-}" ;;
-    API_PASSWORD) _value="${API_PASSWORD:-}" ;;
-    API_ADDRESS) _value="${API_ADDRESS:-}" ;;
-    API_PORT) _value="${API_PORT:-}" ;;
-    API_TLS) _value="${API_TLS:-}" ;;
-    ADMIN_PASSWORD) _value="${ADMIN_PASSWORD:-}" ;;
-    SHUTDOWN_ON_BATTERY_CRITICAL) _value="${SHUTDOWN_ON_BATTERY_CRITICAL:-}" ;;
-    DBUS_PROBE_INTERVAL) _value="${DBUS_PROBE_INTERVAL:-}" ;;
-    POLLFREQ) _value="${POLLFREQ:-}" ;;
-    POLLFREQALERT) _value="${POLLFREQALERT:-}" ;;
-    DEADTIME) _value="${DEADTIME:-}" ;;
-    FINALDELAY) _value="${FINALDELAY:-}" ;;
-    HOSTSYNC) _value="${HOSTSYNC:-}" ;;
-    NOCOMMWARNTIME) _value="${NOCOMMWARNTIME:-}" ;;
-    RBWARNTIME) _value="${RBWARNTIME:-}" ;;
-    COMMS_WATCHDOG) _value="${COMMS_WATCHDOG:-}" ;;
-    COMMS_CHECK_INTERVAL) _value="${COMMS_CHECK_INTERVAL:-}" ;;
-    COMMS_RECOVERY_TIMEOUT) _value="${COMMS_RECOVERY_TIMEOUT:-}" ;;
-    COMMS_FAST_RETRIES) _value="${COMMS_FAST_RETRIES:-}" ;;
-    COMMS_BACKOFF_FACTOR) _value="${COMMS_BACKOFF_FACTOR:-}" ;;
-    LOWBATT_PERCENT) _value="${LOWBATT_PERCENT:-}" ;;
-    LOWBATT_RUNTIME) _value="${LOWBATT_RUNTIME:-}" ;;
-    *)
-      printf 'level=error msg="unknown variable in validation table" var=%s\n' "$1" >&2
-      return 1
-      ;;
-  esac
+_check() {
+  _row_var="$1"
+  _row_value="$2"
+  shift 2
+  for _row_check in "$@"; do
+    _dispatch_check "$_row_var" "$_row_value" "$_row_check" || exit 1
+  done
 }
 
-# Run all checks from a table against the current environment.
-_run_table() {
-  _table="$1"
-  _optional="$2"
-  printf '%s\n' "$_table" | while IFS= read -r _line; do
-    # Skip the empty first/last lines of the table literal. Deliberately ONLY
-    # the empty string: an accidentally indented row must fail loudly through
-    # _resolve_var's unknown-variable error (fail-closed), never be skipped
-    # silently.
-    case "$_line" in
-      '') continue ;;
-    esac
-    _var="${_line%%:*}"
-    _checks="${_line#*:}"
-    # Empty and trailing-comma check lists lose a field when `set --` splits
-    # them, so the variable would otherwise pass without every declared check.
-    if [ -z "$_checks" ] || [ "${_checks%,}" != "$_checks" ]; then
-      printf 'level=error msg="validation table row declares no checks" var=%s\n' "$_var" >&2
-      exit 1
-    fi
-    _resolve_var "$_var" || exit 1
-    # For optional vars, skip if empty.
-    if [ "$_optional" = "1" ] && [ -z "$_value" ]; then
-      continue
-    fi
-    # Split checks on comma and dispatch each.
-    _saved_ifs="$IFS"
-    IFS=','
-    # shellcheck disable=SC2086
-    set -- $_checks
-    IFS="$_saved_ifs"
-    for _chk; do
-      _dispatch_check "$_var" "$_value" "$_chk" || exit 1
-    done
-  done || exit 1
+_check_optional() {
+  [ -n "$2" ] || return 0
+  _check "$@"
+}
+
+check_required_vars() {
+  _check UPS_NAME "${UPS_NAME:-}" control quotes brackets identifier
+  _check UPS_DESC "${UPS_DESC:-}" control quotes backslash hash
+  _check UPS_DRIVER "${UPS_DRIVER:-}" control identifier
+  _check UPS_PORT "${UPS_PORT:-}" control quotes backslash hash nospace
+  _check API_USER "${API_USER:-}" control quotes brackets identifier
+  _check API_PASSWORD "${API_PASSWORD:-}" control quotes backslash hash nut_word
+  # API_ADDRESS's `brackets` is not that case: upsd_probe_host brackets a
+  # colon-bearing host itself (lifecycle.sh), so `[::1]` would probe `[[::1]]`.
+  _check API_ADDRESS "${API_ADDRESS:-}" control quotes backslash brackets hash nospace
+  _check API_PORT "${API_PORT:-}" control port
+  _check API_TLS "${API_TLS:-}" control
+  _check ADMIN_PASSWORD "${ADMIN_PASSWORD:-}" control quotes backslash hash nut_word
+  _check SHUTDOWN_ON_BATTERY_CRITICAL "${SHUTDOWN_ON_BATTERY_CRITICAL:-}" control
+  _check DBUS_PROBE_INTERVAL "${DBUS_PROBE_INTERVAL:-}" control numeric
+  _check POLLFREQ "${POLLFREQ:-}" control positive
+  _check POLLFREQALERT "${POLLFREQALERT:-}" control positive
+  _check DEADTIME "${DEADTIME:-}" control positive
+  _check FINALDELAY "${FINALDELAY:-}" control numeric
+  _check HOSTSYNC "${HOSTSYNC:-}" control numeric
+  _check NOCOMMWARNTIME "${NOCOMMWARNTIME:-}" control numeric
+  _check RBWARNTIME "${RBWARNTIME:-}" control numeric
+  _check COMMS_WATCHDOG "${COMMS_WATCHDOG:-}" control
+  _check COMMS_CHECK_INTERVAL "${COMMS_CHECK_INTERVAL:-}" control numeric
+  _check COMMS_RECOVERY_TIMEOUT "${COMMS_RECOVERY_TIMEOUT:-}" control positive
+  _check COMMS_FAST_RETRIES "${COMMS_FAST_RETRIES:-}" control positive
+  _check COMMS_BACKOFF_FACTOR "${COMMS_BACKOFF_FACTOR:-}" control positive
+}
+
+check_optional_vars() {
+  _check_optional LOWBATT_PERCENT "${LOWBATT_PERCENT:-}" control percent
+  _check_optional LOWBATT_RUNTIME "${LOWBATT_RUNTIME:-}" control numeric
 }
 
 # canonicalize_validated_values: strip trailing newline bytes (env-file
@@ -419,16 +381,14 @@ canonicalize_validated_values() {
 }
 
 run_validations() {
-  _run_table "$VALIDATION_TABLE" 0
-  _run_table "$VALIDATION_TABLE_OPTIONAL" 1
+  check_required_vars
+  check_optional_vars
 
   # Both zero thresholds arm ignorelb but make its two derived LB paths
   # unreachable. The UPS's own LB flag is then discarded, so shutdown never
   # fires on low battery (tier 2: data-loss consequence).
   if [ -n "${LOWBATT_PERCENT:-}" ] && [ -n "${LOWBATT_RUNTIME:-}" ]; then
-    _lowbatt_percent=$(strip_leading_zeros "$LOWBATT_PERCENT")
-    _lowbatt_runtime=$(strip_leading_zeros "$LOWBATT_RUNTIME")
-    if [ "$_lowbatt_percent" -eq 0 ] && [ "$_lowbatt_runtime" -eq 0 ]; then
+    if [ "$LOWBATT_PERCENT" -eq 0 ] && [ "$LOWBATT_RUNTIME" -eq 0 ]; then
       printf 'level=error msg="LOWBATT_PERCENT and LOWBATT_RUNTIME must not both be zero; zero disables that axis and ignorelb discards the UPS low-battery flag"\n' >&2
       exit 1
     fi
@@ -436,8 +396,8 @@ run_validations() {
 
   # COMMS_RECOVERY_TIMEOUT and COMMS_BACKOFF_FACTOR are the one validated pair
   # that gets MULTIPLIED in shell arithmetic (lifecycle.sh's stage-2 backoff
-  # threshold). Each is individually bounded to 18 digits, but their product
-  # can still overflow $(( )); bound the pair so the product stays
+  # threshold). Each is individually bounded to 2147483647 by validate_numeric,
+  # but their product can still overflow $(( )); bound the pair so the product stays
   # representable. Both are `positive`, so _backoff >= 1 and division is safe.
   _recovery=$(strip_leading_zeros "$COMMS_RECOVERY_TIMEOUT")
   _backoff=$(strip_leading_zeros "$COMMS_BACKOFF_FACTOR")
@@ -450,9 +410,8 @@ run_validations() {
   # upsmon promotes an on-battery UPS to OB+LB as soon as one poll is late
   # (clients/upsmon.c:1712), and with SHUTDOWN_ON_BATTERY_CRITICAL=true that
   # state powers the host off during a mains blip. Upstream only ADVISES a
-  # multiple of the poll intervals; this app refuses anything below the
-  # larger of them in the GENERATED upsmon.conf, which a mounted
-  # upsmon.conf.user replaces wholesale.
+  # multiple of the poll intervals; this app refuses it unconditionally, even where a
+  # mounted upsmon.conf.user makes the value inert -- unmounting must not boot unchecked.
   _deadtime=$(strip_leading_zeros "$DEADTIME")
   _pollfreq=$(strip_leading_zeros "$POLLFREQ")
   _pollalert=$(strip_leading_zeros "$POLLFREQALERT")

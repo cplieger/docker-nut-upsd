@@ -95,4 +95,83 @@ fi
   && ok 'SIGTERM interrupts the boot-time wait, tears down, and exits before the starter completes' \
   || no 'boot-time SIGTERM responsiveness' "started=$started finished=$finished rc=$RUN_RC stderr=$(cat "$WORK/stderr")"
 
+BOOT_BLOCK=$(extract_range '^trap graceful_shutdown TERM INT QUIT HUP$' '^# Run upsmon in the background' "$WORK/boot-failure-block.sh") || exit 1
+
+cat >"$WORK/drive-boot-failure.sh" <<'DRIVER'
+#!/usr/bin/env bash
+set -euf
+UPS_NAME=ups
+UPS_DRIVER=usbhid-ups
+UPS_PORT=auto
+API_ADDRESS=0.0.0.0
+API_PORT=3493
+
+graceful_shutdown() { exit 0; }
+teardown_all() { printf 'teardown\n' >>"$TEARDOWN_LOG"; }
+driver_pidfile() { printf '/var/run/nut/usbhid-ups-ups.pid'; }
+driver_binary() { printf '/usr/lib/nut/usbhid-ups'; }
+timeout() {
+  printf '%s\n' "$*" >>"$TIMEOUT_CALLS"
+  case "$*" in
+    '-k 5 90 /usr/sbin/upsdrvctl start' | '-k 5 30 /usr/sbin/upsd') ;;
+    *) return 96 ;;
+  esac
+  _call=$(wc -l <"$TIMEOUT_CALLS")
+  if [ "$MODE" = starter-failure ] && [ "$_call" -eq 1 ]; then
+    return 9
+  fi
+  return 0
+}
+wait_for_pidfile() {
+  printf '%s\n' "$*" >>"$PIDFILE_CALLS"
+  _call=$(wc -l <"$PIDFILE_CALLS")
+  case "$MODE:$_call" in
+    driver-pid-failure:1 | upsd-pid-failure:2) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+. "$BOOT_BLOCK"
+DRIVER
+chmod +x "$WORK/drive-boot-failure.sh"
+
+run_boot_failure() {
+  : >"$WORK/boot-teardown"
+  : >"$WORK/boot-timeout-calls"
+  : >"$WORK/boot-pidfile-calls"
+  : >"$WORK/boot-stderr"
+  if env MODE="$1" BOOT_BLOCK="$BOOT_BLOCK" \
+    TEARDOWN_LOG="$WORK/boot-teardown" \
+    TIMEOUT_CALLS="$WORK/boot-timeout-calls" \
+    PIDFILE_CALLS="$WORK/boot-pidfile-calls" \
+    bash "$WORK/drive-boot-failure.sh" \
+    >"$WORK/boot-stdout" 2>"$WORK/boot-stderr"; then
+    RUN_RC=0
+  else
+    RUN_RC=$?
+  fi
+}
+
+run_boot_failure starter-failure
+[ "$RUN_RC" -eq 1 ] \
+  && [ "$(wc -l <"$WORK/boot-teardown")" -eq 1 ] \
+  && [ ! -s "$WORK/boot-pidfile-calls" ] \
+  && grep -Fq 'level=error msg="upsdrvctl start failed or timed out at boot" rc=9' "$WORK/boot-stderr" \
+  && ok 'a bounded starter failure tears down the partial stack before exiting 1' \
+  || no 'bounded starter failure cleanup' "rc=$RUN_RC teardown=$(wc -l <"$WORK/boot-teardown") stderr=$(cat "$WORK/boot-stderr")"
+
+run_boot_failure driver-pid-failure
+[ "$RUN_RC" -eq 1 ] \
+  && [ "$(wc -l <"$WORK/boot-teardown")" -eq 1 ] \
+  && [ "$(wc -l <"$WORK/boot-pidfile-calls")" -eq 1 ] \
+  && ok 'a missing driver PID file tears down the partial stack before exiting 1' \
+  || no 'driver PID-file failure cleanup' "rc=$RUN_RC teardown=$(wc -l <"$WORK/boot-teardown") pidfile_calls=$(wc -l <"$WORK/boot-pidfile-calls")"
+
+run_boot_failure upsd-pid-failure
+[ "$RUN_RC" -eq 1 ] \
+  && [ "$(wc -l <"$WORK/boot-teardown")" -eq 1 ] \
+  && [ "$(wc -l <"$WORK/boot-pidfile-calls")" -eq 2 ] \
+  && ok 'a missing upsd PID file tears down the partial stack before exiting 1' \
+  || no 'upsd PID-file failure cleanup' "rc=$RUN_RC teardown=$(wc -l <"$WORK/boot-teardown") pidfile_calls=$(wc -l <"$WORK/boot-pidfile-calls")"
+
 report

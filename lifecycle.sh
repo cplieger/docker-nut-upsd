@@ -6,7 +6,7 @@
 
 readonly PIDFILE_POLL_INTERVAL="0.1"
 readonly PIDFILE_POLL_MAX=50 # nominal wait = POLL_MAX x POLL_INTERVAL = 5s
-readonly DBUS_PROBE_REPLY_TIMEOUT_MS=3000
+readonly DBUS_PROBE_REPLY_TIMEOUT_MS=3000 # under the outer timeout 5 at dbus_poweroff_path_ok: past it that bound kills dbus-send first and the alert-matched error line loses its detail=
 # 3 stop_services commands x 3s = 9s worst case, inside Docker's default 10s
 # stop budget before SIGKILL.
 readonly STOP_CMD_TIMEOUT=3
@@ -227,7 +227,10 @@ kill_stale_driver_from_pidfile() {
     # PID-reuse window as far as plain sh allows.
     if pid_matches_binary "$_ksd_pid" "$(driver_binary)" \
       && kill -0 "$_ksd_pid" 2>/dev/null; then
-      kill -9 "$_ksd_pid" 2>/dev/null || true
+      if kill -9 "$_ksd_pid" 2>/dev/null; then
+        printf 'level=warn msg="comms watchdog force-killed the UPS driver that survived upsdrvctl stop" ups=%s pid=%s\n' \
+          "$UPS_NAME" "$_ksd_pid" >&2
+      fi
     else
       printf 'level=error msg="comms watchdog refusing to kill PID not verified as the UPS driver" ups=%s pid=%s expected=%s\n' \
         "$UPS_NAME" "$_ksd_pid" "$(driver_binary)" >&2

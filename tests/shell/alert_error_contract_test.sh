@@ -25,6 +25,15 @@ case "$PREFIX_PATTERN|$EXCLUSION" in
     ;;
 esac
 
+exclusion_owners=$(grep -oHF -- "$EXCLUSION" "$SHELL_ROOT"/*.sh || true)
+expected_exclusion_owner="$SHELL_ROOT/nut-notify.sh:$EXCLUSION"
+if [ "$exclusion_owners" = "$expected_exclusion_owner" ]; then
+  ok 'only nut-notify owns the UPSContainerError event-exclusion literal'
+else
+  no 'UPSContainerError event-exclusion owner' \
+    "expected exactly one hit in nut-notify.sh, got: $exclusion_owners"
+fi
+
 PREFIX=${PREFIX_PATTERN#^}
 bad=""
 seen=0

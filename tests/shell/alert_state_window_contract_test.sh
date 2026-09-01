@@ -59,4 +59,35 @@ check_pair() {
 check_pair UPSCommsLost NOCOMMWARNTIME
 check_pair UPSPowerOffPathBroken DBUS_PROBE_INTERVAL
 
+on_battery_annotation=$(awk '
+  /^[[:space:]]*#/ { leading = leading $0 ORS; next }
+  /^[[:space:]]*$/ { leading = leading ORS; next }
+  /^[[:space:]]*- alert: UPSOnBattery$/ {
+    printf "%s", leading
+    found = 1
+    exit
+  }
+  { leading = "" }
+  END { if (!found) exit 1 }
+' "$ALERTS") || {
+  printf 'harness error: UPSOnBattery leading annotation not found\n' >&2
+  exit 1
+}
+
+if printf '%s\n' "$on_battery_annotation" | grep -qw POLLFREQ \
+  && printf '%s\n' "$on_battery_annotation" | grep -qw POLLFREQALERT; then
+  ok 'UPSOnBattery sizing annotation names both POLLFREQ and POLLFREQALERT'
+else
+  no 'UPSOnBattery cadence annotation' 'both polling knobs must be named'
+fi
+
+on_battery_window=$(rule_window_seconds UPSOnBattery)
+pollfreq=$(default_seconds POLLFREQ)
+pollfreqalert=$(default_seconds POLLFREQALERT)
+if [ "$on_battery_window" -gt "$((pollfreq + pollfreqalert))" ]; then
+  ok "UPSOnBattery range (${on_battery_window}s) clears the combined default polling gap (${pollfreq}s + ${pollfreqalert}s)"
+else
+  no 'UPSOnBattery polling-gap range' "range=${on_battery_window}s; combined default gap=$((pollfreq + pollfreqalert))s"
+fi
+
 report

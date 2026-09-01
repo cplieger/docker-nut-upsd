@@ -119,6 +119,55 @@ fi
 
 decide_user_overrides
 generate_all_configs
+
+# SHUTDOWNCMD must follow the selected host-shutdown mode rather than pinning
+# either helper in the generated config.
+for shutdown_cmd in /usr/local/bin/nut-shutdown-noop.sh /usr/local/bin/nut-shutdown.sh; do
+  if [ ! -x "$shutdown_cmd" ]; then
+    err "FAIL: selected shutdown helper missing or not executable: $shutdown_cmd"
+    fail=1
+    continue
+  fi
+  SHUTDOWN_CMD="$shutdown_cmd"
+  generate_upsmon_conf >/dev/null 2>&1
+  if ! grep -Fqx "SHUTDOWNCMD \"$shutdown_cmd\"" /etc/nut/upsmon.conf; then
+    err "FAIL: generated SHUTDOWNCMD did not use selected helper: $shutdown_cmd"
+    fail=1
+  fi
+done
+SHUTDOWN_CMD=/usr/local/bin/nut-shutdown-noop.sh
+generate_upsmon_conf >/dev/null 2>&1
+
+NOTIFY_EXPECTED=$(mktemp)
+NOTIFY_ACTUAL=$(mktemp)
+cat >"$NOTIFY_EXPECTED" <<'NOTIFYEOF'
+NOTIFYCMD /usr/local/bin/nut-notify.sh
+NOTIFYFLAG ONLINE SYSLOG+EXEC
+NOTIFYFLAG ONBATT SYSLOG+EXEC
+NOTIFYFLAG LOWBATT SYSLOG+EXEC
+NOTIFYFLAG FSD SYSLOG+EXEC
+NOTIFYFLAG COMMOK SYSLOG+EXEC
+NOTIFYFLAG COMMBAD SYSLOG+EXEC
+NOTIFYFLAG SHUTDOWN SYSLOG+EXEC
+NOTIFYFLAG REPLBATT SYSLOG+EXEC
+NOTIFYFLAG BYPASS SYSLOG+EXEC
+NOTIFYFLAG OVER SYSLOG+EXEC
+NOTIFYFLAG NOCOMM SYSLOG+EXEC
+NOTIFYFLAG ALARM EXEC
+NOTIFYFLAG OTHER EXEC
+NOTIFYEOF
+sed -n -e '/^NOTIFYCMD /p' -e '/^NOTIFYFLAG /p' /etc/nut/upsmon.conf >"$NOTIFY_ACTUAL"
+if [ ! -x /usr/local/bin/nut-notify.sh ]; then
+  err "FAIL: generated NOTIFYCMD handler missing or not executable: /usr/local/bin/nut-notify.sh"
+  fail=1
+fi
+if ! cmp -s "$NOTIFY_EXPECTED" "$NOTIFY_ACTUAL"; then
+  err "FAIL: generated upsmon notification routing differs from the intended handler and event flags"
+  diff -u "$NOTIFY_EXPECTED" "$NOTIFY_ACTUAL" >&2 || :
+  fail=1
+fi
+rm -f "$NOTIFY_EXPECTED" "$NOTIFY_ACTUAL"
+
 for f in ups.conf upsd.conf upsd.users upsmon.conf; do
   if [ ! -s "/etc/nut/$f" ]; then
     err "FAIL: config not generated: /etc/nut/$f"
@@ -363,38 +412,58 @@ if ! (
   fail=1
 fi
 rm -f /var/run/nut-secrets/admin_password
-# warn_weak_api_password truth table. The strong pair is the isolating control:
-# without it, a function that warned unconditionally would pass both cases.
+# warn_weak_api_password: each credential warns immediately below the threshold,
+# not at it, and caller-supplied bytes never enter the warning record.
 WEAK_PASSWORD_ERR=$(mktemp)
+weak_api=$(head -c $((PASSWORD_MIN_LENGTH - 1)) /dev/zero | tr '\0' A)
+weak_admin=$(head -c $((PASSWORD_MIN_LENGTH - 1)) /dev/zero | tr '\0' B)
+threshold_api=$(head -c "$PASSWORD_MIN_LENGTH" /dev/zero | tr '\0' C)
+threshold_admin=$(head -c "$PASSWORD_MIN_LENGTH" /dev/zero | tr '\0' D)
+
 (
-  API_PASSWORD=secret
-  ADMIN_PASSWORD=ABCDEFGHIJKLMNOPQRSTUVWX
+  API_PASSWORD="$weak_api"
+  ADMIN_PASSWORD="$threshold_admin"
   warn_weak_api_password
 ) 2>"$WEAK_PASSWORD_ERR"
 if ! grep -q 'API_PASSWORD is weak' "$WEAK_PASSWORD_ERR" \
-  || grep -q 'ADMIN_PASSWORD is weak' "$WEAK_PASSWORD_ERR"; then
-  err "FAIL: the published weak API password did not emit only the API_PASSWORD warning"
+  || grep -q 'ADMIN_PASSWORD is weak' "$WEAK_PASSWORD_ERR" \
+  || grep -Fq "$weak_api" "$WEAK_PASSWORD_ERR"; then
+  err "FAIL: the below-threshold API password did not emit only a secret-free API_PASSWORD warning"
   fail=1
 fi
 
+: >"$WEAK_PASSWORD_ERR"
 (
-  API_PASSWORD=ABCDEFGHIJKLMNOPQRSTUVWX
-  ADMIN_PASSWORD=short
+  API_PASSWORD="$threshold_api"
+  ADMIN_PASSWORD="$weak_admin"
   warn_weak_api_password
 ) 2>"$WEAK_PASSWORD_ERR"
 if ! grep -q 'ADMIN_PASSWORD is weak' "$WEAK_PASSWORD_ERR" \
-  || grep -q 'API_PASSWORD is weak' "$WEAK_PASSWORD_ERR"; then
-  err "FAIL: a short admin password did not emit only the ADMIN_PASSWORD warning"
+  || grep -q 'API_PASSWORD is weak' "$WEAK_PASSWORD_ERR" \
+  || grep -Fq "$weak_admin" "$WEAK_PASSWORD_ERR"; then
+  err "FAIL: the below-threshold admin password did not emit only a secret-free ADMIN_PASSWORD warning"
   fail=1
 fi
 
+: >"$WEAK_PASSWORD_ERR"
 (
-  API_PASSWORD=ABCDEFGHIJKLMNOPQRSTUVWX
-  ADMIN_PASSWORD=ZYXWVUTSRQPONMLKJIHGFEDC
+  API_PASSWORD="$threshold_api"
+  ADMIN_PASSWORD="$threshold_admin"
   warn_weak_api_password
 ) 2>"$WEAK_PASSWORD_ERR"
 if [ -s "$WEAK_PASSWORD_ERR" ]; then
-  err "FAIL: strong API and admin passwords emitted a weak-credential warning"
+  err "FAIL: passwords exactly at PASSWORD_MIN_LENGTH emitted a weak-credential warning"
+  fail=1
+fi
+
+: >"$WEAK_PASSWORD_ERR"
+(
+  API_PASSWORD=secret
+  ADMIN_PASSWORD="$threshold_admin"
+  warn_weak_api_password
+) 2>"$WEAK_PASSWORD_ERR"
+if ! grep -q 'API_PASSWORD is weak' "$WEAK_PASSWORD_ERR"; then
+  err "FAIL: the shipped default API_PASSWORD did not emit the weak-credential warning"
   fail=1
 fi
 rm -f "$WEAK_PASSWORD_ERR"
@@ -510,6 +579,49 @@ if [ "$(upsd_users_role monuser)" != primary ] \
   fail=1
 fi
 decide_user_overrides
+
+# A snapshotted override that vanishes before its generator runs must abort;
+# silently generating would replace an operator-selected topology mid-boot.
+for vanished_kind in regular symlink; do
+  rm -f /etc/nut/ups.conf /etc/nut/ups.conf.user /etc/nut/ups.conf.target /etc/nut/ups.conf.tmp.*
+  case "$vanished_kind" in
+    regular)
+      printf '[ups]\n' >/etc/nut/ups.conf.user
+      vanished_msg='level=error msg="mounted override path went away after boot read the override topology; aborting (the next boot reads it afresh)" file=ups.conf.user'
+      ;;
+    symlink)
+      printf '[ups]\n' >/etc/nut/ups.conf.target
+      ln -s /etc/nut/ups.conf.target /etc/nut/ups.conf.user
+      vanished_msg='level=error msg="mounted override symlink target went away after boot read the override topology; aborting (the next boot reads it afresh)" file=ups.conf.user'
+      ;;
+  esac
+  decide_user_overrides
+  if [ "$vanished_kind" = regular ]; then
+    rm -f /etc/nut/ups.conf.user
+  else
+    rm -f /etc/nut/ups.conf.target
+  fi
+  VANISHED_ERR=$(mktemp)
+  vanished_rc=0
+  (generate_ups_conf) >/dev/null 2>"$VANISHED_ERR" || vanished_rc=$?
+  vanished_errors=$(grep -cFx "$vanished_msg" "$VANISHED_ERR" || :)
+  if [ "$vanished_rc" -ne 1 ] || [ "$vanished_errors" -ne 1 ]; then
+    err "FAIL: $vanished_kind override disappearance did not exit 1 with one refusal-specific error (rc=$vanished_rc errors=$vanished_errors)"
+    fail=1
+  fi
+  if [ -e /etc/nut/ups.conf ] || [ -L /etc/nut/ups.conf ]; then
+    err "FAIL: $vanished_kind override disappearance fell back to generated ups.conf"
+    fail=1
+  fi
+  if find /etc/nut -maxdepth 1 -name 'ups.conf.tmp.*' -print -quit | grep -q .; then
+    err "FAIL: $vanished_kind override disappearance left a generated-config staging file"
+    fail=1
+  fi
+  rm -f /etc/nut/ups.conf.user /etc/nut/ups.conf.target "$VANISHED_ERR"
+done
+decide_user_overrides
+generate_ups_conf >/dev/null 2>&1
+
 #    Non-regular override refusal (use_user_override): a FIFO planted at an
 #    override path passes a bare existence check and cp then blocks forever
 #    waiting for a writer, hanging config generation with no diagnostic. The
@@ -581,6 +693,69 @@ if [ -n "$(ls -A /etc/nut/ups.conf)" ]; then
 fi
 rmdir /etc/nut/ups.conf
 rm -f /etc/nut/ups.conf.user /etc/nut/ups.conf.tmp.* "$DIRDST_ERR"
+
+rm -f /etc/nut/ups.conf
+mkdir /etc/nut/ups.conf
+GENDST_ERR=$(mktemp)
+gen_rc=0
+decide_user_overrides
+(generate_ups_conf) >/dev/null 2>"$GENDST_ERR" || gen_rc=$?
+if [ "$gen_rc" -eq 0 ] || [ "$gen_rc" -eq 124 ] || [ "$gen_rc" -eq 143 ]; then
+  err "FAIL: directory at /etc/nut/ups.conf was not refused during generation (rc=$gen_rc)"
+  fail=1
+fi
+if ! grep -q 'level=warn msg="destination is a directory; refusing to install file into it"' "$GENDST_ERR"; then
+  err "FAIL: generated ups.conf did not report the shared destination-directory refusal"
+  fail=1
+fi
+if ! grep -q 'level=error msg="failed to install generated config; aborting" file=ups.conf' "$GENDST_ERR"; then
+  err "FAIL: generated ups.conf did not report its install failure"
+  fail=1
+fi
+if [ -n "$(ls -A /etc/nut/ups.conf)" ]; then
+  err "FAIL: generated content leaked inside the directory planted at /etc/nut/ups.conf"
+  fail=1
+fi
+if ls /etc/nut/ups.conf.tmp.* >/dev/null 2>&1; then
+  err "FAIL: generated ups.conf staging file remained after install refusal"
+  fail=1
+fi
+rmdir /etc/nut/ups.conf
+rm -f "$GENDST_ERR"
+
+STAGE_ERR=$(mktemp)
+stage_rc=0
+mv /etc/nut /etc/nut.smoke-bak
+(generate_ups_conf) >/dev/null 2>"$STAGE_ERR" || stage_rc=$?
+mv /etc/nut.smoke-bak /etc/nut
+if [ "$stage_rc" -eq 0 ]; then
+  err "FAIL: generated ups.conf continued after staging-file creation failed"
+  fail=1
+fi
+if ! grep -q 'level=error msg="failed to create generated-config staging file; aborting" file=ups.conf' "$STAGE_ERR"; then
+  err "FAIL: generated ups.conf did not report its staging-file creation failure"
+  fail=1
+fi
+rm -f "$STAGE_ERR"
+
+WRITE_ERR=$(mktemp)
+write_rc=0
+(
+  mktemp() {
+    printf '/etc/nut/nonexistent-dir/ups.conf.tmp.AAAAAA\n'
+  }
+  generate_ups_conf
+) >/dev/null 2>"$WRITE_ERR" || write_rc=$?
+if [ "$write_rc" -eq 0 ]; then
+  err "FAIL: generated ups.conf continued after its staged write failed"
+  fail=1
+fi
+if ! grep -q 'level=error msg="failed to write generated config; aborting" file=ups.conf' "$WRITE_ERR"; then
+  err "FAIL: generated ups.conf did not report its staged-write failure"
+  fail=1
+fi
+rm -f "$WRITE_ERR"
+
 #    A best-effort success diagnostic must not turn a completed override install
 #    into generation fallback when stderr is unavailable.
 printf '[ups]\n    driver = dummy-ups\n    port = /tmp/operator.dev\n' >/etc/nut/ups.conf.user
@@ -653,16 +828,15 @@ generate_all_configs >/dev/null 2>&1
 # 3. Validation rejects config-injection attempts (run_validations exits non-
 #    zero on failure, so each negative case runs in a subshell).
 
-# Every row of the two SHIPPED validation tables, driven with a value the row's
-# config destination forbids. Those declarations are the only link between an
-# operator-set variable and the validator its destination needs, so deleting a
-# row -- or widening the check that rejects a class -- goes unnoticed today: the
-# named cases below fail instead, one per variable and prohibited class. Each
-# case requires the intended validator's OWN message, because a row carries
-# several checks and an outcome-only assertion cannot tell which one refused
-# (shell.md, "where two guards are redundant"). The tables are driven through
-# _run_table rather than run_validations to keep the cross-field guards out of
-# the way; the classes are value shapes, not check names.
+# Every row of the two SHIPPED validation row functions, driven with a value
+# the row's config destination forbids. Those declarations are the only link
+# between an operator-set variable and the validator its destination needs, so
+# deleting a row or widening a check must fail one named case below. Each case
+# requires the intended validator's OWN message, because a row carries several
+# checks and an outcome-only assertion cannot tell which one refused (shell.md,
+# "where two guards are redundant"). The row functions run directly to keep
+# the cross-field guards out of the way; the classes are value shapes, not
+# check names.
 rejected_table_value() {
   case "$1" in
     control) printf 'bad\rvalue' ;;
@@ -706,9 +880,9 @@ check_table_rejection() {
     (
       export "$_matrix_var=$_matrix_value"
       if [ "$_matrix_optional" = 1 ]; then
-        _run_table "$VALIDATION_TABLE_OPTIONAL" 1
+        check_optional_vars
       else
-        _run_table "$VALIDATION_TABLE" 0
+        check_required_vars
       fi
     ) 2>&1
   ); then
@@ -736,6 +910,7 @@ UPS_DESC|hash|0
 UPS_DRIVER|control|0
 UPS_DRIVER|identifier|0
 UPS_PORT|control|0
+UPS_PORT|quote|0
 UPS_PORT|backslash|0
 UPS_PORT|hash|0
 API_USER|control|0
@@ -814,13 +989,6 @@ UPS_PORT|/dev/ttyS0 extra
 API_ADDRESS|0.0.0.0 4444
 CASES
 
-if (
-  UPS_NAME='bad]name'
-  run_validations
-) >/dev/null 2>&1; then
-  err "FAIL: bracket-injection UPS_NAME was accepted"
-  fail=1
-fi
 # Bracketed IPv6 must be rejected: bare IPv6 (::1) is the accepted spelling,
 # because upsd_probe_host brackets colon-bearing hosts itself — accepting
 # [::1] would double-bracket the probe ([[::1]]) and break the healthcheck.
@@ -911,39 +1079,6 @@ done <<'CASES'
 05|07|06|reject
 05|07|07|accept
 CASES
-if (
-  COMMS_CHECK_INTERVAL='notanumber'
-  run_validations
-) >/dev/null 2>&1; then
-  err "FAIL: non-numeric COMMS_CHECK_INTERVAL was accepted"
-  fail=1
-fi
-if (
-  COMMS_BACKOFF_FACTOR='0'
-  run_validations
-) >/dev/null 2>&1; then
-  err "FAIL: zero COMMS_BACKOFF_FACTOR was accepted (collapses stage-2 threshold; watchdog thrashes)"
-  fail=1
-fi
-# A bare CR (0x0D) must be rejected: the old wc -l guard counted only LF, so a
-# CR-only injection slipped through into a NUT config field unaltered.
-if (
-  UPS_DESC="$(printf 'desc\rinjected')"
-  run_validations
-) >/dev/null 2>&1; then
-  err "FAIL: CR-injection UPS_DESC was accepted"
-  fail=1
-fi
-# A trailing backslash must be rejected: in a double-quoted NUT directive a
-# backslash escapes the next character, so a trailing one escapes the closing
-# quote and breaks out of the quoted context (config-quoting breakout).
-if (
-  API_PASSWORD="$(printf 'secret\134')"
-  run_validations
-) >/dev/null 2>&1; then
-  err "FAIL: backslash-injection API_PASSWORD was accepted"
-  fail=1
-fi
 # A credential NUT will not preserve must be refused rather than stored altered:
 # parseconf's addchar() silently discards bytes outside 0x20-0x7E (CVE-2012-2944).
 if (
@@ -962,6 +1097,37 @@ if (
   err "FAIL: whitespace API_USER was accepted"
   fail=1
 fi
+
+# NUT's 512-byte word limit includes the two brackets framing generated
+# UPS_NAME and API_USER sections: 510 identifier bytes fit, 511 do not.
+_section_name_510=$(head -c 510 /dev/zero | tr '\0' a)
+_section_name_511="${_section_name_510}a"
+for _section_var in UPS_NAME API_USER; do
+  if ! (
+    export "$_section_var=$_section_name_510"
+    run_validations
+  ) >/dev/null 2>&1; then
+    err "FAIL: $_section_var rejected a 510-byte generated section identifier"
+    fail=1
+  fi
+
+  _section_err=$(mktemp)
+  if (
+    export "$_section_var=$_section_name_511"
+    run_validations
+  ) >/dev/null 2>"$_section_err"; then
+    err "FAIL: $_section_var accepted a 511-byte generated section identifier"
+    fail=1
+  elif ! grep -Fq "var=$_section_var" "$_section_err" \
+    || ! grep -Fq 'length=511' "$_section_err" \
+    || grep -Fq "$_section_name_511" "$_section_err"; then
+    err "FAIL: $_section_var section-length refusal did not name the variable and length without reflecting the raw value"
+    err "$(head -c 200 "$_section_err")"
+    fail=1
+  fi
+  rm -f "$_section_err"
+done
+
 # API_USER must not shadow a reserved generated account: a [$API_USER] section
 # named like one would merge into the reserved stanza and clobber its
 # credential ([admin] = set/FSD authority; [local_upsmon] = the bundled
@@ -1054,6 +1220,31 @@ elif [ -s "$STANDALONE_OUT" ] || [ -s "$STANDALONE_ERR" ]; then
 fi
 rm -f "$STANDALONE_OUT" "$STANDALONE_ERR"
 
+if ! LIFECYCLE_TOPLEVEL_BAD=$(awk '
+  BEGIN { in_function = 0 }
+  in_function {
+    if ($0 == "}") in_function = 0
+    next
+  }
+  /^[[:space:]]*$/ { next }
+  /^[[:space:]]*#/ { next }
+  /^readonly[[:space:]]+[A-Z0-9_]+=/ { next }
+  /^[a-zA-Z_][a-zA-Z0-9_]*\(\)[[:space:]]*\{$/ {
+    in_function = 1
+    next
+  }
+  { print NR ":" $0 }
+  END {
+    if (in_function) print "EOF: unterminated function"
+  }
+' /usr/local/bin/lifecycle.sh); then
+  err "FAIL: could not inspect lifecycle.sh top-level statements"
+  fail=1
+elif [ -n "$LIFECYCLE_TOPLEVEL_BAD" ]; then
+  err "FAIL: lifecycle.sh executes outside a function: $LIFECYCLE_TOPLEVEL_BAD"
+  fail=1
+fi
+
 # The three NUT controls share Docker's 10-second stop grace. Drive the real
 # sequence with a fake clock so a widened bound or an added control cannot push
 # upsdrvctl stop past SIGKILL.
@@ -1093,6 +1284,28 @@ elif [ "$last_elapsed" -ge 10 ] || [ "$upsdrv_elapsed" -ge 10 ]; then
   fail=1
 fi
 rm -f "$STOP_BUDGET_TRACE"
+
+PIDFILE_WAIT_TRACE=$(mktemp)
+(
+  read_pidfile() { :; }
+  pidfile_wait_start=$(cut -d. -f1 /proc/uptime)
+  if wait_for_pidfile "poll timing probe" /nonexistent /bin/false 2>/dev/null; then
+    pidfile_wait_status=0
+  else
+    pidfile_wait_status=$?
+  fi
+  pidfile_wait_end=$(cut -d. -f1 /proc/uptime)
+  printf '%d %d\n' "$pidfile_wait_status" "$((pidfile_wait_end - pidfile_wait_start))"
+) >"$PIDFILE_WAIT_TRACE"
+read -r pidfile_wait_status pidfile_wait_elapsed <"$PIDFILE_WAIT_TRACE"
+rm -f "$PIDFILE_WAIT_TRACE"
+if [ "$pidfile_wait_status" -ne 1 ]; then
+  err "FAIL: wait_for_pidfile accepted a permanently missing pidfile"
+  fail=1
+elif [ "$pidfile_wait_elapsed" -lt 4 ] || [ "$pidfile_wait_elapsed" -gt 7 ]; then
+  err "FAIL: shipped pidfile poll window was ${pidfile_wait_elapsed}s, want approximately 5s"
+  fail=1
+fi
 
 # Capture cleanup preserves /dev/null on allocation failure but removes real paths.
 CAPTURE_RM_CALLS=$(mktemp)
@@ -1334,8 +1547,8 @@ RESTART_LOG=$(mktemp)
   }
   comms_watchdog
 ) 2>"$WATCHDOG_ERR"
-if ! grep -q 'comms watchdog UPS comms recovered.*restarts=1' "$WATCHDOG_ERR"; then
-  err "FAIL: watchdog recovery not logged after comms returned"
+if ! grep -q 'comms watchdog UPS comms recovered.*stale_secs=135 restarts=1' "$WATCHDOG_ERR"; then
+  err "FAIL: watchdog recovery did not report the full 135-second outage and one restart"
   fail=1
 fi
 second_attempt_no=$(awk 'NR==2{print $1}' "$RESTART_LOG")
@@ -1366,20 +1579,34 @@ fi
 rm -f "$KILLPOWER_ERR"
 
 # 6. Transport classification and device/D-Bus gates.
-if ! (
-  UPS_DRIVER='snmp-ups'
-  [ "$(driver_transport)" = "net" ]
-); then
-  err "FAIL: snmp-ups not classified as a network transport"
+_usb_driver_count=0
+for _driver_path in /usr/lib/nut/usbhid-ups /usr/lib/nut/*_usb; do
+  [ -x "$_driver_path" ] || continue
+  _driver=${_driver_path##*/}
+  _usb_driver_count=$((_usb_driver_count + 1))
+  _transport=$(UPS_DRIVER="$_driver" driver_transport)
+  if [ "$_transport" != usb ]; then
+    err "FAIL: installed USB driver $_driver classified as $_transport"
+    fail=1
+  fi
+done
+if [ "$_usb_driver_count" -eq 0 ]; then
+  err "FAIL: installed driver census found no USB drivers"
   fail=1
 fi
-if ! (
-  UPS_DRIVER='usbhid-ups'
-  [ "$(driver_transport)" = "usb" ]
-); then
-  err "FAIL: usbhid-ups not classified as a USB transport"
-  fail=1
-fi
+
+for _driver in snmp-ups apcupsd-ups; do
+  if [ ! -x "/usr/lib/nut/$_driver" ]; then
+    err "FAIL: documented network UPS driver missing or not executable: /usr/lib/nut/$_driver"
+    fail=1
+    continue
+  fi
+  _transport=$(UPS_DRIVER="$_driver" driver_transport)
+  if [ "$_transport" != net ]; then
+    err "FAIL: installed network driver $_driver classified as $_transport"
+    fail=1
+  fi
+done
 if (
   UPS_DRIVER='snmp-ups'
   UPS_PORT='192.168.1.50'
@@ -1579,6 +1806,43 @@ if ! (
 fi
 rm -f /etc/nut/upsd.pem /etc/nut/upsd-mounted.pem
 
+# Mount-path classification distinguishes absence, a dangling symlink, and a
+# symlink whose target is a valid operator PEM.
+SYMLINK_ERR=$(mktemp)
+rm -f /etc/nut/upsd.pem /etc/nut/upsd-mounted.pem
+: >"$SYMLINK_ERR"
+if ! resolve_tls_cert 2>"$SYMLINK_ERR"; then
+  err "FAIL: resolve_tls_cert failed with no mounted certificate path"
+  fail=1
+elif grep -q 'mounted TLS certificate path is a dangling symlink' "$SYMLINK_ERR"; then
+  err "FAIL: an absent ordinary mount path was reported as a dangling symlink"
+  fail=1
+fi
+
+ln -s /etc/nut/missing-operator.pem /etc/nut/upsd.pem
+: >"$SYMLINK_ERR"
+if ! resolve_tls_cert 2>"$SYMLINK_ERR"; then
+  err "FAIL: resolve_tls_cert rejected a dangling mounted-certificate symlink"
+  fail=1
+elif [ "$TLS_CERT_PATH" != "/etc/nut/upsd-selfsigned.pem" ] \
+  || ! grep -q 'level=warn msg="mounted TLS certificate path is a dangling symlink; ignoring it and provisioning the self-signed certificate" path=/etc/nut/upsd.pem' "$SYMLINK_ERR"; then
+  err "FAIL: a dangling mounted-certificate symlink did not warn and select the self-signed certificate"
+  fail=1
+fi
+rm -f /etc/nut/upsd.pem
+
+ln -s /var/run/nut-secrets/upsd-selfsigned.pem /etc/nut/upsd.pem
+: >"$SYMLINK_ERR"
+if ! resolve_tls_cert 2>"$SYMLINK_ERR"; then
+  err "FAIL: resolve_tls_cert rejected a symlink to a valid operator PEM"
+  fail=1
+elif [ "$TLS_CERT_PATH" != "/etc/nut/upsd-mounted.pem" ] \
+  || grep -q 'mounted TLS certificate path is a dangling symlink' "$SYMLINK_ERR"; then
+  err "FAIL: a symlink to a valid operator PEM was classified as dangling"
+  fail=1
+fi
+rm -f /etc/nut/upsd.pem /etc/nut/upsd-mounted.pem "$SYMLINK_ERR"
+
 #    Non-regular mount refusal: a directory planted at /etc/nut/upsd.pem (what
 #    Docker auto-creates when a host bind source is missing) must make
 #    resolve_tls_cert fail fast with a clear error instead of hanging or
@@ -1707,6 +1971,33 @@ fi
 rmdir /var/run/nut-secrets/upsd-selfsigned.pem
 rm -f "$DIRDEST_ERR"
 
+# A keygen failure must clean every temp and emit one sanitized structured record.
+KEYGEN_ERR=$(mktemp)
+rm -f /etc/nut/upsd.pem /var/run/nut-secrets/upsd-selfsigned.pem
+if (
+  openssl() {
+    if [ "$1" = req ]; then
+      printf 'stub "bad"\nforged=field\n' >&2
+      return 1
+    fi
+    command openssl "$@"
+  }
+  resolve_tls_cert
+) 2>"$KEYGEN_ERR"; then
+  err "FAIL: resolve_tls_cert succeeded after openssl key generation failed"
+  fail=1
+fi
+if ! grep -q '^level=error msg="self-signed TLS certificate keygen failed" path=/var/run/nut-secrets/upsd-selfsigned.pem err="stub bad forged=field"$' "$KEYGEN_ERR" \
+  || [ "$(wc -l <"$KEYGEN_ERR")" -ne 1 ]; then
+  err "FAIL: keygen failure did not emit one sanitized structured error ($(head -c 300 "$KEYGEN_ERR"))"
+  fail=1
+fi
+if find /var/run/nut-secrets -maxdepth 1 -name 'upsd-selfsigned.pem.tmp.*' -print | grep -q .; then
+  err "FAIL: keygen failure leaked a TLS certificate temp file"
+  fail=1
+fi
+rm -f "$KEYGEN_ERR"
+
 # Restore the baseline self-signed working copy for any later sections.
 if ! resolve_tls_cert 2>/dev/null; then
   err "FAIL: could not restore the self-signed working copy after the reconcile cases"
@@ -1741,10 +2032,9 @@ if normalize_bool API_TLS banana >/dev/null 2>&1; then
 fi
 
 # 8. Embedded SBOM fragment (Dockerfile builder stage): the CycloneDX file
-#    covering the source-built components must ship in the image, name all
-#    three components with a version-shaped string each, and carry the
-#    CVE-2026-54161 VEX entry for the backport. BusyBox has no jq, so assert
-#    shape with grep: non-empty, starts with { and ends with }.
+#    covering the source-built components must ship in the image and name all
+#    three components with a version-shaped string each. BusyBox has no jq, so
+#    assert shape with grep: non-empty, starts with { and ends with }.
 SBOM=/usr/share/sbom/nut-upsd.cdx.json
 if [ ! -s "$SBOM" ]; then
   err "FAIL: embedded SBOM fragment missing or empty: $SBOM"
@@ -1769,10 +2059,6 @@ else
     err "FAIL: embedded SBOM fragment has $versions version-shaped component versions (want 3)"
     fail=1
   fi
-  grep -q '"CVE-2026-54161"' "$SBOM" || {
-    err "FAIL: embedded SBOM fragment missing the CVE-2026-54161 VEX entry"
-    fail=1
-  }
 fi
 
 # Restore the section-2 baseline configs for any future sections.

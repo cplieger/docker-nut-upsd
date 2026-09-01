@@ -111,15 +111,6 @@ gate '4242' '4242' 1 \
   && ok 'pidfile PID "-1" is refused by the non-numeric arm even when liveness and identity both pass' \
   || no 'non-numeric PID "-1"' 'the startup gate accepted "-1" as daemon-ready'
 
-# Ordinary garbage, asserted at the behaviour level: for a value like this the
-# non-numeric arm, the `kill -0` probe and the identity check are all redundant
-# (`kill -0 abc` cannot succeed), so removing any single one of them still refuses
-# it. The case is here because it is what a partial write or a corrupted pidfile
-# actually contains; the isolating case for the arm itself is "-1" above.
-! gate 'abc' '4242' 1 && timed_out \
-  && ok 'non-numeric pidfile content is skipped, never trusted, and times out' \
-  || no 'non-numeric pidfile' 'the startup gate accepted non-numeric content'
-
 ! gate '' '4242' 1 && timed_out \
   && ok 'an empty pidfile (absent, or a partial write) times out instead of opening the gate' \
   || no 'empty pidfile' 'the startup gate accepted an empty pidfile'
@@ -152,5 +143,72 @@ else
     && ok 'omitting the expected-binary argument aborts with its own message' \
     || no 'missing expected-binary argument' "aborted without the :? message: $(head -c 200 "$ERR")"
 fi
+
+# Reload the real identity function after the gate cases that deliberately stub it.
+load_function pid_matches_binary
+PROC_PID=4242
+PROC_COMM=""
+PROC_HEAD_RC=0
+PROC_CALLS="$WORK/proc-calls"
+PROC_EXPECTED_CALLS='readlink=-f /proc/4242/exe
+head=-c 64 /proc/4242/comm'
+
+# shellcheck disable=SC2329  # invoked by the extracted pid_matches_binary
+readlink() {
+  printf 'readlink=%s\n' "$*" >>"$PROC_CALLS"
+  return 1
+}
+
+# shellcheck disable=SC2329  # invoked by the extracted pid_matches_binary
+head() {
+  printf 'head=%s\n' "$*" >>"$PROC_CALLS"
+  printf '%s' "$PROC_COMM"
+  return "$PROC_HEAD_RC"
+}
+
+run_comm_match() {
+  : >"$PROC_CALLS"
+  if pid_matches_binary "$PROC_PID" "$1"; then
+    PROC_STATUS=0
+  else
+    PROC_STATUS=$?
+  fi
+  if [ "$(cat "$PROC_CALLS")" != "$PROC_EXPECTED_CALLS" ]; then
+    printf 'harness error: unexpected proc calls: %s\n' "$(tr '\n' '|' <"$PROC_CALLS")" >&2
+    exit 1
+  fi
+}
+
+PROC_COMM=usbhid-ups
+PROC_HEAD_RC=0
+run_comm_match /usr/lib/nut/usbhid-ups
+[ "$PROC_STATUS" -eq 0 ] \
+  && ok 'the comm fallback accepts the expected daemon basename' \
+  || no 'matching comm' "status=$PROC_STATUS"
+
+PROC_COMM=123456789012345
+run_comm_match /usr/lib/nut/1234567890123456
+[ "$PROC_STATUS" -eq 0 ] \
+  && ok 'the comm fallback compares a long basename through its 15-byte comm form' \
+  || no '15-byte comm truncation' "status=$PROC_STATUS"
+
+PROC_COMM=upsd
+run_comm_match /usr/lib/nut/usbhid-ups
+[ "$PROC_STATUS" -ne 0 ] \
+  && ok 'the comm fallback refuses a different process name' \
+  || no 'mismatched comm' 'a different process name was accepted'
+
+PROC_COMM=""
+run_comm_match /usr/lib/nut/usbhid-ups
+[ "$PROC_STATUS" -ne 0 ] \
+  && ok 'the comm fallback refuses an empty process name' \
+  || no 'empty comm' 'an empty process name was accepted'
+
+PROC_COMM=usbhid-ups
+PROC_HEAD_RC=1
+run_comm_match /usr/lib/nut/usbhid-ups
+[ "$PROC_STATUS" -ne 0 ] \
+  && ok 'the comm fallback refuses an unreadable comm file' \
+  || no 'unreadable comm' 'a failed comm read was accepted'
 
 report

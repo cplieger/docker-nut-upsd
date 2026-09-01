@@ -48,8 +48,8 @@ _user_override_present() {
 
 # If /etc/nut/<name>.user was present when overrides were decided, copy it over
 # /etc/nut/<name> and return 0 (caller skips generation). Return 1 when no
-# override is present; abort the boot (exit 1) when the override path exists
-# and cannot be applied.
+# override is present; abort the boot (exit 1) when the decided override cannot
+# be applied, including when its path has since gone away.
 use_user_override() {
   _uo_probed="${_uo_probed:-} $1"
   if ! _user_override_present "$1"; then
@@ -57,7 +57,7 @@ use_user_override() {
     # target) fails -e and would silently drop the operator's override; name
     # it before falling back to generation (warn-only: mirrors the fail-loud
     # posture of the non-regular-file gate below without changing behavior).
-    if [ -L "/etc/nut/$1.user" ]; then
+    if [ -L "/etc/nut/$1.user" ] && [ ! -e "/etc/nut/$1.user" ]; then
       printf 'level=warn msg="mounted override path is a dangling symlink; ignoring it and generating the file" file=%s.user\n' "$1" >&2
     fi
     return 1
@@ -66,7 +66,13 @@ use_user_override() {
   # a writer-less FIFO would block forever and hang config generation with no
   # log line. Mirrors the resolve_tls_cert gate on /etc/nut/upsd.pem.
   if [ ! -f "/etc/nut/$1.user" ]; then
-    printf 'level=error msg="mounted override path is not a regular file; aborting" file=%s.user\n' "$1" >&2
+    if [ -L "/etc/nut/$1.user" ] && [ ! -e "/etc/nut/$1.user" ]; then
+      printf 'level=error msg="mounted override symlink target went away after boot read the override topology; aborting (the next boot reads it afresh)" file=%s.user\n' "$1" >&2
+    elif [ ! -e "/etc/nut/$1.user" ]; then
+      printf 'level=error msg="mounted override path went away after boot read the override topology; aborting (the next boot reads it afresh)" file=%s.user\n' "$1" >&2
+    else
+      printf 'level=error msg="mounted override path is not a regular file; aborting" file=%s.user\n' "$1" >&2
+    fi
     exit 1
   fi
   # Staged install through _replace_file (password.sh; sourced alongside this
@@ -104,11 +110,15 @@ _install_generated() {
   fi
 }
 
+_staged_write_failed() {
+  rm -f "$_sg_tmp"
+  printf 'level=error msg="failed to write generated config; aborting" file=%s\n' "$1" >&2
+  exit 1
+}
+
 # --- ups.conf — skipped if user-mounted ---
-generate_ups_conf() {
-  use_user_override ups.conf && return 0
-  _stage_generated ups.conf
-  cat >"$_sg_tmp" <<UPSEOF
+_emit_ups_conf() {
+  cat <<UPSEOF
 [$UPS_NAME]
     desc = "$UPS_DESC"
     driver = $UPS_DRIVER
@@ -119,31 +129,39 @@ UPSEOF
   # pinned NUT tree); any other driver exits during ups.conf parsing on a flag
   # absent from its vartab (drivers/main.c, storeval).
   if [ "$UPS_DRIVER" = "usbhid-ups" ]; then
-    printf '    pollonly\n' >>"$_sg_tmp"
+    printf '    pollonly\n'
   fi
 
   # Battery overrides (ignorelb tells NUT to use our thresholds instead of
   # hardware).
-  _batt_overrides="${LOWBATT_PERCENT:-}${LOWBATT_RUNTIME:-}"
   if [ -n "$_batt_overrides" ]; then
-    printf '    ignorelb\n' >>"$_sg_tmp"
+    printf '    ignorelb\n'
   fi
 
   # Battery override directives — explicit per-variable to avoid eval.
-  [ -n "${LOWBATT_PERCENT:-}" ] \
-    && printf '    override.battery.charge.low = %s\n' "$LOWBATT_PERCENT" >>"$_sg_tmp"
-  [ -n "${LOWBATT_RUNTIME:-}" ] \
-    && printf '    override.battery.runtime.low = %s\n' "$LOWBATT_RUNTIME" >>"$_sg_tmp"
+  if [ -n "${LOWBATT_PERCENT:-}" ]; then
+    printf '    override.battery.charge.low = %s\n' "$LOWBATT_PERCENT"
+  fi
+  if [ -n "${LOWBATT_RUNTIME:-}" ]; then
+    printf '    override.battery.runtime.low = %s\n' "$LOWBATT_RUNTIME"
+  fi
+}
 
+generate_ups_conf() {
+  use_user_override ups.conf && return 0
+  _batt_overrides="${LOWBATT_PERCENT:-}${LOWBATT_RUNTIME:-}"
+  _stage_generated ups.conf
+  _sg_body=$(_emit_ups_conf)
+  printf '%s\n' "$_sg_body" >"$_sg_tmp" || _staged_write_failed ups.conf
   _install_generated ups.conf
 
   if [ -n "$_batt_overrides" ]; then
     _low_pct_log="${LOWBATT_PERCENT:-unset}"
     _low_rt_log="${LOWBATT_RUNTIME:-unset}"
-    if [ -n "${LOWBATT_PERCENT:-}" ] && [ "$(strip_leading_zeros "$LOWBATT_PERCENT")" -eq 0 ]; then
+    if [ -n "${LOWBATT_PERCENT:-}" ] && [ "$LOWBATT_PERCENT" -eq 0 ]; then
       _low_pct_log=DISABLED
     fi
-    if [ -n "${LOWBATT_RUNTIME:-}" ] && [ "$(strip_leading_zeros "$LOWBATT_RUNTIME")" -eq 0 ]; then
+    if [ -n "${LOWBATT_RUNTIME:-}" ] && [ "$LOWBATT_RUNTIME" -eq 0 ]; then
       _low_rt_log=DISABLED
     fi
 
@@ -152,7 +170,7 @@ UPSEOF
         printf 'level=warn msg="battery percentage threshold disabled; low battery uses the runtime threshold" low_pct=%s low_rt=%s\n' \
           "$_low_pct_log" "$_low_rt_log" >&2
       else
-        printf 'level=warn msg="battery percentage threshold disabled; low battery depends on the UPS reporting battery.runtime.low" low_pct=%s low_rt=%s\n' \
+        printf 'level=warn msg="battery percentage threshold disabled; low battery depends on the UPS reporting battery.runtime and battery.runtime.low" low_pct=%s low_rt=%s\n' \
           "$_low_pct_log" "$_low_rt_log" >&2
       fi
     elif [ "$_low_rt_log" = DISABLED ]; then
@@ -160,7 +178,7 @@ UPSEOF
         printf 'level=warn msg="battery runtime threshold disabled; low battery uses the percentage threshold" low_pct=%s low_rt=%s\n' \
           "$_low_pct_log" "$_low_rt_log" >&2
       else
-        printf 'level=warn msg="battery runtime threshold disabled; low battery depends on the UPS reporting battery.charge.low" low_pct=%s low_rt=%s\n' \
+        printf 'level=warn msg="battery runtime threshold disabled; low battery depends on the UPS reporting battery.charge and battery.charge.low" low_pct=%s low_rt=%s\n' \
           "$_low_pct_log" "$_low_rt_log" >&2
       fi
     else
@@ -179,18 +197,23 @@ UPSEOF
 # warning). STARTTLS is opportunistic in the NUT protocol — clients that
 # never request it keep talking cleartext — so enabling it breaks no legacy
 # client. With API_TLS=false, no TLS directives are emitted.
-generate_upsd_conf() {
-  use_user_override upsd.conf && return 0
-  _stage_generated upsd.conf
-  cat >"$_sg_tmp" <<UPSDEOF
+_emit_upsd_conf() {
+  cat <<UPSDEOF
 LISTEN $API_ADDRESS $API_PORT
 UPSDEOF
   if [ "$API_TLS" = "true" ]; then
-    cat >>"$_sg_tmp" <<UPSDEOF
+    cat <<UPSDEOF
 CERTFILE $TLS_CERT_PATH
 DISABLE_WEAK_SSL true
 UPSDEOF
   fi
+}
+
+generate_upsd_conf() {
+  use_user_override upsd.conf && return 0
+  _stage_generated upsd.conf
+  _sg_body=$(_emit_upsd_conf)
+  printf '%s\n' "$_sg_body" >"$_sg_tmp" || _staged_write_failed upsd.conf
   _install_generated upsd.conf
 }
 
@@ -204,10 +227,8 @@ local_upsmon_credential_active() {
 }
 
 # --- upsd.users — skipped if user-mounted ---
-generate_upsd_users() {
-  use_user_override upsd.users && return 0
-  _stage_generated upsd.users
-  cat >"$_sg_tmp" <<USERSEOF
+_emit_upsd_users() {
+  cat <<USERSEOF
 [admin]
     password = "$ADMIN_PASSWORD"
     actions = set
@@ -215,7 +236,7 @@ generate_upsd_users() {
     instcmds = all
 USERSEOF
   if local_upsmon_credential_active; then
-    cat >>"$_sg_tmp" <<USERSEOF
+    cat <<USERSEOF
 
 [local_upsmon]
     password = "$LOCAL_UPSMON_PASSWORD"
@@ -229,13 +250,20 @@ USERSEOF
     # Legacy fallback — see the credential-topology block above.
     printf 'level=warn msg="upsmon.conf.user mounted without upsd.users.user; generated upsd.users keeps the API user as upsmon primary (cross-file credential contract with a mounted override). Your mounted upsmon.conf must MONITOR with this user and password, or upsd refuses the login and with it the forced-shutdown request, and networked clients fall back to their own HOSTSYNC timeout" user=%s\n' \
       "$API_USER" >&2
-    cat >>"$_sg_tmp" <<USERSEOF
+    cat <<USERSEOF
 
 [$API_USER]
     password = "$API_PASSWORD"
     upsmon primary
 USERSEOF
   fi
+}
+
+generate_upsd_users() {
+  use_user_override upsd.users && return 0
+  _stage_generated upsd.users
+  _sg_body=$(_emit_upsd_users)
+  printf '%s\n' "$_sg_body" >"$_sg_tmp" || _staged_write_failed upsd.users
   _install_generated upsd.users
 }
 
@@ -253,24 +281,12 @@ USERSEOF
 # fault. ALARM and OTHER omit SYSLOG because their stock notices interpolate
 # device-controlled strings (NUT clients/upsmon.h) that would otherwise be
 # re-emitted raw on the alert-matched stream.
-generate_upsmon_conf() {
-  if use_user_override upsmon.conf; then
-    printf 'level=info msg="mounted upsmon.conf.user owns POWERDOWNFLAG; the comms watchdog stand-down and the boot-time stale-flag clear both read this path and stay inert unless your file sets it" path=%s\n' \
-      "$POWERDOWNFLAG_FILE" >&2
-    return 0
-  fi
-  if local_upsmon_credential_active; then
-    _mon_user=local_upsmon
-    _mon_password="$LOCAL_UPSMON_PASSWORD"
-  else
-    # Legacy fallback — see the credential-topology block above.
-    printf 'level=warn msg="upsd.users.user mounted without upsmon.conf.user; generated upsmon.conf MONITOR falls back to the API user/password pair (cross-file credential contract with a mounted override). Your mounted upsd.users must declare this account as upsmon primary, or upsd refuses the forced-shutdown request from the bundled upsmon and networked clients fall back to their own HOSTSYNC timeout" user=%s\n' \
-      "$API_USER" >&2
-    _mon_user="$API_USER"
-    _mon_password="$API_PASSWORD"
-  fi
-  _stage_generated upsmon.conf
-  cat >"$_sg_tmp" <<MONEOF
+# The seven timing directives below are emitted unconditionally: their
+# defaults (entrypoint.sh) are NUT v2.8.5's own (clients/upsmon.c:59-118)
+# and are pinned deliberately, so a NUT bump cannot move the generated
+# file's shutdown-path timing.
+_emit_upsmon_conf() {
+  cat <<MONEOF
 MONITOR $UPS_NAME@$(upsd_probe_host):$API_PORT 1 "$_mon_user" "$_mon_password" primary
 SHUTDOWNCMD "$SHUTDOWN_CMD"
 POWERDOWNFLAG $POWERDOWNFLAG_FILE
@@ -290,10 +306,33 @@ NOTIFYFLAG COMMOK SYSLOG+EXEC
 NOTIFYFLAG COMMBAD SYSLOG+EXEC
 NOTIFYFLAG SHUTDOWN SYSLOG+EXEC
 NOTIFYFLAG REPLBATT SYSLOG+EXEC
+NOTIFYFLAG BYPASS SYSLOG+EXEC
+NOTIFYFLAG OVER SYSLOG+EXEC
 NOTIFYFLAG NOCOMM SYSLOG+EXEC
 NOTIFYFLAG ALARM EXEC
 NOTIFYFLAG OTHER EXEC
 MONEOF
+}
+
+generate_upsmon_conf() {
+  if use_user_override upsmon.conf; then
+    printf 'level=info msg="mounted upsmon.conf.user owns POWERDOWNFLAG; the comms watchdog stand-down and the boot-time stale-flag clear both read this path and stay inert unless your file sets it" path=%s\n' \
+      "$POWERDOWNFLAG_FILE" >&2
+    return 0
+  fi
+  if local_upsmon_credential_active; then
+    _mon_user=local_upsmon
+    _mon_password="$LOCAL_UPSMON_PASSWORD"
+  else
+    # Legacy fallback — see the credential-topology block above.
+    printf 'level=warn msg="upsd.users.user mounted without upsmon.conf.user; generated upsmon.conf MONITOR falls back to the API user/password pair (cross-file credential contract with a mounted override). Your mounted upsd.users must declare this account as upsmon primary, or upsd refuses the forced-shutdown request from the bundled upsmon and networked clients fall back to their own HOSTSYNC timeout" user=%s\n' \
+      "$API_USER" >&2
+    _mon_user="$API_USER"
+    _mon_password="$API_PASSWORD"
+  fi
+  _stage_generated upsmon.conf
+  _sg_body=$(_emit_upsmon_conf)
+  printf '%s\n' "$_sg_body" >"$_sg_tmp" || _staged_write_failed upsmon.conf
   _install_generated upsmon.conf
 }
 

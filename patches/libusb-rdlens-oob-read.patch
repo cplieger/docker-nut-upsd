@@ -1,7 +1,6 @@
 Backport of upstream NUT commit edc06fb39435b892d5daeec53cb4845cb12d1d50
 (PR #3550, issue #3136) for a stack out-of-bounds read in the USB driver
-open path. No CVE was assigned, so this patch has no VEX entry and no
-SBOM-fragment analysis entry, unlike the CVE-2026-54161 backport.
+open path. No CVE was assigned.
 
 nut_libusb_open() chooses between two candidate HID report descriptor
 lengths held in `int32_t rdlens[2]`, but bounds both the loop and the

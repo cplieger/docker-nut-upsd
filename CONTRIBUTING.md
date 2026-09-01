@@ -33,29 +33,26 @@ point or adding new top-level executables.
 
 ## Adding or validating an environment variable
 
-Validation is table-driven and deliberately avoids `eval`. Adding a new
-env var that reaches a config file means touching `validate.sh` in four
+Validation uses value-carrying rows and deliberately avoids `eval`. Adding
+an env var that reaches a config file means touching `validate.sh` in three
 places:
 
-1. Add a row to `VALIDATION_TABLE` (or `VALIDATION_TABLE_OPTIONAL` for
-   vars only checked when non-empty), e.g. `MY_VAR:control,quotes`.
-   Supported checks: `control`, `quotes`, `backslash`, `hash`,
-   `nospace` (the value is written unquoted, so whitespace would split
-   it into extra tokens), `nut_word` (NUT keeps only ASCII 0x20-0x7E and
-   at most 512 bytes), `brackets`, `identifier`, `numeric`, `positive`,
+1. Add a row to `check_required_vars` (or `check_optional_vars` for vars
+   only checked when non-empty), for example:
+   `_check MY_VAR "${MY_VAR:-}" control quotes`. Supported checks:
+   `control`, `quotes`, `backslash`, `hash`, `nospace` (the value is
+   written unquoted, so whitespace would split it into extra tokens),
+   `nut_word` (the byte range and 512-byte word limit NUT preserves; see
+   `validate_nut_word`), `brackets`, `identifier`, `numeric`, `positive`,
    `port`, `percent`.
-2. Add a `case` arm to `_resolve_var` assigning `_value="${MY_VAR:-}"`.
-   The resolver is an explicit lookup table on purpose: there is no
-   indirect expansion, so an unlisted var fails the run instead of
-   silently resolving to empty.
-3. Add an assignment to `canonicalize_validated_values`
+2. Add an assignment to `canonicalize_validated_values`
    (`MY_VAR=$(printf '%s' "${MY_VAR:-}")`) so a trailing newline is
    stripped BEFORE validation and config writes. A value a remote client
    must reproduce byte for byte is the exception: enumerate it there with
    a RAW assignment (`MY_VAR="${MY_VAR:-}"`), as `API_PASSWORD` and
    `ADMIN_PASSWORD` are, so the `control` check refuses a trailing LF
    instead of this app silently stripping it.
-4. If you need a check that doesn't exist yet, add a `validate_*`
+3. If you need a check that does not exist yet, add a `validate_*`
    function and wire it into `_dispatch_check`.
 
 Every value that lands in a NUT config file must reject embedded
@@ -114,19 +111,17 @@ new generated file should respect that same override hook.
   this is the removal checklist they point at. Every patch is removed once
   `NUT_VERSION` reaches v2.8.6, and every removal touches at least the
   patch file itself and the Dockerfile COPY/apply step.
-  The CVE-2026-54161 NOTIFYCMD/execvp backport spans four coupled sites:
-  those two, the CVE's VEX entry in the Dockerfile's SBOM-fragment RUN,
-  and the smoke test's section-8 `CVE-2026-54161` assertion. Refresh the
-  two README paragraphs that describe it as well: the Security section's
-  VEX-entry description, and the Alerting section's "NOTIFYCMD is executed
+  The CVE-2026-54161 NOTIFYCMD/execvp backport spans two coupled removal
+  sites: the patch file and the Dockerfile COPY/apply step. Refresh the two
+  README paragraphs that describe it as well: the Security section's
+  CVE-posture paragraph and the Alerting section's "NOTIFYCMD is executed
   directly" note, which then describes stock v2.8.6 behavior rather than a
   backport. The other three backports - the libusb `rdlens` out-of-bounds
   read (upstream PR #3550), the libusb teardown deadlock on reconnect
   (upstream #598) and the richcomm libusb context reopen (upstream
-  ce2364e2b) - have no CVE and therefore no VEX entry, no SBOM analysis
-  entry and no smoke-test assertion: each spans the patch file, the
-  Dockerfile COPY/apply step, and the README's "Dependency CVE posture"
-  paragraph that names the carried backports.
+  ce2364e2b) - each span the patch file, the Dockerfile COPY/apply step,
+  and the README's "Dependency CVE posture" paragraph that names the
+  carried backports.
   Do not edit the diff bodies: a patch that no longer matches what
   upstream wrote is no longer a backport, and the removal drops the whole
   file with nothing recording the divergence - so a defect found in
@@ -134,6 +129,13 @@ new generated file should respect that same override hook.
   A failing `patch` step on a NUT version
   bump usually means the fix landed upstream: drop the patch rather than
   re-diffing it.
+- **`driver_transport`'s two censuses are hand-copied from the pin.**
+  `validate.sh` lists NUT's libusb and network driver names literally
+  (`drivers/Makefile.am`: `USB_LIBUSB_DRIVERLIST`, `SNMP_DRIVERLIST`,
+  plus `apcupsd-ups` from `NUTSW_DRIVERLIST`). A `NUT_VERSION` bump must
+  re-read those lists: a renamed or added driver silently classifies as
+  `other`, and the runtime image carries no source tree for a test to
+  derive them from.
 - **USB re-enumeration is expected, not exceptional.** Many UPSes reset
   their USB link periodically (the driver runs fine, then goes "Data
   stale"). The `comms_watchdog` in `lifecycle.sh` recovers from this by

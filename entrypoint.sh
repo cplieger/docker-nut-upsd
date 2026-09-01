@@ -82,6 +82,10 @@ canonicalize_validated_values
 # STARTTLS on the upsd listener (opportunistic; legacy clients that never
 # request it keep talking cleartext). See resolve_tls_cert (password.sh).
 : "${API_TLS:=true}"
+# The seven timing directives below restate NUT v2.8.5's own defaults
+# (clients/upsmon.c:59-118) instead of leaving them unset: pinning keeps the
+# FSD sequence and the notification intervals deterministic across a NUT bump,
+# and validate.sh's DEADTIME >= max(POLLFREQ, POLLFREQALERT) check needs values.
 : "${POLLFREQ:=5}"
 : "${POLLFREQALERT:=5}"
 : "${DEADTIME:=15}"
@@ -141,9 +145,11 @@ fi
 export SHUTDOWN_ON_BATTERY_CRITICAL
 SHUTDOWN_CMD="/usr/local/bin/nut-shutdown-noop.sh"
 
-# Accept common boolean spellings case-insensitively so `True`/`1`/`yes`
-# actually arms host shutdown. Fail loud on an unrecognized value: a
-# safety-critical toggle must not silently degrade to the disabled default.
+# Normalize the toggle (accepted spellings: normalize_bool, validate.sh)
+# so a non-canonical spelling ARMS host shutdown instead of silently
+# getting the disabled default. An unrecognized value is a
+# misconfiguration on a safety-critical knob: fail loudly rather than
+# degrading quietly to off.
 SHUTDOWN_ON_BATTERY_CRITICAL=$(normalize_bool SHUTDOWN_ON_BATTERY_CRITICAL "$SHUTDOWN_ON_BATTERY_CRITICAL") || exit 1
 if [ "$SHUTDOWN_ON_BATTERY_CRITICAL" = "true" ]; then
   if [ ! -S /run/dbus/system_bus_socket ]; then
@@ -157,7 +163,8 @@ else
   printf 'level=info msg="host shutdown disabled; an FSD logs and then ends this container through upsmon exit, leaving the restart policy to decide"\n' >&2
 fi
 
-# Normalize COMMS_WATCHDOG the same way as SHUTDOWN_ON_BATTERY_CRITICAL.
+# Normalize COMMS_WATCHDOG, mirroring SHUTDOWN_ON_BATTERY_CRITICAL: fail
+# loud on an unrecognized value rather than silently disabling the watchdog.
 COMMS_WATCHDOG=$(normalize_bool COMMS_WATCHDOG "$COMMS_WATCHDOG") || exit 1
 
 # Normalize API_TLS the same way; a security toggle must not silently fall
@@ -178,6 +185,9 @@ DBUS_PROBE_INTERVAL=$(strip_leading_zeros "$DBUS_PROBE_INTERVAL")
 # generate_all_configs, which writes the resolved TLS_CERT_PATH.
 if [ "$API_TLS" = "true" ]; then
   resolve_tls_cert || exit 1
+  if [ -e /etc/nut/upsd.conf.user ]; then
+    printf 'level=info msg="TLS certificate provisioned; mounted upsd.conf.user owns the TLS directives, and upsd serves this certificate only when the override names it in CERTFILE"\n' >&2
+  fi
 else
   if [ -e /etc/nut/upsd.conf.user ]; then
     printf 'level=info msg="API_TLS=false: no certificate provisioned; mounted upsd.conf.user owns the TLS directives (an override referencing the self-signed PEM needs API_TLS=true)"\n' >&2
@@ -238,9 +248,8 @@ stop_bg_pid() {
 WATCHDOG_PID=""
 DBUS_PROBE_PID=""
 
-# teardown_all: the one teardown sequence every exit path shares (signal
-# trap, upsd-unresponsive exit, upsmon-exit path) — reap both background
-# loops, then stop the NUT daemons.
+# teardown_all: the one teardown sequence every exit path shares - reap both
+# background loops, then stop the NUT daemons. Exit codes stay with the callers.
 teardown_all() {
   trap '' TERM INT QUIT HUP
   stop_bg_pid "${WATCHDOG_PID:-}"
@@ -309,7 +318,8 @@ if [ "$COMMS_WATCHDOG" = "true" ] && [ "$COMMS_CHECK_INTERVAL" -ge 1 ]; then
   comms_watchdog &
   WATCHDOG_PID=$!
 else
-  printf 'level=info msg="comms watchdog disabled"\n' >&2
+  printf 'level=info msg="comms watchdog disabled" watchdog=%s interval=%ss\n' \
+    "$COMMS_WATCHDOG" "$COMMS_CHECK_INTERVAL" >&2
 fi
 
 # Start the D-Bus poweroff-path probe (host shutdown enabled only) so a
@@ -353,14 +363,16 @@ while kill -0 "$UPSMON_PID" 2>/dev/null; do
   # respawn is fresh: both loops keep state in process-local variables, so the
   # cadence restarts from zero.
   if [ -n "${WATCHDOG_PID:-}" ] && ! kill -0 "$WATCHDOG_PID" 2>/dev/null; then
-    wait "$WATCHDOG_PID" 2>/dev/null || true
-    printf 'level=error msg="comms watchdog exited; starting a fresh one, whose recovery cadence restarts from zero"\n' >&2
+    _wd_rc=0
+    wait "$WATCHDOG_PID" 2>/dev/null || _wd_rc=$?
+    printf 'level=error msg="comms watchdog exited; starting a fresh one, whose recovery cadence restarts from zero" rc=%d\n' "$_wd_rc" >&2
     comms_watchdog &
     WATCHDOG_PID=$!
   fi
   if [ -n "${DBUS_PROBE_PID:-}" ] && ! kill -0 "$DBUS_PROBE_PID" 2>/dev/null; then
-    wait "$DBUS_PROBE_PID" 2>/dev/null || true
-    printf 'level=error msg="D-Bus poweroff-path probe exited; starting a fresh one, whose unreachable/recovered state restarts from zero"\n' >&2
+    _dp_rc=0
+    wait "$DBUS_PROBE_PID" 2>/dev/null || _dp_rc=$?
+    printf 'level=error msg="D-Bus poweroff-path probe exited; starting a fresh one, whose unreachable/recovered state restarts from zero" rc=%d\n' "$_dp_rc" >&2
     dbus_liveness_probe &
     DBUS_PROBE_PID=$!
   fi

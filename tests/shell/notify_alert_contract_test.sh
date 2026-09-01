@@ -6,7 +6,7 @@
 # lines with logfmt and filters on the PARSED event label. Rename the field,
 # emit a second event= keyval ahead of the real one, or drop the default case
 # arm, and UPSOnBattery / UPSLowBattery / UPSForcedShutdown / UPSCommsLost /
-# UPSHardwareFault stop firing SILENTLY: nothing errors, no test fails, and
+# UPSHardwareFault / UPSProtectionDegraded stop firing SILENTLY: nothing errors, no test fails, and
 # the gap surfaces during a real outage. Event names are read OUT of
 # alerts.yaml rather than named here, so a divergence between the two files
 # fails.
@@ -99,12 +99,13 @@ E_LOWBATT=$(rule_events UPSLowBattery)
 E_FSD=$(rule_events UPSForcedShutdown)
 E_NOCOMM=$(rule_events UPSCommsLost)
 E_FAULT=$(rule_events UPSHardwareFault)
+E_PROTECTION=$(rule_events UPSProtectionDegraded)
 E_ONBATT_PAIR=$(rule_events UPSOnBattery)
 
 # Non-emptiness is not enough: a name extracted from the WRONG rule would be
 # non-empty but meaningless. Every NUT notify type is upper-case ASCII, so the
 # SHAPE is the guard that catches both.
-for _ev in $E_LOWBATT $E_FSD $E_NOCOMM $E_FAULT $E_ONBATT_PAIR; do
+for _ev in $E_LOWBATT $E_FSD $E_NOCOMM $E_FAULT $E_PROTECTION $E_ONBATT_PAIR; do
   case "$_ev" in
     '' | *[!A-Z]*)
       printf 'harness error: extracted event name %s from %s is not a NUT notify type (lowbatt=%s fsd=%s nocomm=%s fault=%s onbatt-pair=%s)\n' \
@@ -168,7 +169,7 @@ _pair_seen=$(printf '%s' "$E_ONBATT_PAIR" | tr '\n' ' ')
 # Scoped per event name, not a file-wide grep for "EXEC".
 GENERATOR="$REPO_ROOT/generate-config.sh"
 _unrouted=""
-for _ev in $E_LOWBATT $E_FSD $E_NOCOMM $E_FAULT $E_ONBATT_PAIR; do
+for _ev in $E_LOWBATT $E_FSD $E_NOCOMM $E_FAULT $E_PROTECTION $E_ONBATT_PAIR; do
   grep -Eq "^NOTIFYFLAG $_ev .*EXEC" "$GENERATOR" || _unrouted="$_unrouted $_ev"
 done
 [ -z "$_unrouted" ] \
@@ -268,12 +269,29 @@ ERR="$WORK/noop-stderr"
 EXPECTED="$WORK/noop-expected"
 printf '%s\n' 'level=error msg="UPS forced shutdown (FSD) triggered; host will NOT be powered off" shutdown_on_battery_critical=false' >"$EXPECTED"
 
-SHUTDOWN_ON_BATTERY_CRITICAL=false sh "$NOOP_SHUTDOWN" >"$OUT" 2>"$ERR" || :
+NORMAL_RC=0
+SHUTDOWN_ON_BATTERY_CRITICAL=false sh "$NOOP_SHUTDOWN" >"$OUT" 2>"$ERR" || NORMAL_RC=$?
 
-if [ ! -s "$OUT" ] && cmp -s "$EXPECTED" "$ERR"; then
-  ok 'disabled host poweroff emits exactly one error record naming FSD, the false toggle, and the consequence'
+if [ "$NORMAL_RC" -eq 0 ] && [ ! -s "$OUT" ] && cmp -s "$EXPECTED" "$ERR"; then
+  ok 'disabled host poweroff emits exactly one error record naming FSD, the false toggle and the consequence, and exits 0'
 else
-  no 'disabled host-poweroff record' "stdout: $(tr '\n' '|' <"$OUT"); stderr: $(tr '\n' '|' <"$ERR")"
+  no 'disabled host-poweroff record' "rc=$NORMAL_RC stdout: $(tr '\n' '|' <"$OUT"); stderr: $(tr '\n' '|' <"$ERR")"
+fi
+
+# upsmon reads SHUTDOWNCMD's status as "did the command run", so the no-op stays
+# successful even when its own diagnostic cannot be written. The premise is
+# asserted first: on a /dev/full that accepts bytes the case would pass with the
+# handler's `exit 0` deleted.
+if [ -c /dev/full ] && ! printf 'x\n' 2>/dev/null >/dev/full; then
+  FAILED_WRITE_RC=0
+  SHUTDOWN_ON_BATTERY_CRITICAL=false sh "$NOOP_SHUTDOWN" >/dev/null 2>/dev/full || FAILED_WRITE_RC=$?
+  if [ "$FAILED_WRITE_RC" -eq 0 ]; then
+    ok 'disabled host poweroff stays successful when its diagnostic cannot be written'
+  else
+    no 'disabled host-poweroff failed-write status' "stderr=/dev/full rc=$FAILED_WRITE_RC"
+  fi
+else
+  skip 'disabled host-poweroff failed-write status' '/dev/full does not reject writes here'
 fi
 
 report

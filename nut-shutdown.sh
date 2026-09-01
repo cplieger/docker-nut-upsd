@@ -3,6 +3,8 @@
 readonly DBUS_MAX_ATTEMPTS=3
 readonly DBUS_RETRY_SLEEP=2
 readonly DBUS_REPLY_TIMEOUT_MS=3000
+# Above logind's InhibitDelayMaxSec default of 5s (systemd src/login/logind.conf.in:25).
+readonly DBUS_SETTLE_SLEEP=8
 
 # log_value: byte-identical copy of validate.sh's sanitizer — upsmon execs this
 # handler standalone, so it cannot source the helper. validate.sh owns the
@@ -27,6 +29,19 @@ while [ "$attempt" -le "$DBUS_MAX_ATTEMPTS" ]; do
     --dest=org.freedesktop.login1 /org/freedesktop/login1 \
     org.freedesktop.login1.Manager.PowerOff boolean:false; } 2>&1); then
     printf 'level=info msg="host poweroff dispatched via D-Bus" attempt=%d\n' "$attempt" >&2
+    # logind replies before the action runs; PreparingForShutdown tracks delayed_action and is cleared however the queued job ends.
+    # Queued failures reach only the host journal (systemd src/login/logind-dbus.c:2307-2312, :1951, :325-344).
+    sleep "$DBUS_SETTLE_SLEEP"
+    _settle=$({ timeout 5 dbus-send --system --print-reply --reply-timeout="$DBUS_REPLY_TIMEOUT_MS" \
+      --dest=org.freedesktop.login1 /org/freedesktop/login1 \
+      org.freedesktop.DBus.Properties.Get string:org.freedesktop.login1.Manager \
+      string:PreparingForShutdown; } 2>&1) || :
+    case "$_settle" in
+      *'boolean false'*)
+        printf 'level=error msg="D-Bus poweroff failed after logind accepted the request; host poweroff NOT confirmed" attempt=%d detail="%s"\n' "$attempt" "$(log_value "$_settle")" >&2
+        exit 1
+        ;;
+    esac
     exit 0
   fi
   if [ "$attempt" -lt "$DBUS_MAX_ATTEMPTS" ]; then
@@ -37,9 +52,9 @@ while [ "$attempt" -le "$DBUS_MAX_ATTEMPTS" ]; do
 done
 
 printf 'level=error msg="D-Bus poweroff failed after %d attempts; host poweroff NOT confirmed" detail="%s"\n' "$DBUS_MAX_ATTEMPTS" "$(log_value "$_out")" >&2
-_inhibitors=$(timeout 5 dbus-send --system --print-reply --reply-timeout="$DBUS_REPLY_TIMEOUT_MS" \
+_inhibitors=$({ timeout 5 dbus-send --system --print-reply --reply-timeout="$DBUS_REPLY_TIMEOUT_MS" \
   --dest=org.freedesktop.login1 /org/freedesktop/login1 \
-  org.freedesktop.login1.Manager.ListInhibitors 2>&1) || :
+  org.freedesktop.login1.Manager.ListInhibitors; } 2>&1) || :
 printf 'level=error msg="D-Bus poweroff inhibitors at failure" detail="%s"\n' "$(log_value "$_inhibitors")" >&2
 # Clear NUT's POWERDOWNFLAG: a latched flag keeps restart_ups_driver
 # (lifecycle.sh) stood down for whatever container life remains after the

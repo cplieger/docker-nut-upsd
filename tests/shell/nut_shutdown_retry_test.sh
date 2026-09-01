@@ -25,6 +25,7 @@ DBUS_RESULTS="$WORK/dbus.results"
 ERR="$WORK/stderr"
 OUT="$WORK/stdout"
 DBUS_ARGS='--system --print-reply --reply-timeout=3000 --dest=org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager.PowerOff boolean:false'
+SETTLE_ARGS='--system --print-reply --reply-timeout=3000 --dest=org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.DBus.Properties.Get string:org.freedesktop.login1.Manager string:PreparingForShutdown'
 INHIBITOR_ARGS='--system --print-reply --reply-timeout=3000 --dest=org.freedesktop.login1 /org/freedesktop/login1 org.freedesktop.login1.Manager.ListInhibitors'
 
 cat >"$BIN/timeout" <<'EOF'
@@ -41,6 +42,10 @@ if [ "$*" = "$INHIBITOR_ARGS" ]; then
   printf 'method return\n   array [\n      struct { string "shutdown" string "backup writer" string "backupd" string "block" uint32 1000 uint32 42 }\n   ]\n'
   exit 0
 fi
+if [ "$*" = "$SETTLE_ARGS" ]; then
+  printf 'method return\n   variant boolean true\n'
+  exit 0
+fi
 [ "$*" = "$DBUS_ARGS" ] || exit 95
 printf '%s\n' "$*" >>"$DBUS_CALLS"
 _call=$(wc -l <"$DBUS_CALLS")
@@ -53,8 +58,14 @@ esac
 EOF
 cat >"$BIN/sleep" <<'EOF'
 #!/bin/sh
-[ "$#" -eq 1 ] && [ "$1" = 2 ] || exit 93
-printf '%s\n' "$1" >>"$SLEEP_CALLS"
+[ "$#" -eq 1 ] || exit 93
+case "$1" in
+  2)
+    printf '%s\n' "$1" >>"$SLEEP_CALLS"
+    ;;
+  8) : ;;
+  *) exit 93 ;;
+esac
 EOF
 cat >"$BIN/rm" <<'EOF'
 #!/bin/sh
@@ -75,18 +86,18 @@ run_shutdown() {
     INHIBITOR_CALLS="$INHIBITOR_CALLS" INHIBITOR_ARGS="$INHIBITOR_ARGS" \
     TIMEOUT_CALLS="$TIMEOUT_CALLS" SLEEP_CALLS="$SLEEP_CALLS" \
     RM_CALLS="$RM_CALLS" DBUS_RESULTS="$DBUS_RESULTS" DBUS_ARGS="$DBUS_ARGS" \
-    sh "$ENTRYPOINT" >"$OUT" 2>"$ERR" || RUN_RC=$?
+    SETTLE_ARGS="$SETTLE_ARGS" sh "$ENTRYPOINT" >"$OUT" 2>"$ERR" || RUN_RC=$?
 }
 
 run_shutdown success
 if [ "$RUN_RC" -eq 0 ] \
   && [ "$(wc -l <"$DBUS_CALLS")" -eq 1 ] \
-  && [ "$(wc -l <"$TIMEOUT_CALLS")" -eq 1 ] \
+  && [ "$(wc -l <"$TIMEOUT_CALLS")" -eq 2 ] \
   && [ ! -s "$SLEEP_CALLS" ] \
   && [ ! -s "$RM_CALLS" ] \
   && grep -qF 'host poweroff dispatched via D-Bus" attempt=1' "$ERR" \
   && ! grep -qF 'retrying' "$ERR"; then
-  ok 'first-attempt success exits after one bounded D-Bus call without retrying'
+  ok 'first-attempt success makes one PowerOff request and one settle read without retrying'
 else
   no 'first-attempt success' "rc=$RUN_RC dbus=$(wc -l <"$DBUS_CALLS") timeout=$(wc -l <"$TIMEOUT_CALLS") sleeps=$(wc -l <"$SLEEP_CALLS"); stderr: $(tr '\n' ' ' <"$ERR")"
 fi
@@ -94,7 +105,7 @@ fi
 run_shutdown failure success
 if [ "$RUN_RC" -eq 0 ] \
   && [ "$(wc -l <"$DBUS_CALLS")" -eq 2 ] \
-  && [ "$(wc -l <"$TIMEOUT_CALLS")" -eq 2 ] \
+  && [ "$(wc -l <"$TIMEOUT_CALLS")" -eq 3 ] \
   && [ "$(cat "$SLEEP_CALLS")" = 2 ] \
   && [ ! -s "$RM_CALLS" ] \
   && [ "$(grep -cF 'D-Bus poweroff failed, retrying" attempt=1' "$ERR")" -eq 1 ] \
@@ -125,6 +136,30 @@ else
   no 'terminal-failure killpower cleanup' "rc=$RUN_RC rm=$(tr '\n' ' ' <"$RM_CALLS"); stderr: $(tr '\n' ' ' <"$ERR")"
 fi
 
+poweroff_failed_matcher=$(awk '
+  /- alert: UPSPowerOffFailed$/ { inrule = 1; next }
+  inrule && /- alert: / { exit }
+  inrule { print }
+' "$REPO_ROOT/alerts.yaml" \
+  | sed -n 's/.*| logfmt | msg=~"\([^"]*\)".*/\1/p' \
+  | head -1)
+if [ -z "$poweroff_failed_matcher" ]; then
+  printf 'harness error: no parsed-msg matcher extracted for UPSPowerOffFailed\n' >&2
+  exit 1
+fi
+
+shutdown_messages=$(sed -n 's/^level=[^ ]* msg="\([^"]*\)".*/\1/p' "$ERR")
+matched_messages=$(printf '%s\n' "$shutdown_messages" \
+  | grep -Ec -- "^${poweroff_failed_matcher}$" || :)
+matched_retries=$(grep ' attempt=' "$ERR" \
+  | sed -n 's/^level=[^ ]* msg="\([^"]*\)".*/\1/p' \
+  | grep -Ec -- "^${poweroff_failed_matcher}$" || :)
+if [ "$matched_messages" -eq 1 ] && [ "$matched_retries" -eq 0 ]; then
+  ok 'UPSPowerOffFailed matcher selects only the terminal failed-poweroff record'
+else
+  no 'UPSPowerOffFailed matcher contract' "matched=$matched_messages retry_matches=$matched_retries matcher=$poweroff_failed_matcher"
+fi
+
 cat >"$BIN/rm" <<'EOF'
 #!/bin/sh
 [ "$#" -eq 2 ] && [ "$1" = -f ] && [ "$2" = /var/run/nut-secrets/killpower ] || exit 92
@@ -145,9 +180,14 @@ fi
 
 cat >"$BIN/dbus-send" <<'EOF'
 #!/bin/sh
+_body=$(printf '%0600d' 0)
+if [ "$*" = "$INHIBITOR_ARGS" ]; then
+  printf '%s\n' "$*" >>"$INHIBITOR_CALLS"
+  printf 'method return\n   array [\n      struct { string "shutdown" string "backup writer"\nlevel=error msg="forged by inhibitor output" body=%s\\tail" string "backupd" string "block" uint32 1000 uint32 42 }\n   ]\n' "$_body"
+  exit 0
+fi
 [ "$*" = "$DBUS_ARGS" ] || exit 95
 printf '%s\n' "$*" >>"$DBUS_CALLS"
-_body=$(printf '%0600d' 0)
 printf 'refused"\nlevel=error msg="forged by dbus output" body=%s\\tail\n' "$_body" >&2
 exit 1
 EOF
@@ -155,10 +195,12 @@ chmod +x "$BIN/dbus-send"
 
 run_shutdown failure failure failure
 if [ "$RUN_RC" -eq 1 ] \
+  && [ "$(wc -l <"$INHIBITOR_CALLS")" -eq 1 ] \
   && [ "$(wc -l <"$ERR")" -eq 6 ] \
   && ! grep -q '^level=error msg="forged by dbus output"' "$ERR" \
+  && ! grep -q '^level=error msg="forged by inhibitor output"' "$ERR" \
   && awk '
-    /D-Bus poweroff failed/ {
+    / detail="/ {
       if ($0 !~ / detail="[^"]*"$/) exit 1
       detail = $0
       sub(/^.* detail="/, "", detail)
@@ -166,11 +208,11 @@ if [ "$RUN_RC" -eq 1 ] \
       if (length(detail) > 512 || index(detail, "\\") != 0) exit 1
       seen++
     }
-    END { if (seen != 3) exit 1 }
+    END { if (seen != 4) exit 1 }
   ' "$ERR"; then
-  ok 'hostile D-Bus output stays inside three balanced, bounded detail fields without forging a record'
+  ok 'hostile D-Bus output stays inside four balanced, bounded detail fields without forging a record'
 else
-  no 'hostile D-Bus output log safety' "rc=$RUN_RC lines=$(wc -l <"$ERR"); stderr: $(tr '\n' '|' <"$ERR")"
+  no 'hostile D-Bus output log safety' "rc=$RUN_RC inhibitors=$(wc -l <"$INHIBITOR_CALLS") lines=$(wc -l <"$ERR"); stderr: $(tr '\n' '|' <"$ERR")"
 fi
 
 report

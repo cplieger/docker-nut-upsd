@@ -74,8 +74,8 @@ WORKDIR /build/nut
 # fails the build instead of silently shipping unpatched binaries. All four go
 # at NUT_VERSION >= v2.8.6 — removal checklist in CONTRIBUTING.
 COPY patches/cve-2026-54161-notifycmd-execvp.patch \
-     patches/libusb-rdlens-oob-read.patch \
      patches/libusb-exit-reconnect-deadlock.patch \
+     patches/libusb-rdlens-oob-read.patch \
      patches/richcomm-libusb-context-reopen.patch \
      /build/patches/
 RUN wget -qO nut.tar.gz \
@@ -89,9 +89,6 @@ RUN wget -qO nut.tar.gz \
     && patch -p1 --fuzz=0 -i /build/patches/richcomm-libusb-context-reopen.patch \
     && PKG_CONFIG_LIBDIR="/usr/lib/pkgconfig" \
        LIBS="-lssl -lcrypto" \
-       ac_cv_func_setpgrp_void=yes \
-       ac_cv_func_memcmp_working=yes \
-       ac_cv_func_mmap_fixed_mapped=yes \
        ./configure --prefix=/usr --sysconfdir=/etc/nut \
        --with-statepath=/var/run/nut \
        --with-drvpath=/usr/lib/nut \
@@ -118,10 +115,7 @@ RUN wget -qO nut.tar.gz \
 # Syft inventories an Alpine image from the APK database alone, so the three
 # source-built payloads reach neither the signed release SBOM nor scanners.
 # Generated from the same Renovate-tracked ARGs the builds use, so a bump
-# keeps it correct. Syft's SPDX output cannot carry vulnerability analysis,
-# so the resolved CVE state reaches a scanner through this in-image fragment
-# alone. Remove the vulnerabilities entry with the patch at
-# NUT_VERSION >= v2.8.6.
+# keeps it correct.
 RUN cat > /out/nut-upsd.cdx.json <<EOF
 {
   "bomFormat": "CycloneDX",
@@ -152,32 +146,15 @@ RUN cat > /out/nut-upsd.cdx.json <<EOF
       "purl": "pkg:github/net-snmp/net-snmp@${NETSNMP_VERSION}",
       "cpe": "cpe:2.3:a:net-snmp:net-snmp:${NETSNMP_VERSION#v}:*:*:*:*:*:*:*"
     }
-  ],
-  "vulnerabilities": [
-    {
-      "id": "CVE-2026-54161",
-      "analysis": {
-        "state": "resolved",
-        "detail": "Built with the checked-in backport patches/cve-2026-54161-notifycmd-execvp.patch (upstream ecf98e7542e4ae2b62b211622ee26989274b2220) applied at build time; remove this entry with the patch at NUT_VERSION >= v2.8.6."
-      },
-      "affects": [
-        { "ref": "pkg:github/networkupstools/nut@${NUT_VERSION}" }
-      ]
-    }
   ]
 }
 EOF
 
 FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS runtime
 
-# apk upgrade: the pinned base ships some packages (e.g. libssl3) at a stale,
-# CVE-affected revision; upgrading floats them forward on each rebuild.
-# PKG_REFRESH busts the cache for this layer. Without it BuildKit restores the
-# layer verbatim on every rebuild, so the `apk upgrade` below floats nothing
-# forward after the first build and the image keeps shipping the packages that
-# were current then. The central release/CI/scan builds pass today's UTC date.
-# The `echo` is load-bearing: BuildKit keys a RUN on the build args it actually
-# CONSUMES, so a merely-declared ARG would change nothing.
+# The `echo` is load-bearing: BuildKit keys a RUN on the args it CONSUMES, so
+# dropping it leaves the upgrade on a cached layer and the image ships stale
+# packages, silently.
 ARG PKG_REFRESH=static
 RUN echo "OS package refresh: ${PKG_REFRESH}" \
     && apk upgrade --no-cache \
@@ -250,7 +227,7 @@ COPY --from=test /tests-passed /tests-passed
 # exec form cannot do; this image wraps NUT with a shell entrypoint, so it can
 # never become shell-less.
 # hadolint ignore=DL3025
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=15s \
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=135s \
     CMD . /usr/local/bin/lifecycle.sh; \
         UPS_NAME=$(printf '%s' "${UPS_NAME:-}"); : "${UPS_NAME:=ups}"; \
         API_PORT=$(printf '%s' "${API_PORT:-}"); : "${API_PORT:=3493}"; \

@@ -1,7 +1,6 @@
 Backport of upstream NUT commit bfbba15928aa6a91b3e4b8943e0cad16199d9d48
 (NUT issues #598, #993, #2453) for a teardown deadlock that can hang a USB
-driver indefinitely on any reconnect. No CVE was assigned, so this patch
-has no VEX entry and no SBOM analysis entry.
+driver indefinitely on any reconnect. No CVE was assigned.
 
 v2.8.5 calls libusb_init(NULL) on every nut_libusb_open() and
 libusb_exit(NULL) on every nut_libusb_close(), so the default context's
@@ -44,7 +43,7 @@ this version: common/common.c background() has the parent call
 _exit(EXIT_SUCCESS), which does not run atexit handlers, so only the
 surviving child ever tears the context down.
 
-Deliberately NOT taken: the companion commit a4813f868 / 9eb4ed46, which
+Deliberately NOT taken: the companion commit 9eb4ed46, which
 escalates a persistent LIBUSB_ERROR_OVERFLOW in nutdrv_qx to a USB reset.
 That change increases how often a reset happens, which is what opens this
 deadlock window in the first place, and it is specific to one device

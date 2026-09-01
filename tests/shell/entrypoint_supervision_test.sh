@@ -107,6 +107,10 @@ grep -q 'probe=127.0.0.1:3493' "$WORK/stderr" \
   && ok 'the give-up line names the probe target, not just the failure count' \
   || no 'probe target field' "stderr: $(cat "$WORK/stderr")"
 
+[ "$(grep -c 'starting a fresh one' "$WORK/stderr" || true)" -eq 0 ] \
+  && ok 'a live worker is left alone (the relaunch branch tests death, not presence)' \
+  || no 'spurious worker relaunch' "stderr: $(cat "$WORK/stderr")"
+
 run_scenario worker-death
 relaunched_watchdog=$(grep -c 'msg="comms watchdog exited' "$WORK/stderr" || true)
 relaunched_probe=$(grep -c 'msg="D-Bus poweroff-path probe exited' "$WORK/stderr" || true)
@@ -116,13 +120,6 @@ relaunched_probe=$(grep -c 'msg="D-Bus poweroff-path probe exited' "$WORK/stderr
   && [ "$(wc -l <"$WORK/teardown" | tr -d ' ')" -eq 1 ] \
   && ok 'a background worker that exited is relaunched exactly once, and teardown still runs once' \
   || no 'background worker supervision' "rc=$RUN_RC watchdog=$relaunched_watchdog probe=$relaunched_probe teardown=$(wc -l <"$WORK/teardown") stderr=$(cat "$WORK/stderr")"
-
-# A live worker must NOT be relaunched: the threshold scenario keeps every
-# kill -0 successful, so a branch testing the wrong direction shows up here.
-run_scenario threshold
-[ "$(grep -c 'starting a fresh one' "$WORK/stderr" || true)" -eq 0 ] \
-  && ok 'a live worker is left alone (the relaunch branch tests death, not presence)' \
-  || no 'spurious worker relaunch' "stderr: $(cat "$WORK/stderr")"
 
 run_scenario child-failure
 [ "$RUN_RC" -eq 7 ] \
@@ -191,5 +188,110 @@ fi
 printf '%s\n' "$healthcheck" | grep -Eq '^[[:space:]]*comms_fresh \|\| exit 1$' \
   && ok 'the final image healthcheck delegates the freshness query to comms_fresh' \
   || no 'healthcheck freshness owner' "final-stage HEALTHCHECK: $healthcheck"
+
+VALIDATE=${VALIDATE:-$REPO_ROOT/validate.sh}
+canonicalize=$(awk '
+  /^canonicalize_validated_values\(\)/ { in_function = 1 }
+  in_function { print }
+  in_function && /^}/ { exit }
+' "$VALIDATE")
+if [ -z "$canonicalize" ]; then
+  printf 'harness error: canonicalize_validated_values not found in %s\n' "$VALIDATE" >&2
+  exit 1
+fi
+
+entry_canonical_line=$(awk '
+  /^[[:space:]]*canonicalize_validated_values[[:space:]]*$/ { print NR; exit }
+' "$SUBJECT")
+parity_failures=""
+for var in UPS_NAME API_ADDRESS API_PORT; do
+  entry_default_record=$(awk -v var="$var" '
+    index($0, ": \"${" var ":=") {
+      value = $0
+      sub(/^.*:=/, "", value)
+      sub(/}.*/, "", value)
+      print NR ":" value
+      exit
+    }
+  ' "$SUBJECT")
+  probe_default=$(printf '%s\n' "$healthcheck" | awk -v var="$var" '
+    index($0, ": \"${" var ":=") {
+      value = $0
+      sub(/^.*:=/, "", value)
+      sub(/}.*/, "", value)
+      print value
+      exit
+    }
+  ')
+  source_canonical=$(printf '%s\n' "$canonicalize" | awk -v var="$var" '
+    index($0, var "=$(printf '\''%s'\'' \"${" var ":-}\")") { found = 1 }
+    END { print found + 0 }
+  ')
+  # The probe canonicalizes and defaults on ONE physical line, so the order
+  # is a character-offset comparison over the whole instruction, not a line
+  # number.
+  probe_order=$(printf '%s\n' "$healthcheck" | awk -v var="$var" '
+    { text = text $0 "\n" }
+    END {
+      canon = index(text, var "=$(printf '\''%s'\'' \"${" var ":-}\")")
+      default_at = index(text, ": \"${" var ":=")
+      print (canon > 0 && default_at > canon) ? 1 : 0
+    }
+  ')
+
+  entry_default_line=${entry_default_record%%:*}
+  entry_default=${entry_default_record#*:}
+  if [ -n "$entry_canonical_line" ] \
+    && [ -n "$entry_default_record" ] \
+    && [ -n "$probe_default" ] \
+    && [ "$source_canonical" -eq 1 ] \
+    && [ "$probe_order" -eq 1 ] \
+    && [ "$entry_default" = "$probe_default" ] \
+    && [ "$entry_canonical_line" -lt "$entry_default_line" ]; then
+    continue
+  fi
+  parity_failures="${parity_failures}${parity_failures:+, }$var"
+done
+
+[ -z "$parity_failures" ] \
+  && ok 'the healthcheck canonicalizes and defaults its endpoint inputs like the entrypoint' \
+  || no 'healthcheck and entrypoint input parity' "mismatched variables: $parity_failures"
+
+WATCHDOG_START_BLOCK=$(extract_range '^if \[ "\$COMMS_WATCHDOG" = "true" \] && \[ "\$COMMS_CHECK_INTERVAL" -ge 1 \]; then$' '^fi$' "$WORK/watchdog-start-block.sh") || exit 1
+
+cat >"$WORK/drive-watchdog-start.sh" <<'DRIVER'
+#!/usr/bin/env bash
+set -euf
+COMMS_WATCHDOG=true
+COMMS_RECOVERY_TIMEOUT=90
+WATCHDOG_PID=""
+comms_watchdog() { printf 'started\n' >>"$WATCHDOG_CALLS"; }
+. "$WATCHDOG_START_BLOCK"
+if [ -n "$WATCHDOG_PID" ]; then
+  wait "$WATCHDOG_PID"
+fi
+printf '%s' "$WATCHDOG_PID" >"$WATCHDOG_PID_FILE"
+DRIVER
+chmod +x "$WORK/drive-watchdog-start.sh"
+
+run_watchdog_start() {
+  : >"$WORK/watchdog-calls"
+  : >"$WORK/watchdog-stderr"
+  env COMMS_CHECK_INTERVAL="$1" WATCHDOG_START_BLOCK="$WATCHDOG_START_BLOCK" \
+    WATCHDOG_CALLS="$WORK/watchdog-calls" WATCHDOG_PID_FILE="$WORK/watchdog-pid" \
+    bash "$WORK/drive-watchdog-start.sh" >"$WORK/watchdog-stdout" 2>"$WORK/watchdog-stderr"
+}
+
+run_watchdog_start 0
+[ ! -s "$WORK/watchdog-calls" ] && [ ! -s "$WORK/watchdog-pid" ] \
+  && grep -Fq 'level=info msg="comms watchdog disabled" watchdog=true interval=0s' "$WORK/watchdog-stderr" \
+  && ok 'a zero comms interval leaves the watchdog disabled and names both deciding values' \
+  || no 'zero comms interval' "calls=$(cat "$WORK/watchdog-calls") pid=$(cat "$WORK/watchdog-pid") stderr=$(cat "$WORK/watchdog-stderr")"
+
+run_watchdog_start 1
+[ "$(wc -l <"$WORK/watchdog-calls")" -eq 1 ] && [ -s "$WORK/watchdog-pid" ] \
+  && grep -Fq 'level=info msg="starting comms watchdog" interval=1s' "$WORK/watchdog-stderr" \
+  && ok 'the minimum positive comms interval starts exactly one watchdog worker' \
+  || no 'minimum enabled comms interval' "calls=$(cat "$WORK/watchdog-calls") pid=$(cat "$WORK/watchdog-pid") stderr=$(cat "$WORK/watchdog-stderr")"
 
 report

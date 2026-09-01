@@ -47,9 +47,10 @@ _resolve_cached_password() {
   # PASSWORD_LENGTH bytes, so only a cache of exactly that size is trusted.
   # An unbounded `cat` of a corrupted or grown cache would let PID 1 consume
   # memory proportional to the file and repeat the OOM on every restart.
-  # Trust only generation's own alphabet (A-Za-z0-9), so a cache holding
-  # whitespace or the quote/backslash/control bytes that break out of
-  # generate-config.sh's quoted password fields regenerates.
+  # Trust only generation's own alphabet (A-Za-z0-9), so whitespace and the
+  # quote/backslash/control bytes that break out of generate-config.sh's quoted
+  # password fields regenerate. Command substitution removes a trailing newline
+  # before the alphabet test; the length clause rejects that cache (tests/shell/credential_cache_test.sh case 3b).
   _rcp_size=$(stat -c %s "$_rcp_file" 2>/dev/null) || _rcp_size=""
   if [ "$_rcp_size" = "$PASSWORD_LENGTH" ] \
     && _rcp_pw=$(head -c "$PASSWORD_LENGTH" "$_rcp_file" 2>/dev/null) \
@@ -91,7 +92,7 @@ _resolve_cached_password() {
 
 # ADMIN_PASSWORD: cached at /var/run/nut-secrets/admin_password so it's stable
 # across in-container restarts (see _resolve_cached_password). If the env var
-# is set, always use that value.
+# is non-empty, always use that value.
 resolve_admin_password() {
   if [ -z "${ADMIN_PASSWORD:-}" ]; then
     ADMIN_PASSWORD=$(_resolve_cached_password ADMIN_PASSWORD "$ADMIN_PASSWORD_FILE") || return 1
@@ -108,10 +109,13 @@ resolve_local_upsmon_password() {
   LOCAL_UPSMON_PASSWORD=$(_resolve_cached_password LOCAL_UPSMON_PASSWORD "$LOCAL_UPSMON_PASSWORD_FILE") || return 1
 }
 
-# Warn (don't block) on the well-known default credentials.
+# Warn (don't block) when an operator-settable credential is shorter than
+# PASSWORD_MIN_LENGTH. API_PASSWORD's default `secret` is caught by that
+# length; ADMIN_PASSWORD has no default (unset auto-generates
+# PASSWORD_LENGTH chars), so its arm fires only on an operator's short value.
 warn_weak_api_password() {
   if [ "${#API_PASSWORD}" -lt "$PASSWORD_MIN_LENGTH" ]; then
-    printf 'level=warn msg="API_PASSWORD is weak (default value or <%d chars). Acceptable on a trusted LAN; rotate it if your NUT client supports custom credentials."\n' \
+    printf 'level=warn msg="API_PASSWORD is weak (<%d chars; the default `secret` is one). Acceptable on a trusted LAN; rotate it if your NUT client supports custom credentials."\n' \
       "$PASSWORD_MIN_LENGTH" >&2
   fi
   if [ "${#ADMIN_PASSWORD}" -lt "$PASSWORD_MIN_LENGTH" ]; then
@@ -223,11 +227,14 @@ _install_cert_working_copy() {
   return 1
 }
 
-# resolve_tls_cert: point TLS_CERT_PATH (consumed by generate_upsd_conf) at a
-# PEM upsd can serve. Runs whenever API_TLS=true, even with a mounted
-# upsd.conf.user, whose author may reference either cert path. Returns 1 when
-# no usable PEM could be provisioned (the boot fails rather than silently
-# degrading to cleartext).
+# resolve_tls_cert: point TLS_CERT_PATH (consumed by generate_upsd_conf) at the
+# PEM this boot provisioned. Pre-flights what upsd cannot report (file type,
+# dangling symlink, readability, expiry); upsd's own ssl_init is the authority
+# on whether the certificate and key match (netssl.c:715-727). Runs whenever
+# API_TLS=true — even with a mounted upsd.conf.user, whose author may reference
+# either cert path. Returns 1 when no PEM could be provisioned (the entrypoint
+# fails the boot: a TLS endpoint the operator left default-on must not silently
+# degrade to cleartext).
 resolve_tls_cert() {
   # -e follows the link, so a broken symlink at the mount path would
   # silently fall through to the self-signed certificate.
@@ -249,11 +256,11 @@ resolve_tls_cert() {
     # (server/netssl.c:715-722); an expired pair loads but verifying clients
     # refuse it.
     if ! tls_cert_parses "$TLS_CERT_MOUNT"; then
-      printf 'level=error msg="mounted TLS certificate is not one PEM holding a certificate and its private key; upsd will exit at startup" path=%s\n' \
+      printf 'level=error msg="mounted TLS certificate is not one PEM holding a certificate and its private key in a form openssl can read without a passphrase (upsd supplies none); upsd will exit at startup" path=%s\n' \
         "$TLS_CERT_MOUNT" >&2
       return 1
     elif ! tls_cert_fresh "$TLS_CERT_MOUNT"; then
-      printf 'level=warn msg="mounted TLS certificate expires within a day; upsd will still serve it, but verifying clients will refuse the handshake" path=%s\n' \
+      printf 'level=warn msg="mounted TLS certificate expires within a day or has already expired; upsd will still serve it, but verifying clients will refuse the handshake" path=%s\n' \
         "$TLS_CERT_MOUNT" >&2
     fi
     # Operator-mounted PEM: copied on every boot to a root:nut 640 working
@@ -262,8 +269,8 @@ resolve_tls_cert() {
     # regardless of its perms, so a 600 root:root read-only mount works.
     _install_cert_working_copy "$TLS_CERT_MOUNT" "$TLS_CERT_MOUNTED_RUNTIME" || return 1
     TLS_CERT_PATH="$TLS_CERT_MOUNTED_RUNTIME"
-    printf 'level=info msg="TLS enabled with operator-mounted certificate (working copy; mount is never modified, a 600 root:root read-only mount is fine)" certfile=%s source=%s fingerprint="%s"\n' \
-      "$TLS_CERT_MOUNTED_RUNTIME" "$TLS_CERT_MOUNT" "$(tls_cert_fingerprint "$TLS_CERT_MOUNT")" >&2
+    printf 'level=info msg="provisioned the operator-mounted TLS certificate as a working copy (the mount is never modified; a 600 root:root read-only mount is fine)" certfile=%s source=%s fingerprint="%s"\n' \
+      "$TLS_CERT_MOUNTED_RUNTIME" "$TLS_CERT_MOUNT" "$(tls_cert_fingerprint "$TLS_CERT_MOUNTED_RUNTIME")" >&2
     return 0
   fi
   if tls_cert_valid "$TLS_CERT_CACHE"; then
@@ -279,13 +286,14 @@ resolve_tls_cert() {
   _install_cert_working_copy "$TLS_CERT_CACHE" "$TLS_CERT_RUNTIME" || return 1
   # shellcheck disable=SC2034  # consumed by sourced generate-config.sh
   TLS_CERT_PATH="$TLS_CERT_RUNTIME"
-  printf 'level=info msg="TLS enabled with self-signed certificate" certfile=%s fingerprint="%s"\n' \
+  printf 'level=info msg="provisioned the self-signed TLS certificate" certfile=%s fingerprint="%s"\n' \
     "$TLS_CERT_RUNTIME" "$(tls_cert_fingerprint "$TLS_CERT_RUNTIME")" >&2
 }
 
 # reconcile_tls_working_copies: remove whichever managed working copies the
 # current boot did not provision — always, even with an upsd.conf.user
-# override mounted.
+# override mounted. Returns non-zero when a withdrawn working copy survives:
+# the entrypoint calls this bare under set -e, so that status fails the boot.
 reconcile_tls_working_copies() {
   if [ "$API_TLS" != "true" ]; then
     _rw_stale="$TLS_CERT_MOUNTED_RUNTIME $TLS_CERT_RUNTIME"
