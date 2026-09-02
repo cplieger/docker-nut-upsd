@@ -48,12 +48,18 @@ while [ "$attempt" -le "$DBUS_MAX_ATTEMPTS" ]; do
       org.freedesktop.DBus.Properties.Get string:org.freedesktop.login1.Manager \
       string:PreparingForShutdown; } 2>&1) || :
     case "$_settle" in
+      *'boolean true'*) exit 0 ;;
       *'boolean false'*)
         printf 'level=error msg="D-Bus poweroff failed after logind accepted the request; host poweroff NOT confirmed" attempt=%d detail="%s"\n' "$attempt" "$(log_value "$_settle")" >&2
         clear_killpower
         exit 1
         ;;
     esac
+    # Outside UPSPowerOffFailed's matcher and clear_killpower on purpose: a
+    # vanished bus is also the ordinary signature of a poweroff in progress,
+    # so a critical alert and re-armed driver bounce would both act on a state
+    # nothing here can decide.
+    printf 'level=error msg="D-Bus poweroff settle state unreadable; host poweroff neither confirmed nor refuted" attempt=%d detail="%s"\n' "$attempt" "$(log_value "$_settle")" >&2
     exit 0
   fi
   if [ "$attempt" -lt "$DBUS_MAX_ATTEMPTS" ]; then

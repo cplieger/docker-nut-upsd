@@ -72,6 +72,22 @@ else
   no 'known check dispatches' "rejected a valid value: $(head -c 200 "$ERR")"
 fi
 
+# NUT's atoi-consumed timing values accept INT_MAX and refuse INT_MAX+1.
+if validate_numeric DEADTIME 2147483647 2>"$ERR"; then
+  ok 'the largest value representable by the NUT C-int consumer is accepted'
+else
+  no 'NUT C-int upper boundary accepted' "INT_MAX was rejected: $(head -c 200 "$ERR")"
+fi
+
+: >"$ERR"
+if validate_numeric DEADTIME 2147483648 2>"$ERR"; then
+  no 'NUT C-int overflow refused' 'INT_MAX+1 was accepted'
+elif grep -Fq 'msg="env var must not exceed 2147483647" var=DEADTIME value="2147483648"' "$ERR"; then
+  ok 'the first value above the NUT C-int boundary is refused by the ceiling arm'
+else
+  no 'NUT C-int overflow refused' "wrong refusal: $(head -c 200 "$ERR")"
+fi
+
 # --- 9b. jointly disabled low-battery thresholds fail closed ---------------------
 #
 # Each row accepts zero because zero disables only that axis; the pair is
@@ -176,6 +192,48 @@ if [ "$(normalize_bool API_TLS true)" = "true" ] \
   ok 'normalize_bool maps every accepted spelling to its canonical true or false output'
 else
   no 'normalize_bool canonical outputs' 'an accepted boolean spelling mapped to the wrong canonical value'
+fi
+
+# Credentials retain trailing LF for fail-closed validation; presentation values strip it.
+load_function canonicalize_validated_values
+credential_lf=$(printf 'filesecret\nx')
+credential_lf=${credential_lf%x}
+
+credential_lf_refused() (
+  case "$1" in
+    API_PASSWORD)
+      API_PASSWORD="$credential_lf"
+      canonicalize_validated_values
+      _dispatch_check API_PASSWORD "$API_PASSWORD" control
+      ;;
+    ADMIN_PASSWORD)
+      ADMIN_PASSWORD="$credential_lf"
+      canonicalize_validated_values
+      _dispatch_check ADMIN_PASSWORD "$ADMIN_PASSWORD" control
+      ;;
+  esac
+)
+
+for credential_name in API_PASSWORD ADMIN_PASSWORD; do
+  : >"$ERR"
+  if credential_lf_refused "$credential_name" 2>"$ERR"; then
+    no "$credential_name trailing LF refused" 'the credential was silently canonicalized and accepted'
+  elif grep -Fq "msg=\"env var contains control characters\" var=$credential_name" "$ERR"; then
+    ok "$credential_name retains a trailing LF for the named fail-closed refusal"
+  else
+    no "$credential_name trailing LF refused" "wrong refusal: $(head -c 200 "$ERR")"
+  fi
+done
+
+if (
+  UPS_DESC="$credential_lf"
+  canonicalize_validated_values
+  [ "$UPS_DESC" = filesecret ]
+  _dispatch_check UPS_DESC "$UPS_DESC" control
+); then
+  ok 'the same trailing LF remains canonicalized for a presentation value'
+else
+  no 'presentation trailing LF canonicalized' 'UPS_DESC did not strip to filesecret and pass validation'
 fi
 
 # --- 12. every credential-row check refuses without disclosing the value -------

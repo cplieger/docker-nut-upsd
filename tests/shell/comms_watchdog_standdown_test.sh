@@ -54,6 +54,8 @@ TX_CAPTURE="$WORK/capture"
 TX_TRACE="$WORK/transaction"
 TX_ERR="$WORK/transaction-err"
 TX_USB_REQUIRED=1
+TX_STOP_RC=9
+TX_STOP_OUT='control client did not stop'
 TX_START_RC=9
 TX_START_OUT='control client did not start'
 
@@ -69,7 +71,10 @@ chgrp() {
 timeout() {
   printf 'timeout=%s\n' "$*" >>"$TX_TRACE"
   case "$*" in
-    '-k 5 30 /usr/sbin/upsdrvctl stop ups') return 0 ;;
+    '-k 5 30 /usr/sbin/upsdrvctl stop ups')
+      printf '%s' "$TX_STOP_OUT"
+      return "$TX_STOP_RC"
+      ;;
     '-k 5 90 /usr/sbin/upsdrvctl start ups')
       printf '%s' "$TX_START_OUT"
       return "$TX_START_RC"
@@ -130,7 +135,10 @@ fi
 TX_EXPECTED=$(printf '%s\n' \
   'usb_bus_required' \
   'chgrp=-R nut /dev/bus/usb' \
+  "capture_tmpfile=$WD_RESTART_CAPTURE_PREFIX" \
   'timeout=-k 5 30 /usr/sbin/upsdrvctl stop ups' \
+  "capture_head=$TX_CAPTURE" \
+  "capture_cleanup=$TX_CAPTURE" \
   'read_pidfile=/var/run/nut/usbhid-ups-ups.pid' \
   'kill=-0 4242' \
   'readlink=-f /proc/4242/exe' \
@@ -144,10 +152,31 @@ TX_EXPECTED=$(printf '%s\n' \
   "capture_cleanup=$TX_CAPTURE")
 [ "$TX_STATUS" -eq 0 ] \
   && [ "$(cat "$TX_TRACE")" = "$TX_EXPECTED" ] \
+  && grep -q 'level=warn msg="comms watchdog driver stop failed" ups=ups rc=9 detail="control client did not stop"' "$TX_ERR" \
   && grep -q 'level=error msg="comms watchdog driver restart failed" ups=ups rc=9 detail="control client did not start"' "$TX_ERR" \
   && [ ! -e "$TX_CAPTURE" ] \
   && ok 'a recovery attempt performs bounded stop, verified stale cleanup, bounded start, diagnosis, and capture cleanup in order' \
   || no 'complete driver restart transaction' "status=$TX_STATUS trace=$(tr '\n' '|' <"$TX_TRACE") err=$(tr '\n' '|' <"$TX_ERR")"
+
+: >"$TX_TRACE"
+: >"$TX_ERR"
+TX_START_RC=0
+TX_START_OUT=""
+SHUTDOWN_ON_BATTERY_CRITICAL=false
+command touch "$POWERDOWNFLAG_FILE"
+if restart_ups_driver 1 2>"$TX_ERR"; then
+  TX_STATUS=0
+else
+  TX_STATUS=$?
+fi
+command rm -f "$POWERDOWNFLAG_FILE"
+[ "$TX_STATUS" -eq 0 ] \
+  && grep -q '^chgrp=-R nut /dev/bus/usb$' "$TX_TRACE" \
+  && grep -q '^timeout=-k 5 90 /usr/sbin/upsdrvctl start ups$' "$TX_TRACE" \
+  && grep -q 'comms watchdog re-homing UPS driver after stale comms' "$TX_ERR" \
+  && ! grep -q 'comms watchdog standing down' "$TX_ERR" \
+  && ok 'a killpower flag from noop FSD does not disarm recovery while host shutdown is disabled' \
+  || no 'killpower flag with host shutdown disabled' "status=$TX_STATUS trace=$(tr '\n' '|' <"$TX_TRACE") err=$(tr '\n' '|' <"$TX_ERR")"
 
 : >"$TX_TRACE"
 : >"$TX_ERR"

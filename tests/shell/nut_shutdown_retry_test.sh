@@ -141,7 +141,7 @@ poweroff_failed_matcher=$(awk '
   /- alert: UPSPowerOffFailed$/ { inrule = 1; next }
   inrule && /- alert: / { exit }
   inrule { print }
-' "$REPO_ROOT/alerts.yaml" \
+' "$REPO_ROOT/alerts/logql.yaml" \
   | sed -n 's/.*| logfmt | msg=~"\([^"]*\)".*/\1/p' \
   | head -1)
 if [ -z "$poweroff_failed_matcher" ]; then
@@ -200,6 +200,69 @@ if [ "$RUN_RC" -eq 1 ] \
 else
   no 'refused terminal-failure cleanup' "rc=$RUN_RC rm=$(tr '\n' ' ' <"$RM_CALLS"); stderr: $(tr '\n' ' ' <"$ERR")"
 fi
+
+cat >"$BIN/dbus-send" <<'EOF'
+#!/bin/sh
+if [ "$*" = "$SETTLE_ARGS" ]; then
+  case "$SETTLE_VALUE" in
+    true) printf 'method return\n   variant boolean true\n' ;;
+    failed) printf 'settle read failed\n' >&2; exit 1 ;;
+    empty) exit 0 ;;
+    malformed) printf 'method return\n   string "not a boolean"\n' ;;
+    valueless) printf 'method return\n   variant boolean\n' ;;
+    truncated) printf 'method return\n' ;;
+    *) exit 91 ;;
+  esac
+  exit 0
+fi
+[ "$*" = "$DBUS_ARGS" ] || exit 95
+printf '%s\n' "$*" >>"$DBUS_CALLS"
+_call=$(wc -l <"$DBUS_CALLS")
+_result=$(sed -n "${_call}p" "$DBUS_RESULTS")
+case "$_result" in
+  success) printf 'method return\n'; exit 0 ;;
+  failure) printf 'D-Bus refused request\n' >&2; exit 1 ;;
+  *) exit 94 ;;
+esac
+EOF
+chmod +x "$BIN/dbus-send"
+
+write_settle_observables() {
+  printf 'rc=%s\n' "$RUN_RC"
+  for _artifact in "$OUT" "$ERR" "$DBUS_CALLS" "$INHIBITOR_CALLS" \
+    "$TIMEOUT_CALLS" "$SLEEP_CALLS" "$RM_CALLS"; do
+    printf 'bytes=%s\n' "$(wc -c <"$_artifact")"
+    cat "$_artifact"
+  done
+}
+
+SETTLE_VALUE=true
+run_shutdown success
+if [ "$RUN_RC" -eq 0 ] \
+  && [ ! -s "$RM_CALLS" ] \
+  && ! grep -qF 'D-Bus poweroff settle state unreadable' "$ERR"; then
+  ok 'canonical true remains a confirmed poweroff without cleanup or an unreadable-state record'
+else
+  no 'canonical true settle precondition' "$(write_settle_observables | tr '\n' ' ')"
+fi
+
+for SETTLE_VALUE in failed empty malformed valueless truncated; do
+  run_shutdown success
+  unreadable_messages=$(sed -n 's/^level=[^ ]* msg="\([^"]*\)".*/\1/p' "$ERR" \
+    | grep '^D-Bus poweroff settle state unreadable' || :)
+  if [ "$RUN_RC" -eq 0 ] \
+    && [ ! -s "$RM_CALLS" ] \
+    && [ ! -s "$INHIBITOR_CALLS" ] \
+    && [ "$(printf '%s\n' "$unreadable_messages" | grep -c .)" -eq 1 ] \
+    && [ "$(grep -Ec '^level=error msg="D-Bus poweroff settle state unreadable[^"]*" attempt=[0-9]+ detail="[^"]*"$' "$ERR")" -eq 1 ] \
+    && [ "$(grep -cF 'level=info msg="host poweroff dispatched via D-Bus" attempt=1' "$ERR")" -eq 1 ] \
+    && ! printf '%s\n' "$unreadable_messages" | grep -Eq -- "^${poweroff_failed_matcher}$"; then
+    ok "$SETTLE_VALUE settle reply is reported as unreadable without critical-alert routing or cleanup"
+  else
+    no "$SETTLE_VALUE unreadable settle reply" "$(write_settle_observables | tr '\n' ' ')"
+  fi
+done
+SETTLE_VALUE=true
 
 cat >"$BIN/dbus-send" <<'EOF'
 #!/bin/sh

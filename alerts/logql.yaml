@@ -6,7 +6,11 @@
 # the generated upsmon.conf out of the box) and, when host shutdown is enabled,
 # two image-owned records: lifecycle.sh's D-Bus poweroff-path probe error and
 # nut-shutdown.sh's SHUTDOWNCMD give-up record. SHUTDOWN_ON_BATTERY_CRITICAL
-# gates both; DBUS_PROBE_INTERVAL=0 disables only the probe. Thresholds, the for:
+# gates both; DBUS_PROBE_INTERVAL=0 disables only the probe. UPSContainerError
+# keys on a third source that neither gate reaches: every line-start level=error
+# record the image's own entrypoint, validation, config generation,
+# credential/TLS provisioning and lifecycle helpers write. Those fire with no
+# NOTIFYCMD wired and with host shutdown off. Thresholds, the for:
 # windows, and the severity labels are starting points; adjust the container
 # selector to your deployment.
 #
@@ -47,64 +51,47 @@ groups:
     # the slower rules below.
     interval: 10s
     rules:
-      # Mains transition, read from the event PAIR: upsmon logs ONBATT when it
-      # loses mains and ONLINE when it returns, so more ONBATT than ONLINE means
-      # the most recent transition the window still holds was onto battery.
-      #
-      # Two arms joined by or, and neither one covers the other's case:
-      #   1. the comparison arm handles a window holding BOTH events. It is what
-      #      keeps a flicker quiet, and it is what still fires when an earlier
-      #      flicker is followed by a real outage (2 ONBATT vs 1 ONLINE).
-      #   2. the unless arm handles the common case, a first outage with no
-      #      ONLINE in the window at all. There the comparison's right side has
-      #      NO series, so the comparison returns no result and arm 1 alone
-      #      could never fire. It cannot replace arm 1 either: one earlier
-      #      flicker makes ONLINE non-empty and would suppress a real outage.
-      # Same shape, and the same reason, as the two-arm up == 0 or absent(up)
-      # reachability pair.
+      # Mains transition, read as an ORDERED selection over the event pair:
+      # upsmon logs ONBATT when it loses mains and ONLINE when it returns, so
+      # mapping ONBATT to 1 and ONLINE to 0 and taking the LAST sample in the
+      # window says whether the most recent transition was onto battery.
+      # last_over_time preserves timestamp order, so a recovery followed by a
+      # second outage inside one window fires on that second ONBATT.
+      # `by (container)` is load-bearing: without it ONBATT and ONLINE are
+      # separate series with separate last values.
       #
       # TRANSITION rule (see the file header). The 2m window is sized on the
       # only cadence the expression controls: the ONBATT half lands within one
       # POLLFREQ and the ONLINE half within one POLLFREQALERT, because upsmon
       # switches to the alert cadence when it sees ONBATT (NUT v2.8.5
       # clients/upsmon.c ups_on_batt :887) and restores POLLFREQ only once OL
-      # is seen (try_restore_pollfreq :210); both default to 5s, so a flicker
-      # lands within about POLLFREQ + POLLFREQALERT - raise this window if you
-      # raise EITHER. It deliberately does NOT try to cover an outage -
-      # nothing repeats event=ONBATT - so the alert marks mains loss and
-      # resolves 2m later while the UPS may still be carrying the load. The
-      # window also bounds the one gap in the pair: an earlier outage whose
-      # ONBATT has aged out while its ONLINE has not ties the counts, so a
-      # new outage can stay quiet for at most one window.
+      # is seen (try_restore_pollfreq); both default to 5s, so a flicker lands
+      # within about POLLFREQ + POLLFREQALERT - raise this window if you raise
+      # EITHER. It deliberately does NOT try to cover an outage - nothing
+      # repeats event=ONBATT - so the alert marks mains loss and resolves 2m
+      # later while the UPS may still be carrying the load.
       - alert: UPSOnBattery
         expr: |
-          sum by (container) (count_over_time(
-            {container="nut-upsd"} | logfmt | event="ONBATT" [2m]
-          )) > sum by (container) (count_over_time(
-            {container="nut-upsd"} | logfmt | event="ONLINE" [2m]
-          ))
-          or
-          sum by (container) (count_over_time(
-            {container="nut-upsd"} | logfmt | event="ONBATT" [2m]
-          )) > 0
-          unless
-          sum by (container) (count_over_time(
-            {container="nut-upsd"} | logfmt | event="ONLINE" [2m]
-          )) > 0
+          last_over_time(
+            {container="nut-upsd"}
+            | logfmt | event=~"ONBATT|ONLINE"
+            | label_format mains_state=`{{ if eq .event "ONBATT" }}1{{ else }}0{{ end }}`
+            | unwrap mains_state [2m]
+          ) by (container) == 1
         for: 10s
         labels:
           severity: warning
         annotations:
           summary: "UPS is on battery - mains power lost ({{ $labels.container }})"
           description: >
-            nut-upsd logged an ONBATT event with no ONLINE event after it in
-            the last 2 minutes: mains power was lost and the UPS took the
-            connected load onto its battery. NUT reports that transition once
-            (NUT v2.8.5 clients/upsmon.c ups_on_batt :880, ups_on_line :900),
-            so this alert marks it and then resolves; it does not track how
-            long the UPS stays on battery. For that, read ups.status over the
-            NUT protocol. How long it holds depends on that load and on the battery's
-            size and age, so judge the urgency from the runtime your own UPS
+            nut-upsd's latest mains transition inside the last 2 minutes was an
+            ONBATT event: mains power was lost and the UPS took the connected
+            load onto its battery. NUT reports that transition once (NUT
+            v2.8.5 clients/upsmon.c ups_on_batt, ups_on_line), so this alert
+            marks it and then resolves; it does not track how long the UPS
+            stays on battery. For that, read ups.status over the NUT protocol.
+            How long it holds depends on that load and on the battery's size
+            and age, so judge the urgency from the runtime your own UPS
             reports rather than from a fixed figure. Check mains power now.
             UPSLowBattery is the escalation when the battery runs down.
       - alert: UPSLowBattery
@@ -125,7 +112,7 @@ groups:
             the UPS reporting it wrongly (see LOWBATT_PERCENT / ignorelb).
             Verify mains power and the connected-load runtime now. NUT reports
             this flag once when it is raised (NUT v2.8.5 clients/upsmon.c
-            ups_low_batt :1746), so this alert marks that transition rather
+            ups_low_batt), so this alert marks that transition rather
             than tracking the state.
       - alert: UPSForcedShutdown
         expr: |
@@ -149,6 +136,29 @@ groups:
             alert fires again approximately once per container life until
             mains power returns or the UPS stops supplying the load. Continuous
             state is on the NUT protocol; read ups.status there.
+      - alert: UPSHostSyncExpired
+        expr: |
+          sum by (container) (count_over_time(
+            {container="nut-upsd"}
+            |= `Host sync timer expired, forcing shutdown` [15m]
+          )) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "UPS shutdown coordination timed out ({{ $labels.container }})"
+          description: >
+            upsmon logged "Host sync timer expired, forcing shutdown": a
+            secondary was still logged in (maxlogins > 1) when HOSTSYNC ran
+            out, so the primary stopped waiting and proceeded with its own
+            shutdown. That secondary's coordinated shutdown missed its
+            deadline and its host is at risk. It does NOT mean the secondary
+            was hard-powered-off or that its own shutdown failed - check the
+            secondary. This is a raw upsmon diagnostic rather than an
+            event=<TYPE> line, so it carries no level= prefix and no logfmt
+            fields, which is why the filter is a plain substring match and not
+            the `| logfmt` shape its nine siblings use. TRANSITION record,
+            emitted once per forced-shutdown attempt that timed out.
       - alert: UPSCommsLost
         expr: |
           sum by (container) (count_over_time(
@@ -207,6 +217,24 @@ groups:
             state. BYPASS also switches upsmon to POLLFREQALERT while active. OVER does so
             only when OVERDURATION is configured; the generated upsmon.conf
             does not set it.
+      - alert: UPSProtectionUnavailable
+        expr: |
+          sum by (container) (count_over_time(
+            {container="nut-upsd"} | logfmt | event=~"NOPARENT|OFF" [15m]
+          )) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "UPS protection became unavailable ({{ $labels.container }})"
+          description: >
+            nut-upsd logged a NOPARENT or OFF event. NOPARENT means upsmon's
+            privileged parent died, so a forced shutdown cannot power off the
+            host; restart the container. OFF means the UPS reports itself
+            administratively off or asleep, so the load is unprotected; inspect
+            the UPS and restore protection. TRANSITION rule (see the file
+            header): NUT emits the matched event once, so this alert marks the
+            change and resolves after 15 minutes rather than tracking the state.
       - alert: UPSPowerOffPathBroken
         expr: |
           sum by (container) (count_over_time(
@@ -277,14 +305,18 @@ groups:
       # UPSForcedShutdown: that rule keys on event=, which only nut-notify.sh
       # writes and the exclusion below drops. With a mounted upsmon.conf.user
       # that omits NOTIFYCMD, this warning is the only alert-firing record of a
-      # forced shutdown. Either kind of abort exits the container, so restart:
-      # retries it and the line recurs on every attempt; the image HEALTHCHECK
-      # corroborates neither. A boot refusal exits inside the 15s start period,
-      # before the first probe at 30s. A post-boot teardown exits 45-60s after
-      # upsd stops answering, inside the 60-90s that three failed 30s probes need
-      # to mark the container unhealthy. The matcher is anchored at line start so
-      # level=error inside another record's detail cannot fire it. The exclusion
-      # drops the event handler's own lines.
+      # forced shutdown - and only while your SHUTDOWNCMD is still one of this
+      # image's nut-shutdown scripts. Point it elsewhere and an FSD leaves no
+      # alert-firing record here at all: upsmon's parent-exit record is
+      # level=warn, which this rule does not match. Either kind of abort exits
+      # the container, so restart: retries it and the line recurs on every
+      # attempt; the image HEALTHCHECK corroborates neither: a boot refusal exits
+      # inside its start period, and a post-boot teardown exits before enough
+      # consecutive probes fail to mark the container unhealthy (the probe
+      # interval, retry count and start period are the image HEALTHCHECK's own,
+      # in the Dockerfile). The matcher is anchored at line start so level=error
+      # inside another record's detail cannot fire it. The exclusion drops the
+      # event handler's own lines.
       - alert: UPSContainerError
         expr: |
           sum by (container) (count_over_time(
@@ -308,7 +340,7 @@ groups:
             record. Either kind of abort exits the container, so the restart
             policy retries it and repeats the line while the UPS goes unmonitored;
             the healthcheck does not corroborate: a boot refusal exits inside its
-            15s start period, and a post-boot teardown exits before three failed
+            start period, and a post-boot teardown exits before three failed
             probes can mark the container unhealthy. This rule is a net under the
             others and is not exclusive of them. A broken D-Bus poweroff path also
             fires UPSPowerOffPathBroken, and an unconfirmed host poweroff also

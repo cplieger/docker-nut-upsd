@@ -16,7 +16,7 @@ helpers are libraries, not programs:
 | `validate.sh`        | Env-var validation functions + table-driven dispatch                                                      |
 | `generate-config.sh` | Generates `ups.conf` / `upsd.conf` / `upsd.users` / `upsmon.conf`                                         |
 | `lifecycle.sh`       | `stop_services`, `wait_for_pidfile`, USB comms-recovery watchdog, D-Bus poweroff-path probe               |
-| `password.sh`        | Generated-credential caching (`ADMIN_PASSWORD`, internal `local_upsmon`, TLS cert), weak-password warning |
+| `secrets.sh`         | Generated-credential caching (`ADMIN_PASSWORD`, internal `local_upsmon`), weak-password warning           |
 
 More scripts are invoked by NUT at runtime (not sourced):
 
@@ -42,7 +42,7 @@ places:
    `_check MY_VAR "${MY_VAR:-}" control quotes`. Supported checks:
    `control`, `quotes`, `backslash`, `hash`, `nospace` (the value is
    written unquoted, so whitespace would split it into extra tokens),
-   `nut_word` (the byte range and 512-byte word limit NUT preserves; see
+   `nut_word` (credential byte and length limits; see
    `validate_nut_word`), `brackets`, `identifier`, `numeric`, `positive`,
    `port`, `percent`.
 2. Add an assignment to `canonicalize_validated_values`
@@ -108,20 +108,22 @@ new generated file should respect that same override hook.
   `patch -p1 --fuzz=0` (strict, so source drift on a version bump fails
   the build loudly instead of silently shipping unpatched binaries).
   Each patch header names its upstream commit and removal condition, and
-  this is the removal checklist they point at. Every patch is removed once
-  `NUT_VERSION` reaches v2.8.6, and every removal touches at least the
-  patch file itself and the Dockerfile COPY/apply step.
-  The CVE-2026-54161 NOTIFYCMD/execvp backport spans two coupled removal
-  sites: the patch file and the Dockerfile COPY/apply step. Refresh the two
-  README paragraphs that describe it as well: the Security section's
-  CVE-posture paragraph and the Alerting section's "NOTIFYCMD is executed
-  directly" note, which then describes stock v2.8.6 behavior rather than a
-  backport. The other three backports - the libusb `rdlens` out-of-bounds
-  read (upstream PR #3550), the libusb teardown deadlock on reconnect
-  (upstream #598) and the richcomm libusb context reopen (upstream
-  ce2364e2b) - each span the patch file, the Dockerfile COPY/apply step,
-  and the README's "Dependency CVE posture" paragraph that names the
-  carried backports.
+  this is the removal checklist they point at. Every patch goes once
+  `NUT_VERSION` reaches v2.8.6, and removing any patch touches:
+  - the patch file in `patches/`;
+  - its `COPY patches/...` entry and its `patch -p1 --fuzz=0` line in the
+    `Dockerfile`;
+  - the `Dockerfile` comment above that COPY, which states how many
+    backports are carried;
+  - the [README's Security section](README.md#security), whose first
+    paragraph states the same count and what the backports cover;
+  - the [README's License section](README.md#license), which keeps
+    `patches/` as a GPL-2.0-or-later exception;
+  - this checklist.
+  Removing the CVE-2026-54161 NOTIFYCMD/execvp backport additionally touches
+  the [README's Alerting section](README.md#alerting), whose "`NOTIFYCMD` is
+  executed directly" note then describes stock v2.8.6 behavior rather than a
+  backport.
   Do not edit the diff bodies: a patch that no longer matches what
   upstream wrote is no longer a backport, and the removal drops the whole
   file with nothing recording the divergence - so a defect found in
@@ -136,15 +138,41 @@ new generated file should respect that same override hook.
   re-read those lists: a renamed or added driver silently classifies as
   `other`, and the runtime image carries no source tree for a test to
   derive them from.
+- **The seven `upsmon` timing defaults are hand-copied from the pin.**
+  `entrypoint.sh:89-95` restates NUT v2.8.5's own `POLLFREQ`,
+  `POLLFREQALERT`, `DEADTIME`, `FINALDELAY`, `HOSTSYNC`, `NOCOMMWARNTIME`
+  and `RBWARNTIME` (`clients/upsmon.c:59-118`). A `NUT_VERSION` bump must
+  compare all seven against that file and either update them or reaffirm
+  the pin deliberately - pinning is what keeps the FSD sequence and the
+  notification intervals stable across a bump. If one moves, review the
+  coupled sites in the same change: `alerts/logql.yaml` carries the literals 5,
+  300 and 43200 in its windows and prose, and
+  `tests/shell/alert_state_window_contract_test.sh` reads three of the seven
+  and only asserts that windows stay above the current cadences, so it stays
+  green while those inequalities hold. No runtime check is possible: the
+  runtime image carries no NUT source tree.
+- **Six `clients/upsmon.c` line citations are pinned to NUT v2.8.5.** A
+  `NUT_VERSION` bump must re-affirm every one, and two of them additionally
+  claim their values are upstream's own defaults: `entrypoint.sh:86` and
+  `generate-config.sh:285` (both `clients/upsmon.c:59-118`). The rest are
+  `validate.sh:57` (`:2428-2460`), `validate.sh:60` and `validate.sh:411`
+  (both `:1712`), and `alerts/logql.yaml`'s `ups_on_batt :887`. `validate.sh:57`
+  is the consequential one: it is the published justification for a
+  REFUSAL. All are correct at HEAD, so this is coupling rather than a
+  defect, and a test is genuinely unavailable - the pinned source is
+  unpacked only in the builder stage (`Dockerfile:71`) while the test stage
+  is `FROM` runtime and copies `tests/smoke.sh` alone.
 - **USB re-enumeration is expected, not exceptional.** Many UPSes reset
   their USB link periodically (the driver runs fine, then goes "Data
   stale"). The `comms_watchdog` in `lifecycle.sh` recovers from this by
   re-homing the driver, but it only works if the bus is passed as a
   **live bind** (`volumes: /dev/bus/usb`) plus `device_cgroup_rules:
   ["c 189:* rmw"]`: a static `devices:` mapping hides the re-enumerated
-  node from the container. The restart re-opens the device while still
-  root, which is why the driver must not be started already-dropped to
-  `nut`. Keep the watchdog's restart path root-capable.
+  node from the container. The generated configuration runs the driver
+  as `nut`, so the group re-assert must precede the restart and make the
+  new `root:root` node accessible. A mounted `ups.conf.user` can select a
+  different user. Keep the watchdog's restart path root-capable so it
+  can update the node group before the bounce.
 - **Password caches are root-only.** The generated credentials
   (`ADMIN_PASSWORD` at `/var/run/nut-secrets/admin_password`, the
   internal `local_upsmon` password beside it) are cached in a
@@ -180,11 +208,12 @@ new generated file should respect that same override hook.
   EROFS the sweep and abort boot under `set -e`). Keep all these pieces
   aligned when touching the TLS path.
 - **`chgrp` on the USB bus is best-effort.** Both the startup and the
-  watchdog `chgrp -R nut /dev/bus/usb` are guarded (warn-only), so the
-  container still starts on a host where the chgrp EPERMs (user-namespace
-  remap, dropped `CAP_CHOWN`); the driver opens the device as root before
-  dropping to `nut` regardless. Don't let either `chgrp` abort startup
-  under `set -e`.
+  watchdog `chgrp -R nut /dev/bus/usb` are guarded (warn-only). With the
+  generated configuration, the group re-assert makes a new `root:root`
+  node accessible to the driver after it drops to `nut`. A failed
+  `chgrp` does not prove the node is inaccessible; if access is blocked,
+  NUT reports the failure when the driver starts. Do not let either
+  `chgrp` abort startup under `set -e`.
 - **Leading zeros are octal in `$(( ))`.** Numeric env vars consumed by
   shell arithmetic (the `COMMS_*` timing knobs) are canonicalized to
   base-10 with `strip_leading_zeros` before use, because POSIX `$(( ))`

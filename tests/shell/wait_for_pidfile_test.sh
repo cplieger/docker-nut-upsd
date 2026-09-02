@@ -75,7 +75,7 @@ gate() {
 }
 
 timed_out() {
-  grep -q 'did not write a valid PID file in time' "$ERR"
+  grep -q 'did not confirm a live PID for the expected binary in time' "$ERR"
 }
 
 # --- 1. the positive control, first: a real daemon IS accepted --------------------

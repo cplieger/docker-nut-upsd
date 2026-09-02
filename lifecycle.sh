@@ -1,8 +1,10 @@
 #!/bin/sh
 # lifecycle.sh — NUT service lifecycle utility functions.
 # Sourced, never executed. The Dockerfile HEALTHCHECK sources this file
-# ALONE, so the top level must only DEFINE: no call into another helper,
-# nothing that runs at source time, no reliance on the caller's `set -eu`.
+# ALONE and calls comms_fresh, so the top level must only DEFINE (nothing
+# that runs at source time, no reliance on the caller's `set -eu`) and
+# nothing reachable from comms_fresh may name a helper defined in another
+# file - log_value and usb_bus_required are both such helpers.
 
 readonly PIDFILE_POLL_INTERVAL="0.1"
 readonly PIDFILE_POLL_MAX=50 # nominal wait = POLL_MAX x POLL_INTERVAL = 5s
@@ -105,7 +107,7 @@ wait_for_pidfile() {
     sleep "$PIDFILE_POLL_INTERVAL"
     _wf_i=$((_wf_i + 1))
   done
-  printf 'level=error msg="%s did not write a valid PID file in time" path=%s polls=%d interval=%s\n' \
+  printf 'level=error msg="%s did not confirm a live PID for the expected binary in time" path=%s polls=%d interval=%s\n' \
     "$1" "$2" "$PIDFILE_POLL_MAX" "$PIDFILE_POLL_INTERVAL" >&2
   return 1
 }
@@ -264,9 +266,10 @@ start_recovered_driver() {
 # restart_ups_driver: re-home the driver onto the (possibly re-enumerated) USB
 # node. Runs as root: re-asserts the nut group on the bus so the driver's own
 # reconnect can open a freshly created root:root node, then bounces the
-# driver. upsdrvctl re-opens the device while still root and drops to nut
-# only after opening, which is why the restart succeeds whatever the new
-# node's group.
+# driver. The chgrp is load-bearing, not belt-and-braces: the driver drops
+# to nut at NUT v2.8.5 drivers/main.c:2538 and opens the device only in
+# upsdrv_initups() at :2997, so it must reach the node AS nut, and this
+# order (group first, bounce second) is what makes the restart able to.
 restart_ups_driver() {
   _attempt=${1:-1}
   # Stand down only when a real host poweroff is in progress. upsmon writes
@@ -279,11 +282,12 @@ restart_ups_driver() {
     printf 'level=warn msg="comms watchdog standing down; forced shutdown (killpower) in progress" ups=%s\n' "$UPS_NAME" >&2
     return 1
   fi
-  # From the final fast retry onward the UPS is likely genuinely absent or
-  # the driver unstartable, so escalate to error (README "USB hotplug & comms
-  # recovery" sizes this against an alert window).
+  # Escalate to error from the final fast retry onward: recovery has outlived
+  # the alert window README "USB hotplug & comms recovery" sizes. The CAUSE
+  # arrives in the detail= of the restart-failed line below, from upsdrvctl;
+  # never infer one from the attempt count.
   if [ "$_attempt" -ge "$COMMS_FAST_RETRIES" ]; then
-    printf 'level=error msg="comms watchdog still restarting driver; UPS likely absent or driver unstartable" ups=%s attempt=%d\n' "$UPS_NAME" "$_attempt" >&2
+    printf 'level=error msg="comms watchdog still restarting driver after repeated attempts" ups=%s attempt=%d\n' "$UPS_NAME" "$_attempt" >&2
   else
     printf 'level=warn msg="comms watchdog re-homing UPS driver after stale comms" ups=%s attempt=%d\n' "$UPS_NAME" "$_attempt" >&2
   fi
@@ -292,7 +296,16 @@ restart_ups_driver() {
       printf 'level=warn msg="comms watchdog could not re-assert nut group on USB nodes" ups=%s\n' "$UPS_NAME" >&2
     fi
   fi
-  timeout -k 5 30 /usr/sbin/upsdrvctl stop "$UPS_NAME" >/dev/null 2>&1 || true
+  _rud_stop_out_file=$(capture_tmpfile "$WD_RESTART_CAPTURE_PREFIX")
+  if timeout -k 5 30 /usr/sbin/upsdrvctl stop "$UPS_NAME" >"$_rud_stop_out_file" 2>&1; then
+    :
+  else
+    _rud_stop_rc=$?
+    _rud_stop_out=$(capture_head "$_rud_stop_out_file")
+    printf 'level=warn msg="comms watchdog driver stop failed" ups=%s rc=%d detail="%s"\n' \
+      "$UPS_NAME" "$_rud_stop_rc" "$(log_value "$_rud_stop_out")" >&2
+  fi
+  capture_cleanup "$_rud_stop_out_file"
   kill_stale_driver_from_pidfile "$(driver_pidfile)"
   start_recovered_driver
   # Signal that a real restart was attempted (distinct from the killpower
@@ -302,8 +315,9 @@ restart_ups_driver() {
 
 # comms_watchdog: probe upsd every COMMS_CHECK_INTERVAL seconds and re-home the
 # driver after sustained stale comms, in two stages: COMMS_FAST_RETRIES fast
-# attempts, then a COMMS_BACKOFF_FACTOR-multiplied threshold logged at error,
-# so a genuinely-absent UPS stops thrashing host USB perms while staying
+# attempts, at error level from the last of them onward, then a
+# COMMS_BACKOFF_FACTOR-multiplied threshold, so a genuinely-absent UPS stops
+# thrashing host USB perms while staying
 # visible. Each window is monotonic elapsed time since its first stale probe
 # (watchdog_epoch, not summed intervals). README "USB hotplug & comms
 # recovery" sizes it.
@@ -326,11 +340,11 @@ comms_watchdog() {
       if [ "$_restarts" -gt 0 ]; then
         # Total outage = elapsed since the FIRST stale probe of the outage,
         # not the last post-restart window (_stale resets on every bounce).
-        _total="$_stale"
+        _total=unknown
         if [ -n "$_outage_since" ] && _now=$(watchdog_epoch); then
           _total=$((_now - _outage_since))
         fi
-        printf 'level=info msg="comms watchdog UPS comms recovered" ups=%s stale_secs=%d restarts=%d\n' \
+        printf 'level=info msg="comms watchdog UPS comms recovered" ups=%s stale_secs=%s restarts=%d\n' \
           "$UPS_NAME" "$_total" "$_restarts" >&2
       fi
       _stale=0
@@ -387,11 +401,12 @@ dbus_poweroff_path_ok() {
     return 1
   }
   # dbus-send spawns no fd-holding grandchildren, so this capture cannot wait
-  # past the bounded command.
-  _dbus_reply=$(timeout 5 dbus-send --system --print-reply \
+  # past the bounded command. The redirect is on the brace group so that past
+  # `timeout 5` the reporting shell's signal-death line still lands in detail=.
+  _dbus_reply=$({ timeout 5 dbus-send --system --print-reply \
     --reply-timeout="$DBUS_PROBE_REPLY_TIMEOUT_MS" \
     --dest=org.freedesktop.login1 /org/freedesktop/login1 \
-    org.freedesktop.login1.Manager.CanPowerOff 2>&1) || {
+    org.freedesktop.login1.Manager.CanPowerOff; } 2>&1) || {
     _dbus_detail="$_dbus_reply"
     return 1
   }

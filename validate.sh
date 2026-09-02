@@ -1,10 +1,10 @@
 #!/bin/sh
-# validate.sh — validation functions and table-driven dispatch for NUT env vars.
+# validate.sh — validation functions for NUT env vars.
 # Sourced by entrypoint.sh; not executed directly.
 
 # Digit-count ceiling for every numeric env var: the largest all-nines value
-# inside a signed 64-bit long, so any value validate_numeric accepts still
-# compares safely in $(( )) and test(1).
+# inside a signed 64-bit long, so a value validate_numeric accepts compares
+# safely in test(1); base-10 safety in $(( )) belongs to strip_leading_zeros.
 readonly SHELL_SAFE_INTEGER_MAX=999999999999999999
 
 # log_value: sanitize a rejected raw value before interpolating it into a
@@ -52,15 +52,16 @@ validate_numeric() {
     return 1
   fi
 
-  # tier 2: every numeric here reaches a C int. upsmon reads DEADTIME,
-  # HOSTSYNC, NOCOMMWARNTIME and RBWARNTIME through a bare atoi(3) with no
-  # validity arm (clients/upsmon.c:2428-2460), so above INT_MAX the stored
-  # value is not the configured one -- atoi("2147483648") is negative and
-  # atoi("4294967296") is 0, and either makes `(now - lastpoll) > deadtime`
-  # (clients/upsmon.c:1712) true on every pass, promoting the first
-  # on-battery UPS to OB+LB and powering the host off when the opt-in is set.
-  if [ "$(strip_leading_zeros "$2")" -gt 2147483647 ]; then
-    printf 'level=error msg="env var exceeds 2147483647, the largest value its NUT consumer stores" var=%s value="%s"\n' "$1" "$(log_value "$2")" >&2
+  # tier 2: one ceiling for every numeric row, set by the strictest
+  # consumer. upsmon reads DEADTIME, HOSTSYNC, NOCOMMWARNTIME and
+  # RBWARNTIME through a bare atoi(3) with no validity arm
+  # (clients/upsmon.c:2428-2460), so above INT_MAX the stored value is not
+  # the configured one and a negative deadtime makes
+  # `(now - lastpoll) > deadtime` (:1712) true on every pass, powering the
+  # host off when the opt-in is set. DBUS_PROBE_INTERVAL and the four
+  # COMMS_* rows have no NUT consumer and share the ceiling anyway.
+  if [ "$2" -gt 2147483647 ]; then
+    printf 'level=error msg="env var must not exceed 2147483647" var=%s value="%s"\n' "$1" "$(log_value "$2")" >&2
     return 1
   fi
 }
@@ -256,17 +257,15 @@ usb_bus_required() {
 }
 
 # ---------------------------------------------------------------------------
-# Table-driven validation dispatch
+# Validation dispatch
 # ---------------------------------------------------------------------------
 
 # Each _check call names the variable, its value, and its checks.
 # _dispatch_check owns the legal names; CONTRIBUTING.md "Adding or validating
-# an environment variable" owns row composition. A row lists its write form's
-# hazards plus the domain checks that bound the value. identifier and the numeric
-# family admit one alphabet, so they subsume every BYTE hazard and no LENGTH
-# hazard; nut_word admits ", \ and #, hence those three on both credential rows.
-# A subsumed hazard stays listed where the refusal must NAME the injection case:
-# `control` everywhere, quotes/brackets on the two section-header rows.
+# an environment variable" owns row composition.
+# A hazard a domain check already refuses stays listed where the refusal must
+# NAME the injection case: `control` everywhere, quotes/brackets on the two
+# section-header rows.
 
 # Dispatch a single check for a variable.
 _dispatch_check() {
@@ -392,18 +391,6 @@ run_validations() {
       printf 'level=error msg="LOWBATT_PERCENT and LOWBATT_RUNTIME must not both be zero; zero disables that axis and ignorelb discards the UPS low-battery flag"\n' >&2
       exit 1
     fi
-  fi
-
-  # COMMS_RECOVERY_TIMEOUT and COMMS_BACKOFF_FACTOR are the one validated pair
-  # that gets MULTIPLIED in shell arithmetic (lifecycle.sh's stage-2 backoff
-  # threshold). Each is individually bounded to 2147483647 by validate_numeric,
-  # but their product can still overflow $(( )); bound the pair so the product stays
-  # representable. Both are `positive`, so _backoff >= 1 and division is safe.
-  _recovery=$(strip_leading_zeros "$COMMS_RECOVERY_TIMEOUT")
-  _backoff=$(strip_leading_zeros "$COMMS_BACKOFF_FACTOR")
-  if [ "$_recovery" -gt $((SHELL_SAFE_INTEGER_MAX / _backoff)) ]; then
-    printf 'level=error msg="watchdog recovery interval product is too large" recovery_timeout=%s backoff_factor=%s\n' "$_recovery" "$_backoff" >&2
-    exit 1
   fi
 
   # DEADTIME below the larger poll interval arms an irreversible host poweroff:

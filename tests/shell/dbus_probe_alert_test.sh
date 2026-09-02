@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # dbus_liveness_probe(): the background loop that re-checks the host-poweroff path
 # while SHUTDOWN_ON_BATTERY_CRITICAL is on, and the sole source of the line
-# alerts.yaml's UPSPowerOffPathBroken matches.
+# alerts/logql.yaml's UPSPowerOffPathBroken matches.
 #
 # The whole point of the probe is that it reports a broken poweroff path BEFORE a
 # real forced shutdown, because during one it can no longer be fixed. That makes
 # its log line a contract: UPSPowerOffPathBroken matches the literal
-# `D-Bus poweroff path unreachable` (copied verbatim from alerts.yaml below), and
+# `D-Bus poweroff path unreachable` (copied verbatim from alerts/logql.yaml below), and
 # it matches while the path is broken, so the line must RECUR rather than fire
 # once and go quiet. Both properties are asserted here.
 #
@@ -25,7 +25,7 @@
 #     and sourced at RUNTIME, so shellcheck cannot see the read.
 #   SC2329 - the dbus_poweroff_path_ok and sleep stubs are invoked from that same
 #     runtime-sourced function, so shellcheck cannot see those calls either.
-#   SC2016 - the backtick pattern that reads the matcher out of alerts.yaml must
+#   SC2016 - the backtick pattern that reads the matcher out of alerts/logql.yaml must
 #     stay single-quoted: it matches the LITERAL backticks LogQL wraps a line
 #     filter in, and double quotes would run it as a command substitution.
 # shellcheck disable=SC2015,SC2034,SC2329,SC2016
@@ -73,7 +73,7 @@ count() {
   grep -c "$1" "$LOG"
 }
 
-# --- 1. the matcher alerts.yaml actually uses ------------------------------------
+# --- 1. the matcher alerts/logql.yaml actually uses ------------------------------------
 # The pattern is read FROM the rule file, so either side of the contract failing
 # fails here: reword the log line and it stops matching; edit the alert expression
 # and the extracted pattern changes out from under the emitter. The rule filters on
@@ -89,11 +89,11 @@ M_DBUS=$(awk '
   /- alert: UPSPowerOffPathBroken$/ { inrule = 1; next }
   inrule && /- alert: / { exit }
   inrule { print }
-' "$REPO_ROOT/alerts.yaml" | sed -n 's/.*| logfmt | msg=~"\([^"]*\)".*/\1/p' | head -1)
+' "$REPO_ROOT/alerts/logql.yaml" | sed -n 's/.*| logfmt | msg=~"\([^"]*\)".*/\1/p' | head -1)
 case "$M_DBUS" in
   *poweroff*) ;;
   *)
-    printf 'harness error: extracted matcher %s from alerts.yaml is not the poweroff-path msg filter\n' \
+    printf 'harness error: extracted matcher %s from alerts/logql.yaml is not the poweroff-path msg filter\n' \
       "${M_DBUS:-<empty>}" >&2
     exit 1
     ;;
@@ -105,8 +105,8 @@ run_probe 1 broken
 grep -qF -- "msg=\"$M_DBUS_PHRASE" "$LOG" \
   && grep -q 'level=error' "$LOG" \
   && grep -q 'socket=/run/dbus/system_bus_socket' "$LOG" \
-  && ok "a broken poweroff path logs level=error whose msg opens with '$M_DBUS_PHRASE' (read from alerts.yaml), naming the socket" \
-  || no 'UPSPowerOffPathBroken matcher' "alerts.yaml wants msg=\"$M_DBUS_PHRASE, log: $(head -c 300 "$LOG")"
+  && ok "a broken poweroff path logs level=error whose msg opens with '$M_DBUS_PHRASE' (read from alerts/logql.yaml), naming the socket" \
+  || no 'UPSPowerOffPathBroken matcher' "alerts/logql.yaml wants msg=\"$M_DBUS_PHRASE, log: $(head -c 300 "$LOG")"
 
 # --- 2. the line RECURS while broken --------------------------------------------
 #

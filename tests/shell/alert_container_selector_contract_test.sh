@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The alert rules' consumer label against compose.yaml's container_name.
 #
-# WHY THIS IS A CONTRACT: every rule in alerts.yaml selects its log stream with
+# WHY THIS IS A CONTRACT: every rule in alerts/logql.yaml selects its log stream with
 # {container="<name>"} and groups by that label, and the only place the name is
 # published is the shipped compose example. Rename it on one side, change a
 # sum-by label, or add a rule with no selector at all, and the rules keep parsing,
@@ -61,7 +61,7 @@ if detail=$(awk -v want="$compose_name" '
       exit 1
     }
   }
-' "$REPO_ROOT/alerts.yaml" 2>&1); then
+' "$REPO_ROOT/alerts/logql.yaml" 2>&1); then
   ok 'every alert rule selects and groups the container named by compose.yaml'
 else
   no 'alert container selector contract' "$detail"

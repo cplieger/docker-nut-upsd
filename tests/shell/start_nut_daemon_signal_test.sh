@@ -174,4 +174,24 @@ run_boot_failure upsd-pid-failure
   && ok 'a missing upsd PID file tears down the partial stack before exiting 1' \
   || no 'upsd PID-file failure cleanup' "rc=$RUN_RC teardown=$(wc -l <"$WORK/boot-teardown") pidfile_calls=$(wc -l <"$WORK/boot-pidfile-calls")"
 
+entry_bound=$(sed -n \
+  's/^start_nut_daemon "upsdrvctl" \([0-9][0-9]*\) \/usr\/sbin\/upsdrvctl start$/\1/p' \
+  "$REPO_ROOT/entrypoint.sh")
+readme_bound=$(sed -n \
+  "s/.*keep the driver's worst-case start inside \\([0-9][0-9]*\\)s, the outer bound.*/\\1/p" \
+  "$REPO_ROOT/README.md")
+
+if [ "$(printf '%s\n' "$entry_bound" | grep -c .)" -ne 1 ] \
+  || [ "$(printf '%s\n' "$readme_bound" | grep -c .)" -ne 1 ]; then
+  printf 'harness error: expected one upsdrvctl bound in entrypoint.sh and README.md\n' >&2
+  exit 1
+fi
+
+if [ "$entry_bound" -eq "$readme_bound" ] && [ "$entry_bound" -gt 75 ]; then
+  ok "upsdrvctl's ${entry_bound}s outer bound matches README.md and exceeds NUT's 75s maxstartdelay default"
+else
+  no 'upsdrvctl startup timeout contract' \
+    "entrypoint=${entry_bound}s README=${readme_bound}s; both must agree above 75s"
+fi
+
 report

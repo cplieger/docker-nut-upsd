@@ -105,20 +105,16 @@ run_killpower_cleanup
   || no 'present stale killpower flag' \
     "rc=$RUN_RC exists=$([ -e "$WORK/killpower" ] && printf yes || printf no) stderr=$(cat "$WORK/stderr")"
 
-TEMP_BLOCK=$(extract_range '^if ! _clt_err=' '^fi$' "$WORK/temp-cleanup-block.sh") || exit 1
+TEMP_BLOCK=$(extract_range '^_clt_etc=' '^fi$' "$WORK/temp-cleanup-block.sh") || exit 1
 
 cat >"$WORK/drive-temp-cleanup.sh" <<'DRIVER'
 #!/usr/bin/env bash
 set -euf
+. "$VALIDATE"
+. "$GENERATE_CONFIG"
 WD_RESTART_CAPTURE_PREFIX="$WORK/wd-restart"
 STOP_CMD_CAPTURE_PREFIX="$WORK/stop-cmd"
-ADMIN_PASSWORD_FILE="$WORK/admin-password"
-LOCAL_UPSMON_PASSWORD_FILE="$WORK/local-upsmon-password"
-TLS_CERT_CACHE="$WORK/tls-cache"
-TLS_CERT_RUNTIME="$WORK/tls-runtime"
-TLS_CERT_MOUNTED_RUNTIME="$WORK/tls-mounted-runtime"
 
-log_value() { printf '%s' "$1"; }
 rm() {
   printf '%s\n' "$@" >"$RM_ARGS"
   if [ "$MODE" = failure ]; then
@@ -135,6 +131,7 @@ run_temp_cleanup() {
   : >"$WORK/rm-args"
   : >"$WORK/stderr"
   if env MODE="$1" TEMP_BLOCK="$TEMP_BLOCK" WORK="$WORK" RM_ARGS="$WORK/rm-args" \
+    VALIDATE="$REPO_ROOT/validate.sh" GENERATE_CONFIG="$REPO_ROOT/generate-config.sh" \
     bash "$WORK/drive-temp-cleanup.sh" >"$WORK/stdout" 2>"$WORK/stderr"; then
     RUN_RC=0
   else
@@ -147,11 +144,7 @@ expected_args=$(cat <<EOF
 -f
 $WORK/wd-restart.*
 $WORK/stop-cmd.*
-$WORK/admin-password.tmp.*
-$WORK/local-upsmon-password.tmp.*
-$WORK/tls-cache.tmp.*
-$WORK/tls-runtime.tmp.*
-$WORK/tls-mounted-runtime.tmp.*
+/var/run/nut-secrets/*.tmp.*
 /etc/nut/ups.conf.tmp.*
 /etc/nut/upsd.conf.tmp.*
 /etc/nut/upsd.users.tmp.*
@@ -167,8 +160,10 @@ EOF
 run_temp_cleanup failure
 warning_count=$(grep -c 'crash-leaked temp file from a previous lifecycle; continuing' "$WORK/stderr" || true)
 error_bytes=$(tr -cd x <"$WORK/stderr" | wc -c | tr -d ' ')
-[ "$RUN_RC" -eq 0 ] && [ "$warning_count" -eq 1 ] && [ "$error_bytes" -eq 512 ] \
-  && ok 'a cleanup failure stays warn-only and bounds the captured error to 512 bytes' \
+expected_error=$(printf '%0509d' 0 | tr 0 x)
+[ "$RUN_RC" -eq 0 ] && [ "$warning_count" -eq 1 ] && [ "$error_bytes" -eq 509 ] \
+  && grep -Fq -- "${expected_error}..." "$WORK/stderr" \
+  && ok 'a cleanup failure stays warn-only and marks its error as truncated at 512 bytes' \
   || no 'bounded fail-soft temporary cleanup' \
     "rc=$RUN_RC warnings=$warning_count error_bytes=$error_bytes stderr=$(cat "$WORK/stderr")"
 

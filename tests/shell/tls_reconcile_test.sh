@@ -22,7 +22,7 @@
 # an assumption:
 #   SC2015 - the assertion form `[ cond ] && ok "..." || no "..."` cannot mis-fire,
 #     because lib.sh's ok/no return 0 unconditionally by design (see their comment).
-#   SC2034 - API_TLS/TLS_CERT_* are the INPUTS to password.sh code that is
+#   SC2034 - API_TLS/TLS_CERT_* are the INPUTS to secrets.sh code that is
 #     extracted and sourced at RUNTIME, so shellcheck cannot see the reads.
 # shellcheck disable=SC2015,SC2034
 set -u
@@ -32,8 +32,8 @@ set -u
 new_workdir >/dev/null
 
 # The file under test; a caller who SET ENTRYPOINT wins, which is the red-check:
-#   ENTRYPOINT=/tmp/mut-password.sh bash tests/shell/tls_reconcile_test.sh
-SUBJECT="$REPO_ROOT/password.sh"
+#   ENTRYPOINT=/tmp/mut-secrets.sh bash tests/shell/tls_reconcile_test.sh
+SUBJECT="$REPO_ROOT/secrets.sh"
 [ "$ENTRYPOINT" = "$REPO_ROOT/entrypoint.sh" ] || SUBJECT="$ENTRYPOINT"
 
 # log_value lives in validate.sh, which the entrypoint sources alongside this
@@ -45,7 +45,7 @@ ENTRYPOINT="$SUBJECT"
 load_function reconcile_tls_working_copies
 
 # The production paths are /etc/nut/upsd-{selfsigned,mounted}.pem, file-scope
-# readonly in password.sh and plain variables once extracted, so the whole
+# readonly in secrets.sh and plain variables once extracted, so the whole
 # reconciliation runs against the scratch dir.
 TLS_CERT_RUNTIME="$WORK/upsd-selfsigned.pem"
 TLS_CERT_MOUNTED_RUNTIME="$WORK/upsd-mounted.pem"

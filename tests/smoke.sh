@@ -21,7 +21,7 @@ set -eu
 # shellcheck source=/dev/null
 . /usr/local/bin/lifecycle.sh
 # shellcheck source=/dev/null
-. /usr/local/bin/password.sh
+. /usr/local/bin/secrets.sh
 
 fail=0
 log() { printf '%s\n' "$*"; }
@@ -236,14 +236,6 @@ if ! (
   err "FAIL: LOWBATT_PERCENT did not emit one ignorelb and the NUT low-charge override"
   fail=1
 fi
-if (
-  LOWBATT_PERCENT=0
-  LOWBATT_RUNTIME=0
-  run_validations
-) >/dev/null 2>&1; then
-  err "FAIL: LOWBATT_PERCENT=0 with LOWBATT_RUNTIME=0 disabled every low-battery path but was accepted"
-  fail=1
-fi
 BATT_ERR=$(mktemp)
 if ! (
   LOWBATT_PERCENT=0
@@ -262,10 +254,33 @@ if ! grep -q 'level=warn msg="battery percentage threshold disabled; low battery
   fail=1
 fi
 rm -f "$BATT_ERR"
-(
-  unset LOWBATT_PERCENT LOWBATT_RUNTIME CRITBATT_PERCENT CRITBATT_RUNTIME
-  generate_ups_conf >/dev/null 2>&1
-)
+BATT_DEPENDENCY_ERR=$(mktemp)
+if ! (
+  LOWBATT_PERCENT=0
+  unset LOWBATT_RUNTIME
+  generate_ups_conf >/dev/null 2>"$BATT_DEPENDENCY_ERR"
+  grep -q '^    ignorelb$' /etc/nut/ups.conf \
+    && grep -q '^    override\.battery\.charge\.low = 0$' /etc/nut/ups.conf \
+    && grep -Fqx 'level=warn msg="battery percentage threshold disabled; low battery depends on the UPS reporting battery.runtime and battery.runtime.low" low_pct=DISABLED low_rt=unset' "$BATT_DEPENDENCY_ERR"
+); then
+  err "FAIL: a lone disabled percentage threshold did not name the UPS runtime pair it depends on"
+  fail=1
+fi
+: >"$BATT_DEPENDENCY_ERR"
+if ! (
+  unset LOWBATT_PERCENT
+  LOWBATT_RUNTIME=0
+  generate_ups_conf >/dev/null 2>"$BATT_DEPENDENCY_ERR"
+  grep -q '^    ignorelb$' /etc/nut/ups.conf \
+    && grep -q '^    override\.battery\.runtime\.low = 0$' /etc/nut/ups.conf \
+    && grep -Fqx 'level=warn msg="battery runtime threshold disabled; low battery depends on the UPS reporting battery.charge and battery.charge.low" low_pct=unset low_rt=DISABLED' "$BATT_DEPENDENCY_ERR"
+); then
+  err "FAIL: a lone disabled runtime threshold did not name the UPS charge pair it depends on"
+  fail=1
+fi
+rm -f "$BATT_DEPENDENCY_ERR"
+unset LOWBATT_PERCENT LOWBATT_RUNTIME
+generate_ups_conf >/dev/null 2>&1
 grep -q 'LISTEN 0.0.0.0 3493' /etc/nut/upsd.conf || {
   err "FAIL: upsd.conf missing LISTEN directive"
   fail=1
@@ -549,6 +564,26 @@ fi
 rm -f /etc/nut/ups.conf.user /etc/nut/upsd.conf.user \
   /etc/nut/upsd.users.user /etc/nut/upsmon.conf.user \
   /etc/nut/ignored.conf.user "$OVERRIDE_SWEEP_ERR"
+LATE_OVERRIDE_ERR=$(mktemp)
+rm -f /etc/nut/ups.conf.user
+if ! (
+  decide_user_overrides
+  mktemp() {
+    _late_tmp=$(busybox mktemp "$@") || return 1
+    if [ "$1" = '/etc/nut/ups.conf.tmp.XXXXXX' ]; then
+      printf '# appeared after the decision\n' >/etc/nut/ups.conf.user
+    fi
+    printf '%s\n' "$_late_tmp"
+  }
+  generate_all_configs >/dev/null 2>"$LATE_OVERRIDE_ERR" || exit 1
+  grep -q '^\[ups\]$' /etc/nut/ups.conf \
+    && ! grep -q '^# appeared after the decision$' /etc/nut/ups.conf \
+    && grep -Fqx 'level=warn msg="mounted override appeared after boot read the override topology; ignoring it for this boot (a container restart applies it)" file="ups.conf.user"' "$LATE_OVERRIDE_ERR"
+); then
+  err "FAIL: a known override appearing after the topology snapshot was not generated-over with its warning"
+  fail=1
+fi
+rm -f /etc/nut/ups.conf.user "$LATE_OVERRIDE_ERR"
 decide_user_overrides
 generate_all_configs >/dev/null 2>&1
 
@@ -670,14 +705,14 @@ grep -q '^\[ups\]' /etc/nut/ups.conf || {
 #    success, and log the override as applied while the config path is still
 #    a directory. The staged _replace_file install must refuse it promptly
 #    (non-zero, not a hang), log the structured apply failure, and leak
-#    nothing into the directory. password.sh is sourced in the subshell so
+#    nothing into the directory. secrets.sh is sourced in the subshell so
 #    _replace_file is in scope, as in the entrypoint.
 printf '[ups]\n    driver = usbhid-ups\n    port = auto\n' >/etc/nut/ups.conf.user
 rm -f /etc/nut/ups.conf
 mkdir /etc/nut/ups.conf
 DIRDST_ERR=$(mktemp)
 dirdst_rc=0
-timeout 2 sh -c '. /usr/local/bin/password.sh; . /usr/local/bin/generate-config.sh; decide_user_overrides; generate_ups_conf' \
+timeout 2 sh -c '. /usr/local/bin/secrets.sh; . /usr/local/bin/generate-config.sh; decide_user_overrides; generate_ups_conf' \
   >/dev/null 2>"$DIRDST_ERR" || dirdst_rc=$?
 if [ "$dirdst_rc" -eq 0 ] || [ "$dirdst_rc" -eq 124 ] || [ "$dirdst_rc" -eq 143 ]; then
   err "FAIL: directory at /etc/nut/ups.conf was not refused promptly (rc=$dirdst_rc; 124/143 = install blocked until timeout)"
@@ -777,7 +812,7 @@ elif ! cmp -s /etc/nut/ups.conf.user /etc/nut/ups.conf; then
 fi
 rm -f /etc/nut/ups.conf.user
 
-# resolve_local_upsmon_password (password.sh): generates a PASSWORD_LENGTH-char
+# resolve_local_upsmon_password (secrets.sh): generates a PASSWORD_LENGTH-char
 # secret, caches it root-only, and reuses the cache on the next resolve
 # (stable across in-container restarts) — and ignores any inherited env value
 # (the exported 12-char test value must NOT survive a resolve). Subshell keeps
@@ -1032,16 +1067,6 @@ if (
   err "FAIL: overlong API_PORT (>18 digits) was accepted"
   fail=1
 fi
-# The stage-2 backoff threshold multiplies these two; each fits in 18 digits
-# but the product would overflow $(( )), so run_validations must bound the pair.
-if (
-  COMMS_RECOVERY_TIMEOUT='999999999999999999'
-  COMMS_BACKOFF_FACTOR='5'
-  run_validations
-) >/dev/null 2>&1; then
-  err "FAIL: COMMS_RECOVERY_TIMEOUT x COMMS_BACKOFF_FACTOR product overflow was accepted"
-  fail=1
-fi
 while IFS='|' read -r _dt_poll _dt_alert _dt_dead _dt_expect; do
   [ -n "$_dt_poll" ] || continue
   if _dt_out=$(
@@ -1079,8 +1104,8 @@ done <<'CASES'
 05|07|06|reject
 05|07|07|accept
 CASES
-# A credential NUT will not preserve must be refused rather than stored altered:
-# parseconf's addchar() silently discards bytes outside 0x20-0x7E (CVE-2012-2944).
+# A credential NUT will not preserve must be refused rather than stored altered;
+# this case drives validate_nut_word's printable-byte predicate.
 if (
   API_PASSWORD="$(printf 'p\303\244ssword')"
   run_validations
@@ -1220,6 +1245,37 @@ elif [ -s "$STANDALONE_OUT" ] || [ -s "$STANDALONE_ERR" ]; then
 fi
 rm -f "$STANDALONE_OUT" "$STANDALONE_ERR"
 
+HEALTHCHECK_PROBE_OUT=$(mktemp)
+HEALTHCHECK_PROBE_ERR=$(mktemp)
+if ! sh -c '
+  . "$1"
+  UPS_NAME=ups
+  API_ADDRESS=0.0.0.0
+  API_PORT=3493
+  timeout() {
+    [ "$1" = 3 ] || return 2
+    shift
+    "$@"
+  }
+  upsc() {
+    printf "%s\n" "$*"
+    [ "$#" -eq 2 ] \
+      && [ "$1" = "ups@127.0.0.1:3493" ] \
+      && [ "$2" = "ups.status" ]
+  }
+  comms_fresh
+' sh /usr/local/bin/lifecycle.sh >"$HEALTHCHECK_PROBE_OUT" 2>"$HEALTHCHECK_PROBE_ERR"; then
+  err "FAIL: lifecycle-only comms_fresh did not issue the complete healthcheck probe"
+  err "stdout=$(head -c 256 "$HEALTHCHECK_PROBE_OUT") stderr=$(head -c 256 "$HEALTHCHECK_PROBE_ERR")"
+  fail=1
+elif [ "$(cat "$HEALTHCHECK_PROBE_OUT")" != "ups@127.0.0.1:3493 ups.status" ] \
+  || [ -s "$HEALTHCHECK_PROBE_ERR" ]; then
+  err "FAIL: lifecycle-only comms_fresh emitted output outside the complete upsc argv"
+  err "stdout=$(head -c 256 "$HEALTHCHECK_PROBE_OUT") stderr=$(head -c 256 "$HEALTHCHECK_PROBE_ERR")"
+  fail=1
+fi
+rm -f "$HEALTHCHECK_PROBE_OUT" "$HEALTHCHECK_PROBE_ERR"
+
 if ! LIFECYCLE_TOPLEVEL_BAD=$(awk '
   BEGIN { in_function = 0 }
   in_function {
@@ -1244,6 +1300,38 @@ elif [ -n "$LIFECYCLE_TOPLEVEL_BAD" ]; then
   err "FAIL: lifecycle.sh executes outside a function: $LIFECYCLE_TOPLEVEL_BAD"
   fail=1
 fi
+
+DBUS_REPLY_TIMEOUT_MS=$(awk '
+  /^readonly DBUS_PROBE_REPLY_TIMEOUT_MS=[0-9]+/ {
+    value = $0
+    sub(/^readonly DBUS_PROBE_REPLY_TIMEOUT_MS=/, "", value)
+    sub(/[^0-9].*$/, "", value)
+    print value
+    exit
+  }
+' /usr/local/bin/lifecycle.sh)
+DBUS_OUTER_TIMEOUT_S=$(awk '
+  /^dbus_poweroff_path_ok\(\)/ { inside = 1 }
+  inside && /_dbus_reply=\$\(\{ timeout [0-9]+ dbus-send/ {
+    value = $0
+    sub(/^.*timeout /, "", value)
+    sub(/ .*/, "", value)
+    print value
+    exit
+  }
+' /usr/local/bin/lifecycle.sh)
+case "$DBUS_REPLY_TIMEOUT_MS:$DBUS_OUTER_TIMEOUT_S" in
+  '' | :* | *: | *[!0-9:]* )
+    err "FAIL: could not read both D-Bus timeout operands from lifecycle.sh"
+    fail=1
+    ;;
+  *)
+    if [ "$DBUS_REPLY_TIMEOUT_MS" -ge "$((DBUS_OUTER_TIMEOUT_S * 1000))" ]; then
+      err "FAIL: D-Bus reply timeout (${DBUS_REPLY_TIMEOUT_MS}ms) is not below its outer bound (${DBUS_OUTER_TIMEOUT_S}s)"
+      fail=1
+    fi
+    ;;
+esac
 
 # The three NUT controls share Docker's 10-second stop grace. Drive the real
 # sequence with a fake clock so a widened bound or an added control cannot push
@@ -1438,6 +1526,20 @@ if ! cmp -s "$PROBE_EXPECTED" "$PROBE_CALLS"; then
   err "$(tr '\n' '|' <"$PROBE_CALLS")"
   fail=1
 fi
+PROBE_ERR=$(mktemp)
+# shellcheck disable=SC2329  # invoked indirectly, via the timeout stub above
+upsc() {
+  printf '%s\n' 'probe diagnostic' >&2
+  return 1
+}
+if comms_fresh 2>"$PROBE_ERR"; then
+  err "FAIL: comms_fresh accepted a failing diagnostic probe"
+  fail=1
+elif ! grep -Fqx 'probe diagnostic' "$PROBE_ERR"; then
+  err "FAIL: comms_fresh discarded the probe diagnostic from stderr"
+  fail=1
+fi
+rm -f "$PROBE_ERR"
 unset -f timeout upsc
 rm -f "$PROBE_CALLS" "$PROBE_EXPECTED"
 
@@ -1655,7 +1757,7 @@ if dbus_poweroff_path_ok; then
 fi
 
 # 7. TLS (STARTTLS) support — resolve_tls_cert / generate_upsd_conf
-#    (password.sh, generate-config.sh). Section 2 already provisioned the
+#    (secrets.sh, generate-config.sh). Section 2 already provisioned the
 #    self-signed cert and asserted the CERTFILE/DISABLE_WEAK_SSL directives.
 #
 #    The self-signed PEM: cache and nut-readable working copy both exist, the
@@ -1680,6 +1782,10 @@ if [ "$(stat -c '%U:%G %a' /etc/nut/upsd-selfsigned.pem)" != "root:nut 640" ]; t
 fi
 if [ "$(stat -c '%U:%G %a' /var/run/nut-secrets/upsd-selfsigned.pem)" != "root:root 600" ]; then
   err "FAIL: cached self-signed PEM is not root:root 600 (got '$(stat -c '%U:%G %a' /var/run/nut-secrets/upsd-selfsigned.pem)')"
+  fail=1
+fi
+if find /var/run/nut-secrets -maxdepth 1 -name 'upsd-selfsigned.pem.tmp.*' -print -quit | grep -q .; then
+  err "FAIL: successful self-signed TLS provisioning left a raw key or certificate temp file"
   fail=1
 fi
 
@@ -1859,6 +1965,22 @@ if ! grep -q 'level=error msg="mounted TLS certificate path is not a regular fil
 fi
 rmdir /etc/nut/upsd.pem
 rm -f "$NONREG_ERR"
+
+# A writer-less FIFO must be refused before any certificate reader can block.
+mkfifo /etc/nut/upsd.pem
+NONREG_ERR=$(mktemp)
+fifo_rc=0
+timeout 2 sh -c '. /usr/local/bin/validate.sh; . /usr/local/bin/secrets.sh; resolve_tls_cert' \
+  >/dev/null 2>"$NONREG_ERR" || fifo_rc=$?
+if [ "$fifo_rc" -eq 0 ] || [ "$fifo_rc" -eq 124 ] || [ "$fifo_rc" -eq 143 ]; then
+  err "FAIL: FIFO at /etc/nut/upsd.pem was not refused before certificate parsing (rc=$fifo_rc; 124/143 = blocked until timeout)"
+  fail=1
+fi
+if ! grep -q 'level=error msg="mounted TLS certificate path is not a regular file' "$NONREG_ERR"; then
+  err "FAIL: FIFO at /etc/nut/upsd.pem was not refused with the not-a-regular-file error"
+  fail=1
+fi
+rm -f /etc/nut/upsd.pem "$NONREG_ERR"
 
 #    Unparseable mounted PEM: fatal — resolve_tls_cert must log the parse error
 #    and refuse to publish a working copy.

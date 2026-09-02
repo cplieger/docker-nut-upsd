@@ -7,8 +7,8 @@ set -eu
 . /usr/local/bin/generate-config.sh
 # shellcheck source-path=SCRIPTDIR source=lifecycle.sh
 . /usr/local/bin/lifecycle.sh
-# shellcheck source-path=SCRIPTDIR source=password.sh
-. /usr/local/bin/password.sh
+# shellcheck source-path=SCRIPTDIR source=secrets.sh
+. /usr/local/bin/secrets.sh
 
 # Reclaim artifacts a crashed previous run left in the writable layer, before
 # any new temp/config write (a late cleanup is unreachable under set -e
@@ -35,20 +35,19 @@ if [ -n "$(stale_nut_pid_paths | head -c 1)" ]; then
   fi
 fi
 
-# Clear temps leaked by a kill between mktemp and rm -f/mv in lifecycle.sh's
-# capture helpers, password.sh's resolvers, or generate-config.sh's override
-# staging. Warn-only: the producers that need the space fail with their own
-# structured errors if storage is still unavailable.
+# Clear temps leaked by a kill between mktemp and rm -f/mv. The secrets
+# directory is app-owned; NUT_STAGED_CONFIGS limits cleanup in operator-mountable
+# /etc/nut to names this app stages.
+_clt_etc=''
+for _clt_name in $NUT_STAGED_CONFIGS; do
+  _clt_etc="$_clt_etc /etc/nut/$_clt_name.tmp.*"
+done
+# Word splitting expands the staged-config inventory into distinct rm arguments.
+# shellcheck disable=SC2086
 if ! _clt_err=$(rm -f "$WD_RESTART_CAPTURE_PREFIX".* "$STOP_CMD_CAPTURE_PREFIX".* \
-  "${ADMIN_PASSWORD_FILE}.tmp."* \
-  "${LOCAL_UPSMON_PASSWORD_FILE}.tmp."* \
-  "${TLS_CERT_CACHE}.tmp."* \
-  "${TLS_CERT_RUNTIME}.tmp."* \
-  "${TLS_CERT_MOUNTED_RUNTIME}.tmp."* \
-  /etc/nut/ups.conf.tmp.* /etc/nut/upsd.conf.tmp.* \
-  /etc/nut/upsd.users.tmp.* /etc/nut/upsmon.conf.tmp.* 2>&1); then
+  /var/run/nut-secrets/*.tmp.* $_clt_etc 2>&1); then
   printf 'level=warn msg="could not remove a crash-leaked temp file from a previous lifecycle; continuing" err="%s"\n' \
-    "$(log_value "$(printf '%s' "$_clt_err" | head -c 512)")" >&2
+    "$(log_value "$_clt_err")" >&2
 fi
 
 # Clear a stale POWERDOWNFLAG (killpower) from a previous lifecycle: it
@@ -80,7 +79,7 @@ canonicalize_validated_values
 : "${API_ADDRESS:=0.0.0.0}"
 : "${API_PORT:=3493}"
 # STARTTLS on the upsd listener (opportunistic; legacy clients that never
-# request it keep talking cleartext). See resolve_tls_cert (password.sh).
+# request it keep talking cleartext). See resolve_tls_cert (secrets.sh).
 : "${API_TLS:=true}"
 # The seven timing directives below restate NUT v2.8.5's own defaults
 # (clients/upsmon.c:59-118) instead of leaving them unset: pinning keeps the
@@ -111,7 +110,7 @@ canonicalize_validated_values
 : "${DBUS_PROBE_INTERVAL:=300}"
 
 # ---------------------------------------------------------------------------
-# Password resolution (from password.sh)
+# Password resolution (from secrets.sh)
 # ---------------------------------------------------------------------------
 resolve_admin_password
 # The internal upsmon credential only exists when both upsd.users and
@@ -133,7 +132,7 @@ run_validations
 # USB device validation (USB transports only — see usb_bus_required)
 # ---------------------------------------------------------------------------
 if usb_bus_required && [ ! -d /dev/bus/usb ]; then
-  printf 'level=error msg="/dev/bus/usb not found — map a USB device to the container"\n' >&2
+  printf 'level=error msg="/dev/bus/usb not found — bind-mount the host /dev/bus/usb directory into the container"\n' >&2
   exit 1
 fi
 
@@ -196,7 +195,7 @@ else
   fi
 fi
 
-# Always resolve, even with an upsd.conf.user override mounted:
+# Always, even with an upsd.conf.user override mounted:
 # resolve_tls_cert provisions exactly one source per boot, so any unselected
 # working copy is withdrawn key material from a previous lifecycle. Withdrawing
 # it makes an override naming the wrong path fail visibly at upsd startup
@@ -211,23 +210,29 @@ generate_all_configs
 # ---------------------------------------------------------------------------
 # Permissions
 # ---------------------------------------------------------------------------
+# Normalizes what an operator's mounts left behind. Everything the container
+# itself installs in /etc/nut is already root:nut 640 when it first appears
+# under its final name (_install_nut_config, secrets.sh), so this is not
+# load-bearing for any of it. The -type d arm is what still matters: a
+# whole-directory bind mount at host mode 700 is untraversable by `nut`.
 # upsd.pem (operator-mounted) is excluded like *.user overrides: it is a bind
-# mount the container must never mutate. resolve_tls_cert (password.sh) serves
-# a root:nut 640 working copy inside /etc/nut instead.
+# mount the container must never mutate. resolve_tls_cert (secrets.sh)
+# serves a root:nut 640 working copy inside /etc/nut instead.
 if ! _perm_err=$(
-  find /etc/nut -name '*.user' -prune -o -name "${TLS_CERT_MOUNT##*/}" -prune -o -exec chown root:nut {} + 2>&1 \
+  find /etc/nut -name '*.user' -prune -o -name "${TLS_CERT_MOUNT##*/}" -prune -o \( -type d -o -type f \) -exec chown root:nut {} + 2>&1 \
     && find /etc/nut -name '*.user' -prune -o -name "${TLS_CERT_MOUNT##*/}" -prune -o -type d -exec chmod 750 {} + 2>&1 \
     && find /etc/nut -name '*.user' -prune -o -name "${TLS_CERT_MOUNT##*/}" -prune -o -type f -exec chmod 640 {} + 2>&1
 ); then
   printf 'level=error msg="could not normalize /etc/nut ownership and modes; refusing to start" err="%s"\n' \
-    "$(log_value "$(printf '%s' "$_perm_err" | head -c 512)")" >&2
+    "$(log_value "$_perm_err")" >&2
   exit 1
 fi
 if usb_bus_required; then
-  if chgrp -R nut /dev/bus/usb 2>/dev/null; then
+  if _chg_err=$(chgrp -R nut /dev/bus/usb 2>&1); then
     printf 'level=info msg="chgrp nut:/dev/bus/usb applied (host device nodes)"\n' >&2
   else
-    printf 'level=warn msg="could not chgrp nut on /dev/bus/usb; driver will still open the device as root before dropping to nut"\n' >&2
+    printf 'level=warn msg="could not chgrp nut on /dev/bus/usb; generated configuration starts the driver as nut, so it may be unable to open the device; NUT will report the failure" err="%s"\n' \
+      "$(log_value "$_chg_err")" >&2
   fi
 else
   printf 'level=info msg="non-USB transport; skipping USB bus group setup" driver=%s port=%s\n' "$UPS_DRIVER" "$UPS_PORT" >&2
@@ -252,6 +257,8 @@ DBUS_PROBE_PID=""
 # background loops, then stop the NUT daemons. Exit codes stay with the callers.
 teardown_all() {
   trap '' TERM INT QUIT HUP
+  # Fail-soft so diagnostics cannot skip any stop control.
+  set +e
   stop_bg_pid "${WATCHDOG_PID:-}"
   stop_bg_pid "${DBUS_PROBE_PID:-}"
   stop_services
@@ -259,7 +266,7 @@ teardown_all() {
 
 # shellcheck disable=SC2317,SC2329 # invoked via trap; shellcheck cannot see the call site
 graceful_shutdown() {
-  printf 'level=info msg="received shutdown signal"\n' >&2
+  printf 'level=info msg="received shutdown signal"\n' >&2 || :
   teardown_all
   exit 0
 }
@@ -283,14 +290,14 @@ start_nut_daemon() {
     :
   else
     _sd_rc=$?
-    printf 'level=error msg="%s start failed or timed out at boot" rc=%d\n' "$_sd_label" "$_sd_rc" >&2
+    printf 'level=error msg="%s start failed or timed out at boot" rc=%d\n' "$_sd_label" "$_sd_rc" >&2 || :
     teardown_all
     exit 1
   fi
 }
 
 # 90s outer bound on upsdrvctl wedging, sized above NUT's own default
-# maxstartdelay (75s). A mounted ups.conf.user can raise either past it.
+# maxstartdelay (75s). A mounted ups.conf.user can raise it past that bound.
 start_nut_daemon "upsdrvctl" 90 /usr/sbin/upsdrvctl start
 # NUT drivers write /var/run/nut/<driver>-<ups>.pid on successful start.
 wait_for_pidfile "UPS driver" "$(driver_pidfile)" "$(driver_binary)" || {
@@ -382,7 +389,7 @@ while kill -0 "$UPSMON_PID" 2>/dev/null; do
     upsd_failures=$((upsd_failures + 1))
     if [ "$upsd_failures" -ge "$UPSD_PROBE_MAX_FAILURES" ]; then
       printf 'level=error msg="upsd unresponsive; stopping services and exiting so the restart policy rebuilds the stack" consecutive_failures=%d probe_interval=%ss probe=%s\n' \
-        "$upsd_failures" "$UPSD_PROBE_INTERVAL" "$(upsd_probe_host):${API_PORT}" >&2
+        "$upsd_failures" "$UPSD_PROBE_INTERVAL" "$(upsd_probe_host):${API_PORT}" >&2 || :
       teardown_all
       exit 1
     fi
@@ -394,14 +401,12 @@ done
 # Reap upsmon and propagate its exit code so restart policies and log-based
 # alerting see the real failure. Status 0 is not a clean stop: it is an
 # executed SHUTDOWNCMD (upsmon's privileged parent, clients/upsmon.c runparent).
-set +e
-wait "$UPSMON_PID"
-rc=$?
-set -e
+rc=0
+wait "$UPSMON_PID" || rc=$?
 if [ "$rc" -eq 0 ]; then
-  printf 'level=warn msg="upsmon parent exited after running SHUTDOWNCMD; a forced shutdown (FSD) was executed" rc=0\n' >&2
+  printf 'level=warn msg="upsmon parent exited after running SHUTDOWNCMD; a forced shutdown (FSD) was executed" rc=0\n' >&2 || :
 else
-  printf 'level=error msg="upsmon exited unexpectedly" rc=%d\n' "$rc" >&2
+  printf 'level=error msg="upsmon exited unexpectedly" rc=%d\n' "$rc" >&2 || :
 fi
 teardown_all
 exit "$rc"

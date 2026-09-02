@@ -1,5 +1,5 @@
 #!/bin/sh
-# password.sh — generated-credential resolution and caching logic
+# secrets.sh — credential and STARTTLS certificate resolution and caching logic
 # (ADMIN_PASSWORD, the internal local_upsmon password, and the STARTTLS
 # server certificate). Sourced by entrypoint.sh; not executed directly.
 
@@ -32,6 +32,19 @@ _replace_file() {
       "$_rf_dst" "$(log_value "$_rf_err")" >&2
     return 1
   fi
+}
+
+# Installs a container-owned staging file as root:nut 640 before its atomic
+# rename, so the destination is never visible with the wrong owner or mode.
+_install_nut_config() {
+  _inc_src="$1"
+  _inc_dst="$2"
+  if ! _inc_err=$({ chown root:nut "$_inc_src" && chmod 640 "$_inc_src"; } 2>&1); then
+    printf 'level=warn msg="could not set owner/mode before installing file" dst=%s err="%s"\n' \
+      "$_inc_dst" "$(log_value "$_inc_err")" >&2
+    return 1
+  fi
+  _replace_file "$_inc_src" "$_inc_dst"
 }
 
 # _resolve_cached_password LABEL CACHE_FILE: shared engine for the credentials
@@ -138,22 +151,32 @@ readonly TLS_CERT_RUNTIME=/etc/nut/upsd-selfsigned.pem
 readonly TLS_CERT_MOUNTED_RUNTIME=/etc/nut/upsd-mounted.pem
 readonly TLS_CERT_DAYS=825
 
-# tls_cert_parses FILE: one PEM holding a certificate and its private key.
+# tls_cert_parses FILE: a certificate parses AND some private key parses, each on
+# its own; correspondence between them is upsd's ssl_init (see tls_cert_valid).
 # upsd fatalx()es on either half (server/netssl.c:715-722).
 tls_cert_parses() {
   openssl x509 -in "$1" -noout >/dev/null 2>&1 \
     && openssl pkey -in "$1" -noout -passin pass: >/dev/null 2>&1
 }
 
+# Every certificate in the file, not just the leaf: upsd loads the whole chain
+# (SSL_CTX_use_certificate_chain_file) and checks no expiry on any of it.
 tls_cert_fresh() {
-  openssl x509 -in "$1" -noout -checkend 86400 >/dev/null 2>&1
+  _tcf_n=$(grep -c 'BEGIN CERTIFICATE' "$1") || return 1
+  [ "$_tcf_n" -ge 1 ] || return 1
+  _tcf_i=1
+  while [ "$_tcf_i" -le "$_tcf_n" ]; do
+    awk -v want="$_tcf_i" '/BEGIN CERTIFICATE/{c++} c==want' "$1" \
+      | openssl x509 -noout -checkend 86400 >/dev/null 2>&1 || return 1
+    _tcf_i=$((_tcf_i + 1))
+  done
 }
 
 # tls_cert_valid FILE: the gate for reusing the cached self-signed PEM
 # (regenerate on anything less). A certificate and key that parse but do not
 # match each other pass; upsd's own ssl_init is what refuses that.
 tls_cert_valid() {
-  tls_cert_parses "$1" && tls_cert_fresh "$1"
+  [ -f "$1" ] && tls_cert_parses "$1" && tls_cert_fresh "$1"
 }
 
 # tls_cert_fingerprint FILE: SHA-256 fingerprint of the first certificate in
@@ -192,14 +215,14 @@ _generate_selfsigned_cert() {
     -subj "/CN=nut-upsd" -addext "subjectAltName=DNS:nut-upsd" 2>&1 >/dev/null); then
     rm -f "$_gc_key" "$_gc_crt" "$_gc_pem"
     printf 'level=error msg="self-signed TLS certificate keygen failed" path=%s err="%s"\n' \
-      "$TLS_CERT_CACHE" "$(log_value "$(printf '%s' "$_gc_err" | head -c 512)")" >&2
+      "$TLS_CERT_CACHE" "$(log_value "$_gc_err")" >&2
     return 1
   fi
   if ! _gc_err=$(cat "$_gc_crt" "$_gc_key" 2>&1 >"$_gc_pem") \
     || ! _replace_file "$_gc_pem" "$TLS_CERT_CACHE"; then
     rm -f "$_gc_key" "$_gc_crt" "$_gc_pem"
     printf 'level=error msg="self-signed TLS certificate generation failed" path=%s err="%s"\n' \
-      "$TLS_CERT_CACHE" "$(log_value "$(printf '%s' "$_gc_err" | head -c 512)")" >&2
+      "$TLS_CERT_CACHE" "$(log_value "$_gc_err")" >&2
     return 1
   fi
   rm -f "$_gc_key" "$_gc_crt"
@@ -215,15 +238,13 @@ _install_cert_working_copy() {
   _ic_src="$1"
   _ic_dst="$2"
   _ic_tmp=$(_tls_mktemp "$_ic_dst") || return 1
-  if _ic_err=$({ cat "$_ic_src" >"$_ic_tmp" \
-    && chown root:nut "$_ic_tmp" \
-    && chmod 640 "$_ic_tmp"; } 2>&1) \
-    && _replace_file "$_ic_tmp" "$_ic_dst"; then
+  if _ic_err=$(cat "$_ic_src" >"$_ic_tmp" 2>&1) \
+    && _install_nut_config "$_ic_tmp" "$_ic_dst"; then
     return 0
   fi
   rm -f "$_ic_tmp"
   printf 'level=error msg="failed to install TLS certificate working copy for upsd" source=%s path=%s err="%s"\n' \
-    "$_ic_src" "$_ic_dst" "$(log_value "$(printf '%s' "$_ic_err" | head -c 512)")" >&2
+    "$_ic_src" "$_ic_dst" "$(log_value "$_ic_err")" >&2
   return 1
 }
 
@@ -252,22 +273,20 @@ resolve_tls_cert() {
         "$TLS_CERT_MOUNT" >&2
       return 1
     fi
-    # A parse failure makes upsd fatalx() during startup
-    # (server/netssl.c:715-722); an expired pair loads but verifying clients
-    # refuse it.
-    if ! tls_cert_parses "$TLS_CERT_MOUNT"; then
+    # Copy first, then validate the bytes upsd serves. This prevents a host
+    # rewrite from making the verdict and fingerprint describe different bytes.
+    # Only the root:nut 640 snapshot changes; a 600 root:root read-only mount
+    # remains untouched.
+    _install_cert_working_copy "$TLS_CERT_MOUNT" "$TLS_CERT_MOUNTED_RUNTIME" || return 1
+    if ! tls_cert_parses "$TLS_CERT_MOUNTED_RUNTIME"; then
+      rm -f "$TLS_CERT_MOUNTED_RUNTIME"
       printf 'level=error msg="mounted TLS certificate is not one PEM holding a certificate and its private key in a form openssl can read without a passphrase (upsd supplies none); upsd will exit at startup" path=%s\n' \
         "$TLS_CERT_MOUNT" >&2
       return 1
-    elif ! tls_cert_fresh "$TLS_CERT_MOUNT"; then
-      printf 'level=warn msg="mounted TLS certificate expires within a day or has already expired; upsd will still serve it, but verifying clients will refuse the handshake" path=%s\n' \
+    elif ! tls_cert_fresh "$TLS_CERT_MOUNTED_RUNTIME"; then
+      printf 'level=warn msg="a certificate in the served TLS chain expires within a day or has already expired; upsd will still serve it" path=%s\n' \
         "$TLS_CERT_MOUNT" >&2
     fi
-    # Operator-mounted PEM: copied on every boot to a root:nut 640 working
-    # copy inside /etc/nut, never chowned/chmodded in place (that would
-    # mutate the HOST file on a rw bind mount). Root always reads the mount
-    # regardless of its perms, so a 600 root:root read-only mount works.
-    _install_cert_working_copy "$TLS_CERT_MOUNT" "$TLS_CERT_MOUNTED_RUNTIME" || return 1
     TLS_CERT_PATH="$TLS_CERT_MOUNTED_RUNTIME"
     printf 'level=info msg="provisioned the operator-mounted TLS certificate as a working copy (the mount is never modified; a 600 root:root read-only mount is fine)" certfile=%s source=%s fingerprint="%s"\n' \
       "$TLS_CERT_MOUNTED_RUNTIME" "$TLS_CERT_MOUNT" "$(tls_cert_fingerprint "$TLS_CERT_MOUNTED_RUNTIME")" >&2
@@ -305,9 +324,17 @@ reconcile_tls_working_copies() {
   # Managed paths are space-free readonly constants, so the word split is safe.
   _rw_failed=0
   for _rw_path in $_rw_stale; do
+    if [ -e "$_rw_path" ] || [ -L "$_rw_path" ]; then
+      _rw_present=1
+    else
+      _rw_present=0
+    fi
     if ! _rw_err=$(rm -f "$_rw_path" 2>&1); then
       printf 'level=error msg="cannot remove unselected TLS working copy (something mounted over this internal path?); refusing to leave withdrawn key material in place" path=%s err="%s"\n' "$_rw_path" "$(log_value "$_rw_err")" >&2
       _rw_failed=1
+    elif [ "$_rw_present" -eq 1 ]; then
+      printf 'level=info msg="withdrew a TLS working copy this boot did not provision; an upsd.conf.user CERTFILE naming this path will fail at upsd startup" path=%s\n' \
+        "$_rw_path" >&2
     fi
   done
   return "$_rw_failed"

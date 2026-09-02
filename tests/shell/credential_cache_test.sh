@@ -27,11 +27,11 @@ set -u
 new_workdir >/dev/null
 
 # The file under test; a caller who SET ENTRYPOINT wins (the red-check):
-#   ENTRYPOINT=/tmp/mut-password.sh bash tests/shell/credential_cache_test.sh
-SUBJECT="$REPO_ROOT/password.sh"
+#   ENTRYPOINT=/tmp/mut-secrets.sh bash tests/shell/credential_cache_test.sh
+SUBJECT="$REPO_ROOT/secrets.sh"
 [ "$ENTRYPOINT" = "$REPO_ROOT/entrypoint.sh" ] || SUBJECT="$ENTRYPOINT"
 
-# log_value lives in validate.sh, sourced alongside password.sh by the entrypoint.
+# log_value lives in validate.sh, sourced alongside secrets.sh by the entrypoint.
 ENTRYPOINT="$REPO_ROOT/validate.sh"
 load_function log_value
 
@@ -185,5 +185,55 @@ if resolve_admin_password 2>"$ERR"; then
 else
   no 'operator password pass-through' "resolver returned non-zero: $(head -c 200 "$ERR")"
 fi
+
+# --- 10. credential-cache diagnostics never disclose credential bytes ---------
+leak_failed=0
+leak_generated=$(n_chars "$PASSWORD_LENGTH" G)
+base64() {
+  printf '%s' "$leak_generated"
+}
+log_omits() {
+  ! grep -Fq "$1" "$ERR"
+}
+
+leak_reused=$(n_chars "$PASSWORD_LENGTH" R)
+rm -rf "$CACHE"
+printf '%s' "$leak_reused" >"$CACHE"
+if ! resolve || ! grep -q 'reusing ADMIN_PASSWORD from container FS' "$ERR" \
+  || ! log_omits "$leak_reused"; then
+  leak_failed=1
+fi
+
+leak_rejected=$(n_chars "$PASSWORD_LENGTH" '!')
+printf '%s' "$leak_rejected" >"$CACHE"
+if ! resolve \
+  || ! grep -q 'cached ADMIN_PASSWORD invalid' "$ERR" \
+  || ! grep -q 'generated ADMIN_PASSWORD; cached for intra-container restarts' "$ERR" \
+  || ! log_omits "$leak_rejected" || ! log_omits "$PW"; then
+  leak_failed=1
+fi
+
+leak_generated=shortsecret
+rm -f "$CACHE"
+if resolve \
+  || ! grep -q 'generated ADMIN_PASSWORD has unexpected length; refusing weak credentials' "$ERR" \
+  || ! log_omits "$leak_generated"; then
+  leak_failed=1
+fi
+
+leak_generated=$(n_chars "$PASSWORD_LENGTH" H)
+rm -f "$CACHE"
+mkdir "$CACHE"
+if ! resolve \
+  || ! grep -q 'generated ADMIN_PASSWORD but failed to cache' "$ERR" \
+  || ! log_omits "$leak_generated"; then
+  leak_failed=1
+fi
+rm -rf "$CACHE"
+unset -f base64 log_omits
+
+[ "$leak_failed" -eq 0 ] \
+  && ok 'credential-cache diagnostics omit reused, rejected, and generated credential bytes' \
+  || no 'credential-cache diagnostic secrecy' 'a diagnostic arm was not reached or disclosed its credential bytes'
 
 report

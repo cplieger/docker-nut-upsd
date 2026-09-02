@@ -7,7 +7,7 @@ set -u
 # shellcheck source-path=SCRIPTDIR
 . "$(dirname -- "$0")/lib.sh"
 
-ALERTS="${ALERTS:-$REPO_ROOT/alerts.yaml}"
+ALERTS="${ALERTS:-$REPO_ROOT/alerts/logql.yaml}"
 SHELL_ROOT="${SHELL_ROOT:-$REPO_ROOT}"
 RULE=$(awk '
   /- alert: UPSContainerError$/ { inrule = 1; next }
@@ -49,7 +49,7 @@ while IFS= read -r record; do
 done < <(grep -nHE "printf '[^']*level=error" "$SHELL_ROOT"/*.sh)
 
 if [ "$seen" -gt 0 ] && [ -z "$bad" ]; then
-  ok "every literal structured error format opens with the prefix UPSContainerError reads from alerts.yaml"
+  ok "every literal structured error format opens with the prefix UPSContainerError reads from alerts/logql.yaml"
 else
   no 'UPSContainerError anchored prefix' "checked=$seen formats; nonmatching:$bad"
 fi

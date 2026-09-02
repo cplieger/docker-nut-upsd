@@ -294,4 +294,120 @@ run_watchdog_start 1
   && ok 'the minimum positive comms interval starts exactly one watchdog worker' \
   || no 'minimum enabled comms interval' "calls=$(cat "$WORK/watchdog-calls") pid=$(cat "$WORK/watchdog-pid") stderr=$(cat "$WORK/watchdog-stderr")"
 
+BUSYBOX=$(command -v busybox) || {
+  printf 'harness error: busybox is required to test the image shell dialect\n' >&2
+  exit 1
+}
+SHUTDOWN=$(extract_function graceful_shutdown "$WORK/graceful_shutdown.sh") || exit 1
+
+cat >"$WORK/drive-teardown-signal.sh" <<'DRIVER'
+#!/bin/sh
+set -eu
+WATCHDOG_PID=5151
+DBUS_PROBE_PID=6262
+
+kill() { printf 'kill %s\n' "$1" >>"$EVENTS"; }
+wait() {
+  printf 'wait %s\n' "$1" >>"$EVENTS"
+  if [ ! -e "$WAIT_ENTERED" ]; then
+    # Hold the first worker's reap until the parent has sent the second signal,
+    # so the assertion can never pass because the signal arrived too late.
+    # Self-bounded at 5s: a missing handshake must fail this file, not hang it.
+    : >"$WAIT_ENTERED"
+    _held=0
+    while [ ! -e "$SECOND_SENT" ] && [ "$_held" -lt 100 ]; do
+      sleep 0.05
+      _held=$((_held + 1))
+    done
+  fi
+}
+stop_services() { printf 'stop-services\n' >>"$EVENTS"; }
+
+. "$STOP_BG"
+. "$TEARDOWN"
+. "$SHUTDOWN"
+trap graceful_shutdown TERM INT QUIT HUP
+: >"$READY"
+# A short foreground sleep is required because BusyBox ash runs a pending trap
+# only after the current foreground command returns, and wait is stubbed here.
+while :; do
+  sleep 0.05
+done
+DRIVER
+chmod +x "$WORK/drive-teardown-signal.sh"
+
+: >"$WORK/events"
+: >"$WORK/stderr"
+env STOP_BG="$STOP_BG" TEARDOWN="$TEARDOWN" SHUTDOWN="$SHUTDOWN" \
+  EVENTS="$WORK/events" WAIT_ENTERED="$WORK/wait-entered" \
+  SECOND_SENT="$WORK/second-sent" READY="$WORK/ready" \
+  "$BUSYBOX" ash "$WORK/drive-teardown-signal.sh" \
+  >"$WORK/stdout" 2>"$WORK/stderr" &
+driver_pid=$!
+
+ready=0
+for _ in $(seq 1 80); do
+  if [ -e "$WORK/ready" ]; then
+    ready=1
+    break
+  fi
+  sleep 0.025
+done
+if [ "$ready" -eq 1 ]; then
+  kill -TERM "$driver_pid"
+fi
+
+entered=0
+for _ in $(seq 1 80); do
+  if [ -e "$WORK/wait-entered" ]; then
+    entered=1
+    break
+  fi
+  sleep 0.025
+done
+if [ "$entered" -eq 1 ]; then
+  kill -TERM "$driver_pid"
+  : >"$WORK/second-sent"
+fi
+
+finished=0
+for _ in $(seq 1 80); do
+  if ! kill -0 "$driver_pid" 2>/dev/null; then
+    finished=1
+    break
+  fi
+  sleep 0.05
+done
+if [ "$finished" -eq 1 ]; then
+  if wait "$driver_pid"; then
+    RUN_RC=0
+  else
+    RUN_RC=$?
+  fi
+else
+  kill -KILL "$driver_pid" 2>/dev/null || true
+  wait "$driver_pid" 2>/dev/null || true
+  RUN_RC=137
+fi
+
+cat >"$WORK/expected-events" <<'EXPECTED'
+kill 5151
+wait 5151
+kill 6262
+wait 6262
+stop-services
+EXPECTED
+
+shutdown_records=$(grep -cF 'level=info msg="received shutdown signal"' \
+  "$WORK/stderr" || true)
+if [ "$ready" -eq 1 ] && [ "$entered" -eq 1 ] \
+  && [ "$finished" -eq 1 ] && [ "$RUN_RC" -eq 0 ] \
+  && [ "$shutdown_records" -eq 1 ] \
+  && cmp -s "$WORK/expected-events" "$WORK/events"; then
+  ok 'a second TERM during teardown is ignored and every stop action runs once'
+else
+  no 'teardown signal re-entry guard' \
+    "ready=$ready entered=$entered finished=$finished rc=$RUN_RC records=$shutdown_records events=$(tr '\n' ' ' <"$WORK/events") stderr=$(tr '\n' ' ' <"$WORK/stderr")"
+fi
+
 report

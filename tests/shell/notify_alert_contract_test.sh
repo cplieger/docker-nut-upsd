@@ -2,13 +2,13 @@
 # nut-notify.sh: the NOTIFYCMD upsmon runs for every UPS event, and the source
 # of the log lines this repo's alert rules match.
 #
-# WHY THIS IS A CONTRACT, NOT A FORMATTING PREFERENCE: alerts.yaml parses these
+# WHY THIS IS A CONTRACT, NOT A FORMATTING PREFERENCE: alerts/logql.yaml parses these
 # lines with logfmt and filters on the PARSED event label. Rename the field,
 # emit a second event= keyval ahead of the real one, or drop the default case
 # arm, and UPSOnBattery / UPSLowBattery / UPSForcedShutdown / UPSCommsLost /
 # UPSHardwareFault / UPSProtectionDegraded stop firing SILENTLY: nothing errors, no test fails, and
 # the gap surfaces during a real outage. Event names are read OUT of
-# alerts.yaml rather than named here, so a divergence between the two files
+# alerts/logql.yaml rather than named here, so a divergence between the two files
 # fails.
 #
 # Not covered by tests/smoke.sh: this script runs standalone (upsmon execs
@@ -17,7 +17,7 @@
 #
 # Lint directives for this whole file, each against a stated guarantee:
 #   SC2015 - ok/no return 0 unconditionally, so `[ cond ] && ok || no` cannot mis-fire.
-#   SC2016 - the backtick pattern reading a matcher out of alerts.yaml must stay
+#   SC2016 - the backtick pattern reading a matcher out of alerts/logql.yaml must stay
 #     single-quoted: it matches the LITERAL backticks LogQL wraps a line filter
 #     in, and double quotes would run it as a command substitution.
 # shellcheck disable=SC2015,SC2016
@@ -56,10 +56,10 @@ all_match() {
   done
 }
 
-# --- 1. the LogQL matchers, read FROM alerts.yaml ---------------------------------
+# --- 1. the LogQL matchers, read FROM alerts/logql.yaml ---------------------------------
 # The matcher literal is extracted from the rule file at run time, so EITHER
 # side of the contract failing fails here.
-ALERTS="$REPO_ROOT/alerts.yaml"
+ALERTS="$REPO_ROOT/alerts/logql.yaml"
 
 # rule_events <alert-name> -> every NUT event name that rule's label filter
 # selects, deduplicated.
@@ -133,16 +133,16 @@ unbound_events() {
 }
 
 emits_event "$E_LOWBATT" \
-  && ok "a LOWBATT event binds event=$E_LOWBATT, the label UPSLowBattery filters on in alerts.yaml" \
-  || no 'UPSLowBattery event label' "alerts.yaml wants event=$E_LOWBATT, line: $(notify "$E_LOWBATT")"
+  && ok "a LOWBATT event binds event=$E_LOWBATT, the label UPSLowBattery filters on in alerts/logql.yaml" \
+  || no 'UPSLowBattery event label' "alerts/logql.yaml wants event=$E_LOWBATT, line: $(notify "$E_LOWBATT")"
 
 [ -z "$(unbound_events "$E_FSD")" ] \
   && ok "every event UPSForcedShutdown names ($(printf '%s' "$E_FSD" | tr '\n' ' ')) binds its own event label" \
   || no 'UPSForcedShutdown event labels' "not bound:$(unbound_events "$E_FSD")"
 
 emits_event "$E_NOCOMM" \
-  && ok "a NOCOMM event binds event=$E_NOCOMM, the label UPSCommsLost filters on in alerts.yaml" \
-  || no 'UPSCommsLost event label' "alerts.yaml wants event=$E_NOCOMM, line: $(notify "$E_NOCOMM")"
+  && ok "a NOCOMM event binds event=$E_NOCOMM, the label UPSCommsLost filters on in alerts/logql.yaml" \
+  || no 'UPSCommsLost event label' "alerts/logql.yaml wants event=$E_NOCOMM, line: $(notify "$E_NOCOMM")"
 
 [ -z "$(unbound_events "$E_FAULT")" ] \
   && ok "every event UPSHardwareFault names ($(printf '%s' "$E_FAULT" | tr '\n' ' ')) binds its own event label" \
@@ -158,8 +158,8 @@ for _ev in $E_ONBATT_PAIR; do
 done
 _pair_seen=$(printf '%s' "$E_ONBATT_PAIR" | tr '\n' ' ')
 [ "$_pair_n" -eq 2 ] && [ -z "$(unbound_events "$E_ONBATT_PAIR")" ] \
-  && ok "UPSOnBattery's pair from alerts.yaml ($_pair_seen) binds on both events" \
-  || no 'UPSOnBattery event pair' "alerts.yaml should name 2 events, got $_pair_n ($_pair_seen); not bound:$(unbound_events "$E_ONBATT_PAIR")"
+  && ok "UPSOnBattery's pair from alerts/logql.yaml ($_pair_seen) binds on both events" \
+  || no 'UPSOnBattery event pair' "alerts/logql.yaml should name 2 events, got $_pair_n ($_pair_seen); not bound:$(unbound_events "$E_ONBATT_PAIR")"
 
 # --- 1b. every matched NUT event is actually routed to this handler ----------------
 # This script only runs when upsmon's NOTIFYFLAG for the event carries EXEC
@@ -174,7 +174,7 @@ for _ev in $E_LOWBATT $E_FSD $E_NOCOMM $E_FAULT $E_PROTECTION $E_ONBATT_PAIR; do
 done
 [ -z "$_unrouted" ] \
   && ok 'every NUT event the alert rules match carries EXEC in the generated upsmon.conf' \
-  || no 'NOTIFYFLAG routing' "alerts.yaml matches these events but $GENERATOR does not route them to NOTIFYCMD:$_unrouted"
+  || no 'NOTIFYFLAG routing' "alerts/logql.yaml matches these events but $GENERATOR does not route them to NOTIFYCMD:$_unrouted"
 
 # --- 2. the record fields the logfmt parser and the matchers both depend on --------
 #
@@ -230,9 +230,14 @@ notify_no_type | grep -q 'event="unknown" ' \
   && ok 'a missing NOTIFYTYPE logs event=unknown rather than an empty field' \
   || no 'missing NOTIFYTYPE' "line: $(notify_no_type)"
 
-NOTIFYTYPE=ONBATT sh "$ENTRYPOINT" 'no ups name' 2>&1 | grep -q 'ups="unknown"' \
-  && ok 'a missing UPSNAME logs ups=unknown rather than an empty field' \
-  || no 'missing UPSNAME' 'the ups field was empty'
+_self_ups_line=$(notify SHUTDOWN '' 'Auto logout and shutdown proceeding')
+_named_ups_line=$(notify SHUTDOWN ups 'Auto logout and shutdown proceeding')
+if [ "$(logfmt_field ups "$_self_ups_line")" = upsmon ] \
+  && [ "$(logfmt_field ups "$_named_ups_line")" = ups ]; then
+  ok 'an empty UPSNAME (upsmon notifying about itself) binds ups=upsmon, and a named UPS binds its own name'
+else
+  no 'UPSNAME self-notification attribution' "self=[$_self_ups_line] named=[$_named_ups_line]"
+fi
 
 # --- 6. the sanitizer's three copies cannot drift apart ---------------------------
 # log_value exists in validate.sh, nut-shutdown.sh AND here, byte-identical by
@@ -276,6 +281,18 @@ if [ "$NORMAL_RC" -eq 0 ] && [ ! -s "$OUT" ] && cmp -s "$EXPECTED" "$ERR"; then
   ok 'disabled host poweroff emits exactly one error record naming FSD, the false toggle and the consequence, and exits 0'
 else
   no 'disabled host-poweroff record' "rc=$NORMAL_RC stdout: $(tr '\n' '|' <"$OUT"); stderr: $(tr '\n' '|' <"$ERR")"
+fi
+
+EXPECTED_TRUE="$WORK/noop-expected-true"
+printf '%s\n' 'level=error msg="UPS forced shutdown (FSD) triggered; host will NOT be powered off" shutdown_on_battery_critical=true' >"$EXPECTED_TRUE"
+
+TRUE_RC=0
+SHUTDOWN_ON_BATTERY_CRITICAL=true sh "$NOOP_SHUTDOWN" >"$OUT" 2>"$ERR" || TRUE_RC=$?
+
+if [ "$TRUE_RC" -eq 0 ] && [ ! -s "$OUT" ] && cmp -s "$EXPECTED_TRUE" "$ERR"; then
+  ok 'enabled host-poweroff toggle is reported truthfully when the no-op handler is selected'
+else
+  no 'enabled host-poweroff toggle record' "rc=$TRUE_RC stdout: $(tr '\n' '|' <"$OUT"); stderr: $(tr '\n' '|' <"$ERR")"
 fi
 
 # upsmon reads SHUTDOWNCMD's status as "did the command run", so the no-op stays

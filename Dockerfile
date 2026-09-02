@@ -5,7 +5,7 @@ FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6ee
 SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
 
 RUN apk add --no-cache automake build-base clang libtool patch perl pkgconf \
-        libusb-compat-dev openssl-dev linux-headers
+        libusb-dev openssl-dev linux-headers
 
 # renovate: datasource=github-releases depName=stephane/libmodbus
 ARG LIBMODBUS_VERSION=v3.2.0
@@ -64,8 +64,7 @@ RUN wget -qO netsnmp.tar.gz \
 
 # renovate: datasource=github-releases depName=networkupstools/nut
 ARG NUT_VERSION=v2.8.5
-# The repin task below recomputes this on bump; cross-check the result
-# against the upstream nut-<X.Y.Z>.tar.gz.sha256 release asset.
+# Cross-check a recomputed sha against upstream's nut-<X.Y.Z>.tar.gz.sha256 asset.
 # repin: dep=networkupstools/nut url=https://github.com/networkupstools/nut/releases/download/{version}/nut-{version_nov}.tar.gz
 ARG NUT_SHA256=18bf32e59eb764b13da3c4fa70384926d7fa584cb31d2fe7f137a570633eeec1
 WORKDIR /build/nut
@@ -94,7 +93,7 @@ RUN wget -qO nut.tar.gz \
        --with-drvpath=/usr/lib/nut \
        --with-user=nut --with-group=nut \
        CC=clang CXX=clang++ \
-       --with-usb --with-snmp --with-modbus \
+       --with-usb=libusb-1.0 --with-snmp --with-modbus \
        --with-ssl=openssl \
        --disable-shared --enable-static \
        --without-cgi --without-doc --without-avahi \
@@ -106,16 +105,13 @@ RUN wget -qO nut.tar.gz \
     && find clients -name upsc -type f -executable -exec cp {} /out/usr/bin/ \; \
     && find clients -name upsmon -type f -executable -exec cp {} /out/usr/sbin/ \; \
     && find drivers -name upsdrvctl -type f -executable -exec cp {} /out/usr/sbin/ \; \
-    && find drivers -maxdepth 1 -type f -executable ! -name "*.la" \
+    && find drivers -maxdepth 1 -type f -executable \
        ! -name upsdrvctl -exec cp {} /out/usr/lib/nut/ \; \
     && cp data/cmdvartab /out/usr/share/ \
     && cp -d /usr/lib/libmodbus.so* /out/usr/lib/ \
     && cp -d /usr/lib/libnetsnmp.so* /out/usr/lib/
 
-# Syft inventories an Alpine image from the APK database alone, so the three
-# source-built payloads reach neither the signed release SBOM nor scanners.
-# Generated from the same Renovate-tracked ARGs the builds use, so a bump
-# keeps it correct.
+# Syft sees source builds only through an embedded CycloneDX fragment.
 RUN cat > /out/nut-upsd.cdx.json <<EOF
 {
   "bomFormat": "CycloneDX",
@@ -180,8 +176,7 @@ COPY --from=builder /out/usr/sbin/upsd \
 COPY --from=builder /out/usr/bin/upsc /usr/bin/
 COPY --from=builder /out/usr/lib/nut/ /usr/lib/nut/
 COPY --from=builder /out/usr/share/cmdvartab /usr/share/cmdvartab
-# Placed where Syft's *.cdx.json cataloger inventories it, so SBOMs and scanners
-# see NUT, libmodbus, and net-snmp alongside the APK packages.
+# Placed where Syft's *.cdx.json cataloger inventories it.
 COPY --from=builder /out/nut-upsd.cdx.json /usr/share/sbom/nut-upsd.cdx.json
 
 # NUT_DEBUG_SYSLOG=stderr keeps upsd and the UPS driver logging to stderr after
@@ -196,7 +191,7 @@ COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
 COPY --chmod=755 validate.sh /usr/local/bin/validate.sh
 COPY --chmod=755 generate-config.sh /usr/local/bin/generate-config.sh
 COPY --chmod=755 lifecycle.sh /usr/local/bin/lifecycle.sh
-COPY --chmod=755 password.sh /usr/local/bin/password.sh
+COPY --chmod=755 secrets.sh /usr/local/bin/secrets.sh
 COPY --chmod=755 nut-notify.sh /usr/local/bin/nut-notify.sh
 COPY --chmod=755 nut-shutdown.sh /usr/local/bin/nut-shutdown.sh
 COPY --chmod=755 nut-shutdown-noop.sh /usr/local/bin/nut-shutdown-noop.sh
@@ -212,8 +207,7 @@ RUN sh /tmp/tests/smoke.sh && touch /tests-passed
 FROM runtime AS final
 COPY --from=test /tests-passed /tests-passed
 
-# No USER: root is required at container init; the rationale and the
-# AVD-DS-0002 suppression live in .trivyignore at the repo root.
+# No USER: root is required at container init (see .trivyignore).
 
 # Probe upsd where it listens (upsd_probe_host, lifecycle.sh). upsc's stderr
 # is NOT discarded: it is the only signal in the docker health log separating
@@ -222,6 +216,9 @@ COPY --from=test /tests-passed /tests-passed
 # Canonicalize FIRST, default SECOND, mirroring the entrypoint: dockerd execs
 # this probe with the RAW container env, and an LF-only value is non-empty
 # raw, so defaulting from it would probe an empty name, address or port.
+#
+# --start-period covers the ~132s boot the entrypoint ACCEPTS (90s driver +
+# 30s upsd + two <=6s pidfile waits), not the fleet-default 15s.
 #
 # DL3025: this probe sources lifecycle.sh and expands three env vars, which
 # exec form cannot do; this image wraps NUT with a shell entrypoint, so it can
