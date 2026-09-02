@@ -70,7 +70,7 @@ services:
 | `UPS_NAME` | NUT UPS identifier used in config files and queries | `ups` |
 | `UPS_DESC` | Human-readable UPS description shown in NUT clients; ASCII 0x20-0x7E only; no `"`, `\` or `#` because NUT reserves them for config escaping | `My UPS` |
 | `UPS_DRIVER` | NUT driver for your UPS model (see [NUT HCL](https://networkupstools.org/stable-hcl.html)) | `usbhid-ups` |
-| `UPS_PORT` | UPS port: `auto` (USB), `/dev/*` (serial), or `host[:port]` for network drivers (`snmp-ups`, `apcupsd-ups`); network drivers refuse `auto` and `/dev/*`; no whitespace, `"`, `\` or `#` | `auto` |
+| `UPS_PORT` | UPS port: `auto` (USB), `/dev/*` (serial), or `host[:port]` for network drivers (`snmp-ups`, `apcupsd-ups`); network drivers refuse `auto` and `/dev/*`; USB drivers ignore this value entirely and NUT warns if you set an unusual one; no whitespace, `"`, `\` or `#` | `auto` |
 | `API_USER` | Username for NUT network clients: letters, numbers, `_`, or `-`; 510-byte maximum; declared `upsmon secondary` (see [NUT accounts and roles](#nut-accounts-and-roles)) | `monuser` |
 | `API_PASSWORD` | Password for the NUT API user (entrypoint warns on weak credentials); no `"`, `\` or `#` because NUT config parsing would alter the credential | `secret` |
 | `API_ADDRESS` | Listen address for upsd; write IPv6 bare (`::1`), not bracketed; brackets are added internally where NUT needs them; no whitespace, `"`, `\` or `#` | `0.0.0.0` |
