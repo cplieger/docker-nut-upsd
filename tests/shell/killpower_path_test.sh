@@ -63,7 +63,7 @@ fi
     "generated=$generated boot=$boot_cleanup watchdog=$watchdog"
 
 [ "$shutdown_cleanup" = "$POWERDOWNFLAG_FILE" ] \
-  && ok "nut-shutdown.sh's literal ($shutdown_cleanup) equals the constant it cannot source" \
+  && ok "nut-shutdown.sh's literal ($shutdown_cleanup) equals the constant it cannot inherit" \
   || no 'POWERDOWNFLAG exec-boundary literal' \
     "constant=$POWERDOWNFLAG_FILE shutdown=$shutdown_cleanup"
 

@@ -5,9 +5,9 @@
 
 # log_value: sanitize a value before interpolating it into a logfmt field, so
 # untrusted text cannot corrupt or split the log record. Byte-identical copy of
-# validate.sh's sanitizer — upsmon execs this handler standalone, so it cannot
-# source the helper. validate.sh owns the BusyBox-tr octal-range rationale;
-# parity across the copies is asserted.
+# validate.sh's sanitizer — upsmon execs this handler as a standalone process, so
+# it cannot rely on the helper already being sourced. validate.sh owns the
+# BusyBox-tr octal-range rationale; parity across the copies is asserted.
 log_value() {
   _lv=$(printf '%s' "$1" | tr -d '\\"' | LC_ALL=C tr -c '\040-\176' ' ' | cut -c 1-513)
   if [ "${#_lv}" -le 512 ]; then

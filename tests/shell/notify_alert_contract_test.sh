@@ -12,8 +12,8 @@
 # fails.
 #
 # Not covered by tests/smoke.sh: this script runs standalone (upsmon execs
-# it, so it cannot source the shared helper) and is executed here as the
-# real script rather than extracted.
+# it, so it cannot rely on the shared helper already being sourced) and is
+# executed here as the real script rather than extracted.
 #
 # Lint directives for this whole file, each against a stated guarantee:
 #   SC2015 - ok/no return 0 unconditionally, so `[ cond ] && ok || no` cannot mis-fire.
