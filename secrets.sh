@@ -64,7 +64,10 @@ _resolve_cached_password() {
   # quote/backslash/control bytes that break out of generate-config.sh's quoted
   # password fields regenerate. Command substitution removes a trailing newline
   # before the alphabet test; the length clause rejects that cache (tests/shell/credential_cache_test.sh case 3b).
-  _rcp_size=$(stat -c %s "$_rcp_file" 2>/dev/null) || _rcp_size=""
+  # `stat -L` follows, because `head` does: with a plain lstat a symlink here
+  # reports its own size, so the length clause passes on a link to a longer
+  # file and `head` then serves a truncated prefix of it as the credential.
+  _rcp_size=$(stat -Lc %s "$_rcp_file" 2>/dev/null) || _rcp_size=""
   if [ "$_rcp_size" = "$PASSWORD_LENGTH" ] \
     && _rcp_pw=$(head -c "$PASSWORD_LENGTH" "$_rcp_file" 2>/dev/null) \
     && [ "${#_rcp_pw}" -eq "$PASSWORD_LENGTH" ] \

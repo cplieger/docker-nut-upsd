@@ -412,20 +412,13 @@ run_validations() {
   fi
 
   # UPS_PORT's usable shape depends on the driver's transport (see
-  # driver_transport): "auto"/`/dev/*` for usb and serial, a host or
-  # host:port endpoint for net. These arms REFUSE the spelling each
-  # transport cannot use; they do not establish the endpoint or device-node
-  # form, which the driver reports for itself.
+  # driver_transport). Only the net arm refuses a spelling: snmp-ups hands the
+  # value to net-snmp as a peername, so `auto` or a device node there fails at
+  # daemon start with no variable named. The usb family carries no arm on
+  # purpose — every USB driver ignores the value and upstream warns about it
+  # itself (warn_if_bad_usb_port_filename, drivers/usb-common.c), so refusing
+  # here turned a working configuration into a boot refusal.
   case "$(driver_transport)" in
-    usb)
-      case "$UPS_PORT" in
-        auto | /dev/*) : ;;
-        *)
-          printf 'level=error msg="UPS_PORT must be auto or /dev/* for a USB driver" driver=%s value="%s"\n' "$UPS_DRIVER" "$(log_value "$UPS_PORT")" >&2
-          exit 1
-          ;;
-      esac
-      ;;
     net)
       case "$UPS_PORT" in
         auto | /dev/*)
