@@ -41,8 +41,10 @@
 # refusal to the watchdog's repeating escalation. A STATE rule is honest only
 # where the producer RE-EMITS its line while the condition holds, so the window
 # can be sized above that cadence: UPSCommsLost (upsmon repeats NOCOMM every
-# NOCOMMWARNTIME) and UPSPowerOffPathBroken (the probe repeats its error every
-# DBUS_PROBE_INTERVAL). A TRANSITION rule marks a change and resolves when its
+# NOCOMMWARNTIME), UPSPowerOffPathBroken (the probe repeats its error every
+# DBUS_PROBE_INTERVAL), and UPSProtectionUnavailable on its NOPARENT event
+# (upsmon re-notifies every 120s while the parent is dead). A TRANSITION rule
+# marks a change and resolves when its
 # line ages out; it does NOT track the state, and no window value can make it,
 # because the quantity it would have to outlast is the duration of the condition.
 # Which shape a rule may honestly take is decided by ITS OWN producer's cadence,
@@ -154,7 +156,7 @@ groups:
         expr: |
           sum by (container) (count_over_time(
             {container="nut-upsd"}
-            |= `Host sync timer expired, forcing shutdown` [15m]
+            |~ `^Host sync timer expired, forcing shutdown$` [15m]
           )) > 0
         for: 0m
         labels:
@@ -169,11 +171,11 @@ groups:
             deadline and its host is at risk. It does NOT mean the secondary
             was hard-powered-off or that its own shutdown failed - check the
             secondary. This is a raw upsmon diagnostic rather than an
-            event=<TYPE> line, so it carries no level= prefix and no logfmt
-            fields, which is why the filter is a plain substring match and not
-            the `| logfmt` shape used by the event and parsed-msg rules.
-            TRANSITION record, emitted once per forced-shutdown attempt that
-            timed out.
+            event=<TYPE> line (NUT v2.8.5 clients/upsmon.c:1377), so it carries
+            no level= prefix and no logfmt fields. The filter matches the exact
+            raw line instead of using the `| logfmt` shape of the event and
+            parsed-msg rules. TRANSITION record, emitted once per
+            forced-shutdown attempt that timed out.
       - alert: UPSNotifyExecFailed
         expr: |
           sum by (container) (count_over_time(
@@ -225,13 +227,17 @@ groups:
             hardware fault, and the detail field carries what it named (worn
             battery, no battery installed, fan failure, overheat, charger
             failure, battery voltage out of range). The UPS may not carry the
-            load through the next outage. NUT raises ALARM once per change and
-            repeats REPLBATT every RBWARNTIME seconds (default 43200), so this
-            alert marks each event rather than tracking the state - a
-            replace-battery condition re-notifies at RBWARNTIME, so expect this
-            alert to fire again about every 12h on the defaults until the
-            battery is serviced, which is NUT's own reminder cadence rather
-            than a flap; read the UPS status and plan service.
+            load through the next outage. The generated upsmon.conf pins
+            ALARMCRITICAL 1, upstream's default, so upsmon presumes the UPS dead
+            if communication drops while the ALARM state holds. That starts the
+            forced-shutdown sequence, so treat ALARM as urgent rather than only
+            a service reminder. NUT raises ALARM once per change and repeats
+            REPLBATT every RBWARNTIME seconds (default 43200), so this alert
+            marks each event rather than tracking the state - a replace-battery
+            condition re-notifies at RBWARNTIME, so expect this alert to fire
+            again about every 12h on the defaults until the battery is serviced,
+            which is NUT's own reminder cadence rather than a flap; read the UPS
+            status and plan service.
       - alert: UPSProtectionDegraded
         expr: |
           sum by (container) (count_over_time(
@@ -245,13 +251,19 @@ groups:
           description: >
             nut-upsd logged a BYPASS or OVER event. BYPASS means the UPS still
             powers the load but no longer protects it, so the next outage drops
-            the load. OVER means the connected load exceeds the UPS rating;
-            reduce the load. TRANSITION rule (see the file header): NUT emits
-            the matched event once when the flag is raised, so this alert marks
-            the change and resolves after 15 minutes rather than tracking the
-            state. BYPASS also switches upsmon to POLLFREQALERT while active. OVER does so
-            only when OVERDURATION is configured; the generated upsmon.conf
-            does not set it.
+            the load. While the BYPASS flag holds, upsmon also presumes the UPS
+            dead if communication drops, which counts it out of MINSUPPLIES and
+            starts the forced-shutdown sequence (NUT v2.8.5 clients/upsmon.c
+            is_ups_critical); unlike the ALARM case there is no option to
+            disable that, so treat BYPASS as urgent rather than a note to
+            schedule. OVER means the connected load exceeds the UPS rating;
+            reduce the load. OVER carries no such assumption because
+            OVERDURATION is unset. TRANSITION rule (see the file header): NUT
+            emits the matched event once when the flag is raised, so this alert
+            marks the change and resolves after 15 minutes rather than tracking
+            the state. BYPASS also switches upsmon to POLLFREQALERT while active.
+            OVER does so only when OVERDURATION is configured; the generated
+            upsmon.conf does not set it.
       - alert: UPSProtectionUnavailable
         expr: |
           sum by (container) (count_over_time(
@@ -267,9 +279,18 @@ groups:
             privileged parent died, so a forced shutdown cannot power off the
             host; restart the container. OFF means the UPS reports itself
             administratively off or asleep, so the load is unprotected; inspect
-            the UPS and restore protection. TRANSITION rule (see the file
-            header): NUT emits the matched event once, so this alert marks the
-            change and resolves after 15 minutes rather than tracking the state.
+            the UPS and restore protection. The generated upsmon.conf pins
+            OFFDURATION 30, upstream's default: once the UPS has reported OFF
+            continuously for that long, upsmon presumes it dead even while
+            communication is healthy, which counts it out of MINSUPPLIES and
+            starts the forced-shutdown sequence (NUT v2.8.5 clients/upsmon.c
+            ups_is_off, is_ups_critical). Set OFFDURATION -1 through a mounted
+            upsmon.conf.user to disarm that. NOPARENT
+            re-notifies every 120 seconds while the parent stays dead (NUT
+            v2.8.5 clients/upsmon.c check_parent), so on that event the 15m
+            window keeps this alert firing while protection is unavailable;
+            OFF is raised once when the flag appears (ups_is_off), so on that
+            event the alert marks the change and resolves after 15 minutes.
       - alert: UPSPowerOffPathBroken
         expr: |
           sum by (container) (count_over_time(
@@ -332,7 +353,8 @@ groups:
             the cause.
       # The container's own refusals, collapsed by level rather than enumerated:
       # env-var refusals, boot aborts, TLS provisioning failures, a comms watchdog
-      # from its last fast retry onward, a pidfile PID it will not kill, a
+      # whose driver restart failed (any attempt) or that is still restarting from
+      # its last fast retry onward, a pidfile PID it will not kill, a
       # background worker it had to respawn, an upsd that stopped answering the
       # protocol probe, a NUT daemon that exited, and forced-shutdown path records
       # all log level=error. An unconfirmed host poweroff also fires
@@ -367,16 +389,20 @@ groups:
           description: >
             The container logged a level=error line of its own: an invalid
             environment variable, a NUT daemon that failed to start or exited
-            later, a missing /dev/bus/usb, a TLS certificate it could not
-            provision, a comms watchdog on its last fast retry or any attempt
-            after it, a pidfile PID it refused to kill, a respawned background
+            later, a boot refusal (a missing /dev/bus/usb, an unmountable D-Bus
+            socket with host shutdown enabled, or a config or *.user override
+            it could not generate or install), a certificate or credential it
+            could not provision, a comms watchdog whose driver restart failed
+            on any attempt, or one still restarting from its last fast retry
+            onward, a pidfile PID it refused to kill, a respawned background
             worker, an upsd that stopped answering the protocol probe so the
-            container stopped its services and exited, or a forced-shutdown path
-            record. Either kind of abort exits the container, so the restart
-            policy retries it and repeats the line while the UPS goes unmonitored;
-            the healthcheck does not corroborate: a boot refusal exits inside its
-            start period, and a post-boot teardown exits before three failed
-            probes can mark the container unhealthy. This rule is a net under the
-            others and is not exclusive of them. A broken D-Bus poweroff path also
-            fires UPSPowerOffPathBroken, and an unconfirmed host poweroff also
-            fires UPSPowerOffFailed. Read the line for the exact failure.
+            container stopped its services and exited, or a forced-shutdown
+            path record. Either kind of abort exits the container, so the
+            restart policy retries it and repeats the line while the UPS goes
+            unmonitored; the healthcheck does not corroborate: a boot refusal
+            exits inside its start period, and a post-boot teardown exits before
+            enough consecutive probes fail to mark the container unhealthy (the
+            image HEALTHCHECK owns that count). This rule is a net under the
+            others and is not exclusive of them. A broken D-Bus poweroff path
+            also fires UPSPowerOffPathBroken, and an unconfirmed host poweroff
+            also fires UPSPowerOffFailed. Read the line for the exact failure.

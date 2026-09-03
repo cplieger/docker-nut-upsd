@@ -99,4 +99,30 @@ FALLBACK_EXPECTED_TIMEOUT=$(printf '%s\n' \
 
 unset -f mktemp timeout rm
 
+ENTRYPOINT="$REPO_ROOT/validate.sh"
+load_function log_value
+ENTRYPOINT="$SUBJECT"
+DETAIL_SHORT='short driver detail'
+DETAIL_LONG=$(printf '%0513d' 0 | tr 0 x)
+DETAIL_ERR="$WORK/detail-err"
+timeout() {
+  printf '%s' "$DETAIL_OUTPUT"
+  return 9
+}
+run_recovery_detail() {
+  : >"$DETAIL_ERR"
+  start_recovered_driver 2>"$DETAIL_ERR"
+  sed -n 's/.* detail="\([^"]*\)"$/\1/p' "$DETAIL_ERR"
+}
+DETAIL_OUTPUT="$DETAIL_SHORT"
+DETAIL_SHORT_GOT=$(run_recovery_detail)
+DETAIL_OUTPUT="$DETAIL_LONG"
+DETAIL_LONG_GOT=$(run_recovery_detail)
+[ "$DETAIL_SHORT_GOT" = "$DETAIL_SHORT" ] \
+  && [ "${#DETAIL_LONG_GOT}" -eq 512 ] \
+  && [ "${DETAIL_LONG_GOT: -3}" = '...' ] \
+  && ok 'recovery detail stays exact below the bound and marks truncation at 512 bytes' \
+  || no 'recovery detail truncation marker' "short=[$DETAIL_SHORT_GOT] long_len=${#DETAIL_LONG_GOT} long_tail=[${DETAIL_LONG_GOT: -3}]"
+unset -f timeout
+
 report

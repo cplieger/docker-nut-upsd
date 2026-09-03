@@ -2,11 +2,6 @@
 # validate.sh — validation functions for NUT env vars.
 # Sourced by entrypoint.sh; not executed directly.
 
-# Digit-count ceiling for every numeric env var: the largest all-nines value
-# inside a signed 64-bit long, so a value validate_numeric accepts compares
-# safely in test(1); base-10 safety in $(( )) belongs to strip_leading_zeros.
-readonly SHELL_SAFE_INTEGER_MAX=999999999999999999
-
 # log_value: sanitize a rejected raw value before interpolating it into a
 # logfmt value="..." field — strip double quotes/backslashes and flatten
 # everything outside printable ASCII to spaces so a malformed value cannot
@@ -44,10 +39,11 @@ validate_numeric() {
   # Reject digit strings too long to compare as shell integers, BEFORE
   # normalizing: beyond LONG_MAX, BusyBox test(1) errors with status 2, which
   # an enclosing `if` swallows, so the range validators below would silently
-  # accept the value. Bounding the RAW value also bounds strip_leading_zeros,
+  # accept the value (18 digits is the largest all-nines value inside a signed
+  # 64-bit long). Bounding the RAW value also bounds strip_leading_zeros,
   # whose one-byte-at-a-time loop is quadratic in the leading-zero run under
   # BusyBox ash (measured: 54.7s at 40000 zeros, and the value was accepted).
-  if [ "${#2}" -gt "${#SHELL_SAFE_INTEGER_MAX}" ]; then
+  if [ "${#2}" -gt 18 ]; then
     printf 'level=error msg="env var numeric value has too many digits" var=%s length=%d\n' "$1" "${#2}" >&2
     return 1
   fi
@@ -247,11 +243,8 @@ usb_bus_required() {
     usb) return 0 ;;
     net) return 1 ;;
   esac
-  if [ "${UPS_PORT:-auto}" = "auto" ]; then
-    return 0
-  fi
-  case "${UPS_PORT:-}" in
-    /dev/bus/usb/*) return 0 ;;
+  case "${UPS_PORT:-auto}" in
+    auto | /dev/bus/usb/*) return 0 ;;
   esac
   return 1
 }

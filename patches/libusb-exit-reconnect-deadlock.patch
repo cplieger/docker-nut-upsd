@@ -17,7 +17,9 @@ the shutdown-on-critical path both stop working, and the container's
 comms watchdog is what eventually kills and restarts the driver, so the
 symptom is a repeating stale-data window rather than a clean reconnect.
 A deployment that passes the USB bus with a static `devices:` mapping
-instead of a live bind gets no recovery at all. All nine libusb drivers
+instead of a live bind loses that recovery as soon as the UPS
+re-enumerates, since the frozen node set never shows the new node. All nine
+libusb drivers
 this image ships carry the same libusb_init/libusb_exit misuse, so the
 exposure is not one vendor's device. This patch closes it for the five
 that reach the shared libusb-1.0 layer (usbhid-ups, tripplite_usb,

@@ -126,8 +126,9 @@ gate '4242' '4242' 1 \
 
 # --- 5. liveness is required too -------------------------------------------------
 #
-# A stale pidfile from a crashed daemon holds a numeric, non-zero, plausible PID;
-# only the `kill -0` probe separates it from a running one.
+# A stale pidfile from a crashed daemon holds a numeric, non-zero, plausible PID.
+# This fixture stubs identity to succeed, though the shipped pid_matches_binary
+# cannot succeed for a dead PID because both probes require its /proc entry.
 ! gate '4242' '' 1 && timed_out \
   && ok 'a numeric PID that is not alive is refused (stale pidfile from a crashed daemon)' \
   || no 'dead PID' 'the startup gate accepted a PID that no longer exists'
@@ -141,7 +142,7 @@ if (wait_for_pidfile 'usbhid-ups driver' "$PIDFILE") 2>"$ERR"; then
 else
   grep -q 'requires an expected binary path' "$ERR" \
     && ok 'omitting the expected-binary argument aborts with its own message' \
-    || no 'missing expected-binary argument' "aborted without the :? message: $(head -c 200 "$ERR")"
+    || no 'missing expected-binary argument' "aborted without the :? message: $(command head -c 200 "$ERR")"
 fi
 
 # Reload the real identity function after the gate cases that deliberately stub it.

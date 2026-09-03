@@ -24,6 +24,8 @@ printf 'completed\n' >"$COMPLETION"
 STARTER
 chmod +x "$WORK/slow-starter.sh"
 
+# This bash harness proves less about signal timing than shipped BusyBox ash,
+# which runs a pending trap only after the current foreground command returns.
 cat >"$WORK/drive-start.sh" <<'DRIVER'
 #!/usr/bin/env bash
 set -eu
@@ -193,5 +195,46 @@ else
   no 'upsdrvctl startup timeout contract' \
     "entrypoint=${entry_bound}s README=${readme_bound}s; both must agree above 75s"
 fi
+
+USB_GROUP_BLOCK=$(extract_range '^if usb_bus_required; then$' '^# Start NUT services with signal handling$' "$WORK/usb-group-block.sh") || exit 1
+
+cat >"$WORK/drive-usb-group.sh" <<'DRIVER'
+#!/usr/bin/env bash
+set -euf
+usb_bus_required() { [ "$MODE" = usb ]; }
+chgrp() { printf '%s\n' "$*" >>"$CHGRP_CALLS"; }
+log_value() { printf '%s' "$1"; }
+. "$USB_GROUP_BLOCK"
+DRIVER
+chmod +x "$WORK/drive-usb-group.sh"
+
+run_usb_group() {
+  : >"$WORK/chgrp-calls"
+  : >"$WORK/usb-group-stderr"
+  if env MODE="$1" UPS_DRIVER="$2" UPS_PORT="$3" \
+    CHGRP_CALLS="$WORK/chgrp-calls" USB_GROUP_BLOCK="$USB_GROUP_BLOCK" \
+    bash "$WORK/drive-usb-group.sh" \
+    >"$WORK/usb-group-stdout" 2>"$WORK/usb-group-stderr"; then
+    RUN_RC=0
+  else
+    RUN_RC=$?
+  fi
+}
+
+run_usb_group usb usbhid-ups auto
+[ "$RUN_RC" -eq 0 ] \
+  && [ "$(cat "$WORK/chgrp-calls")" = '-R nut /dev/bus/usb' ] \
+  && grep -Fqx 'level=info msg="chgrp nut:/dev/bus/usb applied (host device nodes)"' "$WORK/usb-group-stderr" \
+  && ok 'startup recursively assigns the USB bus to group nut when the transport requires it' \
+  || no 'startup USB group assignment' \
+    "rc=$RUN_RC calls=$(tr '\n' ' ' <"$WORK/chgrp-calls") stderr=$(cat "$WORK/usb-group-stderr")"
+
+run_usb_group non-usb snmp-ups 192.0.2.1
+[ "$RUN_RC" -eq 0 ] \
+  && [ ! -s "$WORK/chgrp-calls" ] \
+  && grep -Fqx 'level=info msg="non-USB transport; skipping USB bus group setup" driver=snmp-ups port=192.0.2.1' "$WORK/usb-group-stderr" \
+  && ok 'startup skips USB bus group setup for a non-USB transport' \
+  || no 'non-USB startup group setup' \
+    "rc=$RUN_RC calls=$(tr '\n' ' ' <"$WORK/chgrp-calls") stderr=$(cat "$WORK/usb-group-stderr")"
 
 report

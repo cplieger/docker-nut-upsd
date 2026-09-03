@@ -65,4 +65,26 @@ else
   no 'UPSContainerError event exclusion' "notify=[$notify_line] container=[$container_line]"
 fi
 
+HOSTSYNC_RULE=$(awk '
+  /^[[:space:]]*- alert: UPSHostSyncExpired$/ { inrule = 1; next }
+  inrule && /^[[:space:]]*- alert:/ { exit }
+  inrule { print }
+' "$ALERTS")
+HOSTSYNC_PATTERN=$(printf '%s\n' "$HOSTSYNC_RULE" \
+  | sed -n 's/.*|~ `\([^`]*\)` \[[^]]*\].*/\1/p')
+if [ "$(printf '%s\n' "$HOSTSYNC_PATTERN" | grep -c .)" -ne 1 ]; then
+  printf 'harness error: UPSHostSyncExpired must carry one regex line filter\n' >&2
+  exit 1
+fi
+
+hostsync_bare='Host sync timer expired, forcing shutdown'
+hostsync_structured='level=warn msg="UPS event" event="ALARM" ups="ups" detail="Host sync timer expired, forcing shutdown"'
+if printf '%s\n' "$hostsync_bare" | grep -Eq "$HOSTSYNC_PATTERN" \
+  && ! printf '%s\n' "$hostsync_structured" | grep -Eq "$HOSTSYNC_PATTERN"; then
+  ok 'UPSHostSyncExpired accepts the bare upsmon record and rejects the phrase inside a structured detail field'
+else
+  no 'UPSHostSyncExpired raw-record boundary' \
+    "pattern=$HOSTSYNC_PATTERN"
+fi
+
 report

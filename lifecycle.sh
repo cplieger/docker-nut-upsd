@@ -1,23 +1,23 @@
 #!/bin/sh
 # lifecycle.sh — NUT service lifecycle utility functions.
-# Sourced, never executed. The Dockerfile HEALTHCHECK sources this file
-# ALONE and calls comms_fresh, so the top level must only DEFINE (nothing
-# that runs at source time, no reliance on the caller's `set -eu`) and
-# nothing reachable from comms_fresh may name a helper defined in another
-# file - log_value and usb_bus_required are both such helpers.
+# Sourced, never executed. PID 1 sources this before configuration defaults;
+# the Dockerfile HEALTHCHECK sources it ALONE and calls comms_fresh. The top
+# level must only DEFINE (nothing runs at source time, no reliance on the
+# caller's `set -eu`), and nothing reachable from comms_fresh may name a helper
+# defined in another file - log_value and usb_bus_required are both such helpers.
 
 readonly PIDFILE_POLL_INTERVAL="0.1"
 readonly PIDFILE_POLL_MAX=50 # nominal wait = POLL_MAX x POLL_INTERVAL = 5s
-readonly DBUS_PROBE_REPLY_TIMEOUT_MS=3000 # under the outer timeout 5 at dbus_poweroff_path_ok: past it that bound kills dbus-send first and the alert-matched error line loses its detail=
+readonly DBUS_PROBE_REPLY_TIMEOUT_MS=3000 # under the outer timeout 5 at dbus_poweroff_path_ok: past it that bound kills dbus-send first, and detail= carries the shell's bare signal-death line instead of dbus-send's own cause
 # 3 stop_services commands x 3s = 9s worst case, inside Docker's default 10s
 # stop budget before SIGKILL.
 readonly STOP_CMD_TIMEOUT=3
 
 # Shared temp-file capture lifecycle for bounded subprocess output. Capture via
-# a regular file, never $(): a grandchild timeout never signals can hold a
-# pipe's write end open past the bound and block the reader forever. The
-# prefixes are constants because the entrypoint's leaked-temp cleanup globs
-# "$PREFIX".*.
+# a regular file, never $(): timeout signals only the program it exec'd, so a
+# descendant that program leaves running (upsdrvctl's driver) keeps the pipe's
+# write end open past the bound and blocks the reader. The prefixes are
+# constants because the entrypoint's leaked-temp cleanup globs "$PREFIX".*.
 readonly STOP_CMD_CAPTURE_PREFIX=/var/run/nut-secrets/stop-cmd
 readonly WD_RESTART_CAPTURE_PREFIX=/var/run/nut-secrets/wd-restart
 readonly POWERDOWNFLAG_FILE=/var/run/nut-secrets/killpower
@@ -25,11 +25,12 @@ capture_tmpfile() {
   mktemp "$1.XXXXXX" 2>/dev/null || printf '/dev/null'
 }
 capture_head() {
-  head -c 512 "$1" 2>/dev/null || true
+  # 513, not 512: log_value marks truncation only above 512 characters.
+  head -c 513 "$1" 2>/dev/null || true
 }
 capture_cleanup() {
-  # Deliberately status-neutral: both callers publish a best-effort contract an
-  # unlink failure must not abort.
+  # Deliberately status-neutral: every caller publishes a best-effort contract
+  # an unlink failure must not abort.
   [ "$1" = "/dev/null" ] || rm -f "$1" 2>/dev/null || true
 }
 
@@ -104,7 +105,11 @@ wait_for_pidfile() {
         ;;
       *) ;; # all-zero PID: `kill -0 0` signals the caller's own process group — refuse
     esac
-    sleep "$PIDFILE_POLL_INTERVAL"
+    # Background + wait: `wait` is where a trapped signal interrupts at
+    # once, so a SIGTERM during the boot gate reaches PID 1's trap
+    # instead of waiting out the poll.
+    sleep "$PIDFILE_POLL_INTERVAL" &
+    wait "$!" || true
     _wf_i=$((_wf_i + 1))
   done
   printf 'level=error msg="%s did not confirm a live PID for the expected binary in time" path=%s polls=%d interval=%s\n' \
@@ -117,9 +122,9 @@ wait_for_pidfile() {
 # ---------------------------------------------------------------------------
 # A UPS that resets its own USB link re-enumerates to a new root:root node
 # (networkupstools/nut#1786), and the nut-user driver then sits "Data stale"
-# until the container is recreated. This watchdog detects sustained stale
-# comms and re-homes the driver onto the current node. README "USB hotplug &
-# comms recovery" owns the operator-facing contract.
+# until the container is recreated. This watchdog keys on sustained stale
+# comms rather than on USB, so it bounces the driver on any transport. README
+# "USB hotplug & comms recovery" owns the operator-facing contract.
 
 # upsd_probe_host: the host the loopback protocol probes must use. Only the
 # wildcard binds map to loopback; a specific bind is probed where upsd
@@ -225,17 +230,14 @@ kill_stale_driver_from_pidfile() {
       ;;
   esac
   if [ -n "$_ksd_pid" ] && kill -0 "$_ksd_pid" 2>/dev/null; then
-    # Re-check existence immediately before signaling to narrow the
-    # PID-reuse window as far as plain sh allows.
-    if pid_matches_binary "$_ksd_pid" "$(driver_binary)" \
-      && kill -0 "$_ksd_pid" 2>/dev/null; then
-      if kill -9 "$_ksd_pid" 2>/dev/null; then
-        printf 'level=warn msg="comms watchdog force-killed the UPS driver that survived upsdrvctl stop" ups=%s pid=%s\n' \
-          "$UPS_NAME" "$_ksd_pid" >&2
-      fi
-    else
+    if ! pid_matches_binary "$_ksd_pid" "$(driver_binary)"; then
       printf 'level=error msg="comms watchdog refusing to kill PID not verified as the UPS driver" ups=%s pid=%s expected=%s\n' \
         "$UPS_NAME" "$_ksd_pid" "$(driver_binary)" >&2
+    # Re-check existence immediately before signaling to narrow the
+    # PID-reuse window as far as plain sh allows.
+    elif kill -0 "$_ksd_pid" 2>/dev/null && kill -9 "$_ksd_pid" 2>/dev/null; then
+      printf 'level=warn msg="comms watchdog force-killed the UPS driver that survived upsdrvctl stop" ups=%s pid=%s\n' \
+        "$UPS_NAME" "$_ksd_pid" >&2
     fi
   fi
   if ! rm -f "$_ksd_pf"; then
@@ -273,32 +275,45 @@ start_recovered_driver() {
 restart_ups_driver() {
   _attempt=${1:-1}
   # Stand down only when a real host poweroff is in progress. upsmon writes
-  # POWERDOWNFLAG on EVERY FSD including the log-only noop path, so gating on
-  # the flag alone would latch USB recovery OFF for the container's life; the
-  # SHUTDOWN_ON_BATTERY_CRITICAL conjunct narrows this to the live case
-  # (a mounted upsmon.conf.user with a non-poweroff SHUTDOWNCMD). Return
-  # non-zero so a stand-down is not counted.
+  # POWERDOWNFLAG on EVERY FSD, so the flag alone would also disarm recovery
+  # after the log-only noop FSD that no poweroff follows; the
+  # SHUTDOWN_ON_BATTERY_CRITICAL conjunct excludes that case. It still
+  # latches while host shutdown is enabled and a mounted upsmon.conf.user
+  # points SHUTDOWNCMD away from this image's scripts. Return non-zero so a
+  # stand-down is not counted.
   if [ "${SHUTDOWN_ON_BATTERY_CRITICAL:-false}" = "true" ] && [ -e "$POWERDOWNFLAG_FILE" ]; then
     printf 'level=warn msg="comms watchdog standing down; forced shutdown (killpower) in progress" ups=%s\n' "$UPS_NAME" >&2
     return 1
   fi
-  # Escalate to error from the final fast retry onward: recovery has outlived
-  # the alert window README "USB hotplug & comms recovery" sizes. The CAUSE
-  # arrives in the detail= of the restart-failed line below, from upsdrvctl;
-  # never infer one from the attempt count.
+  # Log at error from the final fast retry onward so a prolonged outage is
+  # visible while the last fast recovery attempt runs. The cause arrives in
+  # the restart-failed detail below; never infer one from the attempt count.
   if [ "$_attempt" -ge "$COMMS_FAST_RETRIES" ]; then
     printf 'level=error msg="comms watchdog still restarting driver after repeated attempts" ups=%s attempt=%d\n' "$UPS_NAME" "$_attempt" >&2
   else
     printf 'level=warn msg="comms watchdog re-homing UPS driver after stale comms" ups=%s attempt=%d\n' "$UPS_NAME" "$_attempt" >&2
   fi
   if usb_bus_required; then
-    if ! chgrp -R nut /dev/bus/usb 2>/dev/null; then
-      printf 'level=warn msg="comms watchdog could not re-assert nut group on USB nodes" ups=%s\n' "$UPS_NAME" >&2
+    if ! _rud_chg_err=$(chgrp -R nut /dev/bus/usb 2>&1); then
+      printf 'level=warn msg="comms watchdog could not re-assert nut group on USB nodes" ups=%s err="%s"\n' \
+        "$UPS_NAME" "$(log_value "$_rud_chg_err")" >&2
     fi
   fi
   _rud_stop_out_file=$(capture_tmpfile "$WD_RESTART_CAPTURE_PREFIX")
   if timeout -k 5 30 /usr/sbin/upsdrvctl stop "$UPS_NAME" >"$_rud_stop_out_file" 2>&1; then
-    :
+    # upsdrvctl exits zero after its own SIGKILL escalation (v2.8.5
+    # drivers/upsdrvctl.c: "Stopping %s failed, retrying harder" at LOG_ERR,
+    # then SIGKILL, then clean_return without exec_error++), so the wedged
+    # case is indistinguishable from a clean stop by exit status alone.
+    # Match that record: the capture is not empty on an ordinary stop --
+    # upsdrvctl banners to stdout unconditionally and this captures both streams.
+    _rud_stop_out=$(capture_head "$_rud_stop_out_file")
+    case "$_rud_stop_out" in
+      *'retrying harder'*)
+        printf 'level=warn msg="comms watchdog driver stop escalated to SIGKILL upstream" ups=%s detail="%s"\n' \
+          "$UPS_NAME" "$(log_value "$_rud_stop_out")" >&2
+        ;;
+    esac
   else
     _rud_stop_rc=$?
     _rud_stop_out=$(capture_head "$_rud_stop_out_file")
@@ -306,6 +321,10 @@ restart_ups_driver() {
       "$UPS_NAME" "$_rud_stop_rc" "$(log_value "$_rud_stop_out")" >&2
   fi
   capture_cleanup "$_rud_stop_out_file"
+  if [ "${SHUTDOWN_ON_BATTERY_CRITICAL:-false}" = "true" ] && [ -e "$POWERDOWNFLAG_FILE" ]; then
+    printf 'level=warn msg="comms watchdog standing down; forced shutdown (killpower) in progress" ups=%s phase=post-stop\n' "$UPS_NAME" >&2
+    return 1
+  fi
   kill_stale_driver_from_pidfile "$(driver_pidfile)"
   start_recovered_driver
   # Signal that a real restart was attempted (distinct from the killpower
@@ -328,7 +347,6 @@ comms_watchdog() {
   : "${COMMS_RECOVERY_TIMEOUT:?comms_watchdog requires COMMS_RECOVERY_TIMEOUT}"
   : "${COMMS_FAST_RETRIES:?comms_watchdog requires COMMS_FAST_RETRIES}"
   : "${COMMS_BACKOFF_FACTOR:?comms_watchdog requires COMMS_BACKOFF_FACTOR}"
-  _stale=0
   _stale_since=""
   _outage_since=""
   _restarts=0
@@ -339,7 +357,7 @@ comms_watchdog() {
     if comms_fresh >/dev/null 2>&1; then
       if [ "$_restarts" -gt 0 ]; then
         # Total outage = elapsed since the FIRST stale probe of the outage,
-        # not the last post-restart window (_stale resets on every bounce).
+        # not the last post-restart window (_stale_since resets on every bounce).
         _total=unknown
         if [ -n "$_outage_since" ] && _now=$(watchdog_epoch); then
           _total=$((_now - _outage_since))
@@ -347,7 +365,6 @@ comms_watchdog() {
         printf 'level=info msg="comms watchdog UPS comms recovered" ups=%s stale_secs=%s restarts=%d\n' \
           "$UPS_NAME" "$_total" "$_restarts" >&2
       fi
-      _stale=0
       _stale_since=""
       _outage_since=""
       _restarts=0
@@ -375,7 +392,6 @@ comms_watchdog() {
         if restart_ups_driver "$((_restarts + 1))"; then
           _restarts=$((_restarts + 1))
         fi
-        _stale=0
         _stale_since=""
       fi
     fi

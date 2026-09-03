@@ -13,10 +13,10 @@ helpers are libraries, not programs:
 
 | Script               | Role                                                                                                      |
 | -------------------- | --------------------------------------------------------------------------------------------------------- |
-| `validate.sh`        | Env-var validation functions + table-driven dispatch                                                      |
+| `validate.sh`        | Env-var validation                                                                                        |
 | `generate-config.sh` | Generates `ups.conf` / `upsd.conf` / `upsd.users` / `upsmon.conf`                                         |
-| `lifecycle.sh`       | `stop_services`, `wait_for_pidfile`, USB comms-recovery watchdog, D-Bus poweroff-path probe               |
-| `secrets.sh`         | Generated-credential caching (`ADMIN_PASSWORD`, internal `local_upsmon`), weak-password warning           |
+| `lifecycle.sh`       | NUT service lifecycle, comms recovery, and D-Bus poweroff-path probe                                      |
+| `secrets.sh`         | Credential and STARTTLS-certificate resolution/caching, weak-password warning, staged /etc/nut install    |
 
 More scripts are invoked by NUT at runtime (not sourced):
 
@@ -108,15 +108,15 @@ new generated file should respect that same override hook.
   `patch -p1 --fuzz=0` (strict, so source drift on a version bump fails
   the build loudly instead of silently shipping unpatched binaries).
   Each patch header names its upstream commit and removal condition, and
-  this is the removal checklist they point at. Every patch goes once
-  `NUT_VERSION` reaches v2.8.6, and removing any patch touches:
+  this is the removal checklist they point at. Each patch goes when
+  `NUT_VERSION` reaches v2.8.6, and removing one touches:
   - the patch file in `patches/`;
   - its `COPY patches/...` entry and its `patch -p1 --fuzz=0` line in the
     `Dockerfile`;
-  - the `Dockerfile` comment above that COPY, which states how many
-    backports are carried;
+  - the `Dockerfile` comment above that COPY, which describes the carried
+    backports and their removal condition;
   - the [README's Security section](README.md#security), whose first
-    paragraph states the same count and what the backports cover;
+    paragraph names the backports and what they cover;
   - the [README's License section](README.md#license), which keeps
     `patches/` as a GPL-2.0-or-later exception;
   - this checklist.
@@ -131,37 +131,44 @@ new generated file should respect that same override hook.
   A failing `patch` step on a NUT version
   bump usually means the fix landed upstream: drop the patch rather than
   re-diffing it.
-- **`driver_transport`'s two censuses are hand-copied from the pin.**
+- **`driver_transport`'s censuses are hand-copied from the pin.**
   `validate.sh` lists NUT's libusb and network driver names literally
   (`drivers/Makefile.am`: `USB_LIBUSB_DRIVERLIST`, `SNMP_DRIVERLIST`,
   plus `apcupsd-ups` from `NUTSW_DRIVERLIST`). A `NUT_VERSION` bump must
   re-read those lists: a renamed or added driver silently classifies as
   `other`, and the runtime image carries no source tree for a test to
   derive them from.
-- **The seven `upsmon` timing defaults are hand-copied from the pin.**
-  `entrypoint.sh:89-95` restates NUT v2.8.5's own `POLLFREQ`,
-  `POLLFREQALERT`, `DEADTIME`, `FINALDELAY`, `HOSTSYNC`, `NOCOMMWARNTIME`
-  and `RBWARNTIME` (`clients/upsmon.c:59-118`). A `NUT_VERSION` bump must
-  compare all seven against that file and either update them or reaffirm
-  the pin deliberately - pinning is what keeps the FSD sequence and the
-  notification intervals stable across a bump. If one moves, review the
-  coupled sites in the same change: `alerts/logql.yaml` carries the literals 5,
-  300 and 43200 in its windows and prose, and
-  `tests/shell/alert_state_window_contract_test.sh` reads three of the seven
-  and only asserts that windows stay above the current cadences, so it stays
-  green while those inequalities hold. No runtime check is possible: the
+- **The libmodbus build pre-seeds `ac_cv_type_struct_termios2=no`.** On a
+  `LIBMODBUS_VERSION` bump, drop that assignment from the libmodbus
+  `./configure` line and rebuild. Restore it only if `modbus-rtu.c` fails to
+  compile on musl. If the build passes, remove the override and its explanatory
+  comment. The cache variable suppresses the check, so a build with the override
+  proves nothing about whether upstream fixed the musl detection.
+- **The `upsmon` timing defaults are hand-copied from the pin.** The
+  consecutive `: "${VAR:=N}"` directives in `entrypoint.sh`, from `POLLFREQ`
+  through `RBWARNTIME`, restate NUT v2.8.5's defaults
+  (`clients/upsmon.c:59-118`). A `NUT_VERSION` bump must compare every directive
+  against that file and either update it or reaffirm the pin deliberately.
+  Pinning keeps the FSD sequence and notification intervals stable across a
+  bump. If one moves, review the coupled sites in the same change:
+  `alerts/logql.yaml` carries the literals 5, 300 and 43200 in its windows and
+  prose, and `tests/shell/alert_state_window_contract_test.sh` reads `POLLFREQ`,
+  `NOCOMMWARNTIME` and `RBWARNTIME` from the directives. The test stays green
+  while its window inequalities hold. No runtime check is possible because the
   runtime image carries no NUT source tree.
-- **Six `clients/upsmon.c` line citations are pinned to NUT v2.8.5.** A
-  `NUT_VERSION` bump must re-affirm every one, and two of them additionally
-  claim their values are upstream's own defaults: `entrypoint.sh:86` and
-  `generate-config.sh:285` (both `clients/upsmon.c:59-118`). The rest are
-  `validate.sh:57` (`:2428-2460`), `validate.sh:60` and `validate.sh:411`
-  (both `:1712`), and `alerts/logql.yaml`'s `ups_on_batt :887`. `validate.sh:57`
-  is the consequential one: it is the published justification for a
-  REFUSAL. All are correct at HEAD, so this is coupling rather than a
-  defect, and a test is genuinely unavailable - the pinned source is
-  unpacked only in the builder stage (`Dockerfile:71`) while the test stage
-  is `FROM` runtime and copies `tests/smoke.sh` alone.
+- **The `clients/upsmon.c` citations are pinned to NUT v2.8.5.** On a
+  `NUT_VERSION` bump, find every site with
+  `grep -n 'clients/upsmon\.c' entrypoint.sh generate-config.sh validate.sh alerts/logql.yaml`
+  and re-affirm each against the new pin. The timing-default comments in
+  `entrypoint.sh` and `generate-config.sh` claim their values are upstream's own
+  defaults (`clients/upsmon.c:59-118`). The `HOSTSYNC` ceiling comment in
+  `validate.sh` (`:2428-2460`) justifies a refusal. Other citations explain the
+  `DEADTIME` comparison (`:1712`) and the `ups_on_batt` cadence (`:887`). The
+  `UPSHostSyncExpired` rule is the only alert matcher keyed to upstream prose;
+  an upstream reword silently breaks that alert. At v2.8.6, re-verify every
+  citation before removing the checked-in patches. Applying them with
+  `patch -p1 --fuzz=0` is the only mechanical drift signal for this source
+  file, and that version removes the patches that provide it.
 - **USB re-enumeration is expected, not exceptional.** Many UPSes reset
   their USB link periodically (the driver runs fine, then goes "Data
   stale"). The `comms_watchdog` in `lifecycle.sh` recovers from this by
@@ -222,6 +229,10 @@ new generated file should respect that same override hook.
   arithmetic-consumed numeric var the same way.
 
 ## Local validation
+
+Put assertions that need the assembled image in `tests/smoke.sh`. Put pure
+shell logic and cross-file contracts that read both source files in
+`tests/shell/`.
 
 The scripts and Dockerfile are linted in CI; run the same tools before
 pushing:

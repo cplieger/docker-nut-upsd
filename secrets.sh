@@ -1,7 +1,7 @@
 #!/bin/sh
-# secrets.sh — credential and STARTTLS certificate resolution and caching logic
-# (ADMIN_PASSWORD, the internal local_upsmon password, and the STARTTLS
-# server certificate). Sourced by entrypoint.sh; not executed directly.
+# secrets.sh — credential and STARTTLS certificate resolution/caching, and the
+# root:nut 640 staged install (_install_nut_config) every /etc/nut writer
+# shares. Sourced by entrypoint.sh; not executed directly.
 
 # base64 expands 3 raw bytes to 4 characters, so PASSWORD_LENGTH is derived at
 # two thirds of PASSWORD_RAW_BYTES: ~2x headroom for the `/+=` stripping in
@@ -60,18 +60,18 @@ _install_nut_config() {
 _resolve_cached_password() {
   _rcp_label="$1"
   _rcp_file="$2"
-  # Bounded, validated cache read: generation below always writes exactly
-  # PASSWORD_LENGTH bytes, so only a cache of exactly that size is trusted.
-  # An unbounded `cat` of a corrupted or grown cache would let PID 1 consume
-  # memory proportional to the file and repeat the OOM on every restart.
-  # Trust only generation's own alphabet (A-Za-z0-9), so whitespace and the
-  # quote/backslash/control bytes that break out of generate-config.sh's quoted
-  # password fields regenerate. Command substitution removes a trailing newline
-  # before the alphabet test; the length clause rejects that cache (tests/shell/credential_cache_test.sh case 3b).
-  # `stat -L` follows, because `head` does: with a plain lstat a symlink here
-  # reports its own size, so the length clause passes on a link to a longer
-  # file and `head` then serves a truncated prefix of it as the credential.
+  _rcp_pw=""
+  # `stat -L` follows, because `head` does: on a symlink a plain lstat
+  # reports the link's own size, so a link to a longer file would serve a
+  # truncated prefix of it as the credential.
   _rcp_size=$(stat -Lc %s "$_rcp_file" 2>/dev/null) || _rcp_size=""
+  # Generation writes exactly PASSWORD_LENGTH bytes, so only that size is
+  # trusted: an unbounded read of a grown cache would OOM PID 1 on every
+  # restart. The length clause is not redundant with the stat — command
+  # substitution strips a trailing newline, so 24 bytes can yield 23
+  # characters. Only generation's own alphabet (A-Za-z0-9) is trusted:
+  # whitespace and the quote/backslash/control bytes break out of
+  # generate-config.sh's quoted password fields.
   if [ "$_rcp_size" = "$PASSWORD_LENGTH" ] \
     && _rcp_pw=$(head -c "$PASSWORD_LENGTH" "$_rcp_file" 2>/dev/null) \
     && [ "${#_rcp_pw}" -eq "$PASSWORD_LENGTH" ] \
@@ -82,8 +82,8 @@ _resolve_cached_password() {
     return 0
   fi
   if [ -s "$_rcp_file" ]; then
-    printf 'level=warn msg="cached %s invalid (wrong size, unreadable, or not from the generated alphabet); regenerating" path=%s size=%s expected=%s\n' \
-      "$_rcp_label" "$_rcp_file" "${_rcp_size:-unreadable}" "$PASSWORD_LENGTH" >&2
+    printf 'level=warn msg="cached %s invalid (wrong size, shortened by trailing whitespace, unreadable, or not from the generated alphabet); regenerating" path=%s size=%s chars=%s expected=%s\n' \
+      "$_rcp_label" "$_rcp_file" "${_rcp_size:-unreadable}" "${#_rcp_pw}" "$PASSWORD_LENGTH" >&2
   fi
   # Pull more entropy than needed so stripping `/+=` still leaves
   # >=PASSWORD_LENGTH usable characters.
@@ -163,17 +163,16 @@ readonly TLS_CERT_DAYS=825
 # upsd fatalx()es on either half (server/netssl.c:715-722).
 tls_cert_parses() {
   openssl x509 -in "$1" -noout >/dev/null 2>&1 \
-    && openssl pkey -in "$1" -noout -passin pass: >/dev/null 2>&1
+    && openssl pkey -in "$1" -noout </dev/null >/dev/null 2>&1
 }
 
 # Every certificate in the file, not just the leaf: upsd loads the whole chain
 # (SSL_CTX_use_certificate_chain_file) and checks no expiry on any of it.
 tls_cert_fresh() {
-  _tcf_n=$(grep -c 'BEGIN CERTIFICATE' "$1") || return 1
-  [ "$_tcf_n" -ge 1 ] || return 1
+  _tcf_n=$(grep -c 'BEGIN CERTIFICATE-' "$1") || return 1
   _tcf_i=1
   while [ "$_tcf_i" -le "$_tcf_n" ]; do
-    awk -v want="$_tcf_i" '/BEGIN CERTIFICATE/{c++} c==want' "$1" \
+    awk -v want="$_tcf_i" '/BEGIN CERTIFICATE-/{c++} c==want' "$1" \
       | openssl x509 -noout -checkend 86400 >/dev/null 2>&1 || return 1
     _tcf_i=$((_tcf_i + 1))
   done

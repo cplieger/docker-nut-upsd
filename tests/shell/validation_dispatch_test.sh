@@ -26,19 +26,6 @@ new_workdir >/dev/null
 #   ENTRYPOINT=/tmp/mut-validate.sh bash tests/shell/validation_dispatch_test.sh
 [ "$ENTRYPOINT" = "$REPO_ROOT/entrypoint.sh" ] && ENTRYPOINT="$REPO_ROOT/validate.sh"
 
-# The range ends at the following blank line, not at a repeat of the start
-# pattern: sed does not re-test a regex end address on the start line, so with
-# no second copy of the declaration the range would run to EOF and source the
-# whole file, masking a missing dependency in the explicit load list below.
-consts=$(extract_range '^readonly SHELL_SAFE_INTEGER_MAX=' '^$') || exit 1
-. "$consts"
-[ -n "${SHELL_SAFE_INTEGER_MAX:-}" ] && [ "$(grep -c . "$consts")" -eq 1 ] \
-  || {
-    printf 'harness error: the constant extraction captured %s non-blank lines, want exactly 1\n' \
-      "$(grep -c . "$consts")" >&2
-    exit 1
-  }
-
 # The dispatch layer plus every validator the rows below route to. Loaded, not
 # stubbed: a dispatch test whose validators are fakes proves only that the fakes
 # ran.
@@ -86,6 +73,13 @@ elif grep -Fq 'msg="env var must not exceed 2147483647" var=DEADTIME value="2147
   ok 'the first value above the NUT C-int boundary is refused by the ceiling arm'
 else
   no 'NUT C-int overflow refused' "wrong refusal: $(head -c 200 "$ERR")"
+fi
+
+: >"$ERR"
+if validate_numeric DEADTIME 000000000000000001 2>"$ERR" && [ ! -s "$ERR" ]; then
+  ok 'an 18-digit zero-padded value is accepted at the raw digit ceiling'
+else
+  no '18-digit raw numeric boundary accepted' "rejected or emitted a diagnostic: $(head -c 200 "$ERR")"
 fi
 
 # --- 9b. jointly disabled low-battery thresholds fail closed ---------------------
@@ -150,6 +144,15 @@ fi
 row_vars=$(awk '
   /^[[:space:]]+_check(_optional)? [A-Z_][A-Z0-9_]* / { print $2 }
 ' "$ENTRYPOINT" | sort)
+unchecked_rows=$(awk '
+  /^[[:space:]]+_check(_optional)? [A-Z_][A-Z0-9_]* / && NF < 4 { print NR ":" $0 }
+' "$ENTRYPOINT")
+if [ -z "$unchecked_rows" ]; then
+  ok 'every validation row names at least one check'
+else
+  no 'validation rows carry checks' "rows with no check names: $unchecked_rows"
+fi
+
 canonical_vars=$(awk '
   /^canonicalize_validated_values\(\)/ { in_canonical = 1; next }
   in_canonical && /^}/ { exit }
@@ -300,6 +303,8 @@ done <<<"$credential_table"
 documented="$WORK/documented-vars"
 validated="$WORK/validated-vars"
 
+# The sed program matches literal Markdown backticks around environment names.
+# shellcheck disable=SC2016
 sed -n 's/^| `\([A-Z][A-Z0-9_]*\)` |.*/\1/p' "$REPO_ROOT/README.md" \
   | sort -u >"$documented"
 awk '/^[[:space:]]+_check(_optional)? [A-Z][A-Z0-9_]* / { print $2 }' "$ENTRYPOINT" \

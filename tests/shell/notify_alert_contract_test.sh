@@ -3,10 +3,10 @@
 # of the log lines this repo's alert rules match.
 #
 # WHY THIS IS A CONTRACT, NOT A FORMATTING PREFERENCE: alerts/logql.yaml parses these
-# lines with logfmt and filters on the PARSED event label. Rename the field,
-# emit a second event= keyval ahead of the real one, or drop the default case
-# arm, and UPSOnBattery / UPSLowBattery / UPSForcedShutdown / UPSCommsLost /
-# UPSHardwareFault / UPSProtectionDegraded stop firing SILENTLY: nothing errors, no test fails, and
+# lines with logfmt and filters on the PARSED event label. Rename the field or
+# emit a second event= keyval ahead of the real one, and UPSOnBattery /
+# UPSLowBattery / UPSForcedShutdown / UPSCommsLost / UPSHardwareFault /
+# UPSProtectionDegraded stop firing SILENTLY: nothing errors, no test fails, and
 # the gap surfaces during a real outage. Event names are read OUT of
 # alerts/logql.yaml rather than named here, so a divergence between the two files
 # fails.
@@ -15,12 +15,9 @@
 # it, so it cannot rely on the shared helper already being sourced) and is
 # executed here as the real script rather than extracted.
 #
-# Lint directives for this whole file, each against a stated guarantee:
+# Lint directive for this whole file, against a stated guarantee:
 #   SC2015 - ok/no return 0 unconditionally, so `[ cond ] && ok || no` cannot mis-fire.
-#   SC2016 - the backtick pattern reading a matcher out of alerts/logql.yaml must stay
-#     single-quoted: it matches the LITERAL backticks LogQL wraps a line filter
-#     in, and double quotes would run it as a command substitution.
-# shellcheck disable=SC2015,SC2016
+# shellcheck disable=SC2015
 set -u
 
 # shellcheck source-path=SCRIPTDIR
@@ -59,7 +56,7 @@ all_match() {
 # --- 1. the LogQL matchers, read FROM alerts/logql.yaml ---------------------------------
 # The matcher literal is extracted from the rule file at run time, so EITHER
 # side of the contract failing fails here.
-ALERTS="$REPO_ROOT/alerts/logql.yaml"
+ALERTS="${ALERTS:-$REPO_ROOT/alerts/logql.yaml}"
 
 # rule_events <alert-name> -> every NUT event name that rule's label filter
 # selects, deduplicated.
@@ -102,15 +99,39 @@ E_FAULT=$(rule_events UPSHardwareFault)
 E_PROTECTION=$(rule_events UPSProtectionDegraded)
 E_ONBATT_PAIR=$(rule_events UPSOnBattery)
 
+require_event_count() {
+  local alert=$1 expected=$2 events=$3 count=0
+  if [ -z "$events" ]; then
+    printf 'harness error: %s yielded no event names from %s\n' "$alert" "$ALERTS" >&2
+    exit 1
+  fi
+  for _event in $events; do
+    count=$((count + 1))
+  done
+  if [ "$count" -ne "$expected" ]; then
+    printf 'harness error: %s yielded %d event names from %s, want %d\n' \
+      "$alert" "$count" "$ALERTS" "$expected" >&2
+    exit 1
+  fi
+}
+
+require_event_count UPSLowBattery 1 "$E_LOWBATT"
+require_event_count UPSForcedShutdown 2 "$E_FSD"
+require_event_count UPSCommsLost 1 "$E_NOCOMM"
+require_event_count UPSHardwareFault 2 "$E_FAULT"
+require_event_count UPSProtectionDegraded 2 "$E_PROTECTION"
+require_event_count UPSOnBattery 2 "$E_ONBATT_PAIR"
+
 # Non-emptiness is not enough: a name extracted from the WRONG rule would be
 # non-empty but meaningless. Every NUT notify type is upper-case ASCII, so the
 # SHAPE is the guard that catches both.
 for _ev in $E_LOWBATT $E_FSD $E_NOCOMM $E_FAULT $E_PROTECTION $E_ONBATT_PAIR; do
   case "$_ev" in
     '' | *[!A-Z]*)
-      printf 'harness error: extracted event name %s from %s is not a NUT notify type (lowbatt=%s fsd=%s nocomm=%s fault=%s onbatt-pair=%s)\n' \
+      printf 'harness error: extracted event name %s from %s is not a NUT notify type (lowbatt=%s fsd=%s nocomm=%s fault=%s protection=%s onbatt-pair=%s)\n' \
         "${_ev:-<empty>}" "$ALERTS" "$E_LOWBATT" "$(printf '%s' "$E_FSD" | tr '\n' ' ')" \
         "$E_NOCOMM" "$(printf '%s' "$E_FAULT" | tr '\n' ' ')" \
+        "$(printf '%s' "$E_PROTECTION" | tr '\n' ' ')" \
         "$(printf '%s' "$E_ONBATT_PAIR" | tr '\n' ' ')" >&2
       exit 1
       ;;
@@ -148,18 +169,18 @@ emits_event "$E_NOCOMM" \
   && ok "every event UPSHardwareFault names ($(printf '%s' "$E_FAULT" | tr '\n' ' ')) binds its own event label" \
   || no 'UPSHardwareFault event labels' "not bound:$(unbound_events "$E_FAULT")"
 
+[ -z "$(unbound_events "$E_PROTECTION")" ] \
+  && ok "every event UPSProtectionDegraded names ($(printf '%s' "$E_PROTECTION" | tr '\n' ' ')) binds its own event label" \
+  || no 'UPSProtectionDegraded event labels' "not bound:$(unbound_events "$E_PROTECTION")"
+
 # UPSOnBattery needs BOTH halves of the pair to reach the log: with ONLINE
 # missing the rule can never resolve, and with ONBATT missing it can never
-# fire. The COUNT is pinned too, so a deleted arm cannot quietly reduce this
+# fire. The count is pinned above, so a deleted arm cannot quietly reduce this
 # to whichever event survived.
-_pair_n=0
-for _ev in $E_ONBATT_PAIR; do
-  _pair_n=$((_pair_n + 1))
-done
 _pair_seen=$(printf '%s' "$E_ONBATT_PAIR" | tr '\n' ' ')
-[ "$_pair_n" -eq 2 ] && [ -z "$(unbound_events "$E_ONBATT_PAIR")" ] \
+[ -z "$(unbound_events "$E_ONBATT_PAIR")" ] \
   && ok "UPSOnBattery's pair from alerts/logql.yaml ($_pair_seen) binds on both events" \
-  || no 'UPSOnBattery event pair' "alerts/logql.yaml should name 2 events, got $_pair_n ($_pair_seen); not bound:$(unbound_events "$E_ONBATT_PAIR")"
+  || no 'UPSOnBattery event pair' "not bound:$(unbound_events "$E_ONBATT_PAIR")"
 
 # --- 1b. every matched NUT event is actually routed to this handler ----------------
 # This script only runs when upsmon's NOTIFYFLAG for the event carries EXEC
@@ -175,6 +196,20 @@ done
 [ -z "$_unrouted" ] \
   && ok 'every NUT event the alert rules match carries EXEC in the generated upsmon.conf' \
   || no 'NOTIFYFLAG routing' "alerts/logql.yaml matches these events but $GENERATOR does not route them to NOTIFYCMD:$_unrouted"
+
+E_UNAVAILABLE=$(rule_events UPSProtectionUnavailable)
+_unavailable_n=0
+for _ev in $E_UNAVAILABLE; do
+  _unavailable_n=$((_unavailable_n + 1))
+done
+_unavailable_seen=$(printf '%s' "$E_UNAVAILABLE" | tr '\n' ' ')
+_unavailable_unrouted=""
+for _ev in $E_UNAVAILABLE; do
+  grep -Eq "^NOTIFYFLAG $_ev .*EXEC" "$GENERATOR" || _unavailable_unrouted="$_unavailable_unrouted $_ev"
+done
+[ "$_unavailable_n" -eq 2 ] && [ -z "$_unavailable_unrouted" ] \
+  && ok "UPSProtectionUnavailable's pair from alerts/logql.yaml ($_unavailable_seen) carries EXEC in the generated upsmon.conf" \
+  || no 'UPSProtectionUnavailable NOTIFYFLAG routing' "alerts/logql.yaml should name 2 events, got $_unavailable_n ($_unavailable_seen); not routed:$_unavailable_unrouted"
 
 # --- 1c. every routed event is matched or named as deliberately unalerted --------
 # The reverse of 1b fails silently: an EXEC-routed event with no rule is
@@ -221,6 +256,11 @@ all_match '^level=info ' ONLINE COMMOK \
   && ok 'ONLINE and COMMOK classify as level=info' \
   || no 'info class' 'an info-class event did not log at level=info'
 
+all_match '^level=info ' NOTALARM NOTBYPASS NOTOVER NOTOFF NOTCAL \
+  && [ -z "$(unbound_events 'NOTALARM NOTBYPASS NOTOVER NOTOFF NOTCAL')" ] \
+  && ok 'NOTALARM, NOTBYPASS, NOTOVER, NOTOFF and NOTCAL retain their event names and classify as level=info' \
+  || no 'clear-state info class' "not bound:$(unbound_events 'NOTALARM NOTBYPASS NOTOVER NOTOFF NOTCAL')"
+
 all_match '^level=warn ' ONBATT LOWBATT COMMBAD NOCOMM REPLBATT ALARM \
   && ok 'ONBATT, LOWBATT, COMMBAD, NOCOMM, REPLBATT and ALARM classify as level=warn' \
   || no 'warn class' 'a warn-class event did not log at level=warn'
@@ -231,9 +271,8 @@ all_match '^level=error ' FSD SHUTDOWN \
 
 # --- 4. the default arm: an event this image has never seen still reports ----------
 #
-# NUT adds notification types across releases. Without the catch-all arm,
-# `level` would be unset and a new upstream event would go unreported rather
-# than merely unclassified.
+# NUT adds notification types across releases. The catch-all gives a new event a
+# complete warn-level record instead of opening one with an empty severity.
 notify BATTERYCHARGED | grep -q '^level=warn msg="UPS event" event="BATTERYCHARGED" ' \
   && ok 'an unrecognized NOTIFYTYPE still emits a complete warn-level record (default arm)' \
   || no 'default arm' "line: $(notify BATTERYCHARGED)"
@@ -257,9 +296,9 @@ fi
 
 # --- 6. the sanitizer's three copies cannot drift apart ---------------------------
 # log_value exists in validate.sh, nut-shutdown.sh AND here, byte-identical by
-# deliberate design: the standalone handlers are exec'd by upsmon and cannot
-# source the shared helper. Byte-parity is the contract that keeps smoke.sh's
-# validate.sh coverage transferable to this copy.
+# deliberate design: upsmon execs the standalone handlers, so they cannot rely
+# on the shared helper already being sourced. Byte-parity is the contract that
+# keeps smoke.sh's validate.sh coverage transferable to this copy.
 _lv_notify=$(extract_function log_value "$WORK/lv1.sh")
 _lv_validate=$(ENTRYPOINT="$REPO_ROOT/validate.sh" extract_function log_value "$WORK/lv2.sh")
 _lv_shutdown=$(ENTRYPOINT="$REPO_ROOT/nut-shutdown.sh" extract_function log_value "$WORK/lv3.sh")

@@ -6,7 +6,7 @@ set -u
 # shellcheck source-path=SCRIPTDIR
 . "$(dirname -- "$0")/lib.sh"
 
-dockerfile="$REPO_ROOT/Dockerfile"
+dockerfile="${DOCKERFILE:-$REPO_ROOT/Dockerfile}"
 test_stage=$(awk '
   /^FROM .* AS test$/ { in_stage = 1; next }
   /^FROM / && in_stage { exit }
@@ -74,15 +74,108 @@ for spec in \
     failed_archives="${failed_archives}${failed_archives:+, }$archive"
   fi
 done
-[ "$verified_archives" -eq 3 ] \
-  && ok 'every source archive is checksum-verified before extraction' \
-  || no 'source archive checksum ordering' "failed archives: ${failed_archives:-all}"
+if [ "$verified_archives" -eq 3 ]; then
+  ok 'every source archive is checksum-verified before extraction'
+else
+  no 'source archive checksum ordering' "failed archives: ${failed_archives:-all}"
+fi
+
+source_components=$(awk '
+  /^# renovate: datasource=github-(releases|tags) depName=/ { count++ }
+  END { print count + 0 }
+' "$dockerfile")
+sbom_components=$(awk '
+  /RUN cat > \/out\/nut-upsd\.cdx\.json <<EOF/ { in_sbom = 1; next }
+  in_sbom && /^EOF$/ { exit }
+  in_sbom && /"bom-ref":/ { count++ }
+  END { print count + 0 }
+' "$dockerfile")
+sbom_identity_ok=true
+failed_component=""
+for spec in \
+  'networkupstools/nut|nut|cpe:2.3:a:networkupstools:nut:' \
+  'stephane/libmodbus|libmodbus|cpe:2.3:a:libmodbus:libmodbus:' \
+  'net-snmp/net-snmp|net-snmp|cpe:2.3:a:net-snmp:net-snmp:'; do
+  dep=${spec%%|*}
+  rest=${spec#*|}
+  name=${rest%%|*}
+  cpe=${rest#*|}
+  arg=$(awk -v dep="$dep" '
+    /^# renovate:/ && index($0, "depName=" dep) { found = 1; next }
+    found && /^ARG [A-Z0-9_]+_VERSION=/ {
+      line = $0
+      sub(/^ARG /, "", line)
+      sub(/=.*/, "", line)
+      print line
+      exit
+    }
+  ' "$dockerfile")
+  component=$(awk -v dep="$dep" '
+    index($0, "\"bom-ref\": \"pkg:github/" dep "@") { found = 1 }
+    found { print }
+    found && /^    }/ { exit }
+  ' "$dockerfile")
+  arg_ref="\${$arg}"
+  version_ref="\${$arg#v}"
+  if [ -z "$arg" ] || [ -z "$component" ] \
+    || ! grep -Fq "\"bom-ref\": \"pkg:github/$dep@$arg_ref\"" <<<"$component" \
+    || ! grep -Fq "\"name\": \"$name\"" <<<"$component" \
+    || ! grep -Fq "\"version\": \"$version_ref\"" <<<"$component" \
+    || ! grep -Fq "\"purl\": \"pkg:github/$dep@$arg_ref\"" <<<"$component" \
+    || ! grep -Fq "\"cpe\": \"$cpe$version_ref:*:*:*:*:*:*:*\"" <<<"$component"; then
+    sbom_identity_ok=false
+    failed_component="${failed_component}${failed_component:+, }$name"
+  fi
+done
+if [ "$source_components" -eq "$sbom_components" ] && [ "$sbom_identity_ok" = true ]; then
+  ok 'source-built component metadata matches its source pin'
+else
+  no 'source-built component metadata' "source pins=$source_components components=$sbom_components mismatched=${failed_component:-none}"
+fi
+
+checked_in_patches=$(find "$REPO_ROOT/patches" -maxdepth 1 -type f -name '*.patch' -exec basename {} \; | sort)
+copied_patches=$(awk '
+  /^COPY patches\// { in_copy = 1 }
+  in_copy {
+    for (i = 1; i <= NF; i++) {
+      if ($i ~ /^patches\/.*\.patch$/) {
+        sub(/^patches\//, "", $i)
+        print $i
+      }
+    }
+    if ($0 ~ /\/build\/patches\/[[:space:]]*$/) exit
+  }
+' "$dockerfile" | sort)
+applied_patches=$(awk '
+  /patch -p1 --fuzz=0 -i \/build\/patches\// {
+    for (i = 1; i <= NF; i++) {
+      if ($i ~ /^\/build\/patches\/.*\.patch$/) {
+        sub(/^\/build\/patches\//, "", $i)
+        print $i
+      }
+    }
+  }
+' "$dockerfile" | sort)
+if [ -n "$checked_in_patches" ] \
+  && [ "$checked_in_patches" = "$copied_patches" ] \
+  && [ "$checked_in_patches" = "$applied_patches" ]; then
+  ok 'every checked-in patch is copied and applied exactly once'
+else
+  no 'checked-in patch coverage' "files=[$(tr '\n' ' ' <<<"$checked_in_patches")] copied=[$(tr '\n' ' ' <<<"$copied_patches")] applied=[$(tr '\n' ' ' <<<"$applied_patches")]"
+fi
 
 runtime_stage=$(awk '
   /^FROM .* AS runtime$/ { in_stage = 1; next }
   /^FROM / && in_stage { exit }
   in_stage { print }
 ' "$dockerfile")
+runtime_env=$(grep -v '^[[:space:]]*#' <<<"$runtime_stage")
+if grep -Eq '^(ENV[[:space:]]+|[[:space:]]+)NUT_DEBUG_SYSLOG=stderr([[:space:]]*\\)?[[:space:]]*$' <<<"$runtime_env"; then
+  ok 'runtime image preserves daemon stderr logging'
+else
+  no 'runtime daemon stderr logging' 'NUT_DEBUG_SYSLOG=stderr is absent from the runtime stage'
+fi
+
 pkg_upgrade_instruction=$(printf '%s\n' "$runtime_stage" | awk '
   function emit_if_upgrade() {
     if (index(instruction, "apk upgrade --no-cache") > 0) {
@@ -110,12 +203,21 @@ pkg_upgrade_instruction=$(printf '%s\n' "$runtime_stage" | awk '
     if (active && !found) emit_if_upgrade()
   }
 ')
+# The fixed-string pattern below is the literal Dockerfile interpolation.
+# shellcheck disable=SC2016
 if printf '%s\n' "$runtime_stage" | grep -Eq '^ARG PKG_REFRESH(=|$)' \
   && [ -n "$pkg_upgrade_instruction" ] \
   && printf '%s\n' "$pkg_upgrade_instruction" | grep -Fq '${PKG_REFRESH}'; then
   ok 'PKG_REFRESH is a cache-key input to the runtime package-upgrade instruction'
 else
   no 'runtime package-refresh cache bust' "upgrade instruction: ${pkg_upgrade_instruction:-missing}"
+fi
+
+if grep -Eq -- '^[[:space:]]*--with-user=nut[[:space:]]+--with-group=nut[[:space:]]*\\?$' "$dockerfile"; then
+  ok 'NUT is configured to drop to the nut user and group'
+else
+  no 'NUT privilege-drop configure flags' \
+    'the configure invocation no longer carries --with-user=nut --with-group=nut; upsd, upsmon and the driver all take their unprivileged identity from it'
 fi
 
 report

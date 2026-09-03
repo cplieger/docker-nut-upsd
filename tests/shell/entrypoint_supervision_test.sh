@@ -174,6 +174,37 @@ EXPECTED
   && ok 'teardown_all signals and reaps workers before services' \
   || no 'teardown_all worker lifecycle ordering' "rc=$RUN_RC events=$(tr '\n' ' ' <"$WORK/events") stderr=$(cat "$WORK/stderr")"
 
+cat >"$WORK/drive-teardown-budget.sh" <<'DRIVER'
+#!/usr/bin/env bash
+set -eu
+WATCHDOG_PID=5151
+DBUS_PROBE_PID=6262
+elapsed=0
+
+advance_clock() {
+  elapsed=$(awk -v current="$elapsed" -v delta="$1" 'BEGIN { print current + delta }')
+}
+kill() { return 0; }
+wait() { return 0; }
+sleep() { advance_clock "$1"; }
+stop_services() { advance_clock 9; }
+
+. "$STOP_BG"
+. "$TEARDOWN"
+teardown_all
+printf '%s\n' "$elapsed"
+DRIVER
+chmod +x "$WORK/drive-teardown-budget.sh"
+
+if teardown_elapsed=$(env STOP_BG="$STOP_BG" TEARDOWN="$TEARDOWN" \
+  bash "$WORK/drive-teardown-budget.sh" 2>"$WORK/teardown-budget-stderr") \
+  && awk -v elapsed="$teardown_elapsed" 'BEGIN { exit !(elapsed < 10) }'; then
+  ok 'complete teardown stays inside Docker stop grace'
+else
+  no 'complete teardown stop budget' \
+    "elapsed=${teardown_elapsed:-unknown}s stderr=$(cat "$WORK/teardown-budget-stderr")"
+fi
+
 DOCKERFILE="${DOCKERFILE:-$REPO_ROOT/Dockerfile}"
 healthcheck=$(awk '
   /^FROM runtime AS final$/ { final = 1; next }
@@ -203,8 +234,20 @@ fi
 entry_canonical_line=$(awk '
   /^[[:space:]]*canonicalize_validated_values[[:space:]]*$/ { print NR; exit }
 ' "$SUBJECT")
+probe_vars=$(printf '%s\n' "$healthcheck" | awk '
+  $1 ~ /^[A-Z][A-Z0-9_]*=\$\(printf$/ {
+    var = $1
+    sub(/=.*/, "", var)
+    print var
+  }
+' | sort -u)
+if [ -z "$probe_vars" ]; then
+  printf 'harness error: final-stage HEALTHCHECK has no canonicalized endpoint inputs\n' >&2
+  exit 1
+fi
+
 parity_failures=""
-for var in UPS_NAME API_ADDRESS API_PORT; do
+while IFS= read -r var; do
   entry_default_record=$(awk -v var="$var" '
     index($0, ": \"${" var ":=") {
       value = $0
@@ -251,7 +294,7 @@ for var in UPS_NAME API_ADDRESS API_PORT; do
     continue
   fi
   parity_failures="${parity_failures}${parity_failures:+, }$var"
-done
+done <<<"$probe_vars"
 
 [ -z "$parity_failures" ] \
   && ok 'the healthcheck canonicalizes and defaults its endpoint inputs like the entrypoint' \

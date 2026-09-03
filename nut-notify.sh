@@ -19,7 +19,7 @@ log_value() {
 
 NOTIFYTYPE="${NOTIFYTYPE:-unknown}"
 case "$NOTIFYTYPE" in
-  ONLINE | COMMOK) level=info ;;
+  ONLINE | COMMOK | NOT*) level=info ;;
   FSD | SHUTDOWN) level=error ;;
   *) level=warn ;;
 esac

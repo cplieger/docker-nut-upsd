@@ -6,6 +6,14 @@ readonly DBUS_REPLY_TIMEOUT_MS=3000
 # Above logind's InhibitDelayMaxSec default of 5s (systemd src/login/logind.conf.in:25).
 readonly DBUS_SETTLE_SLEEP=8
 
+# Outer bound covers connect/auth, which --reply-timeout does not: a wedged
+# dbus-daemon must not hang the poweroff path mid-FSD. The brace group's redirect
+# covers the reporting shell too, so its signal-death message reaches the caller.
+dbus_call() {
+  { timeout 5 dbus-send --system --print-reply --reply-timeout="$DBUS_REPLY_TIMEOUT_MS" \
+    --dest=org.freedesktop.login1 /org/freedesktop/login1 "$@"; } 2>&1
+}
+
 # log_value: byte-identical copy of validate.sh's sanitizer — upsmon execs this
 # handler as a standalone process, so it cannot rely on the helper already being
 # sourced. validate.sh owns the BusyBox-tr octal-range rationale; parity across
@@ -34,22 +42,18 @@ printf 'level=error msg="UPS forced shutdown triggered; powering off host"\n' >&
 
 attempt=1
 while [ "$attempt" -le "$DBUS_MAX_ATTEMPTS" ]; do
-  # Outer bound covers connect/auth, which --reply-timeout does not: a wedged
-  # dbus-daemon must not hang this loop mid-FSD. The brace group's redirect
-  # covers the reporting shell too, so its signal-death message lands in detail=.
-  if _out=$({ timeout 5 dbus-send --system --print-reply --reply-timeout="$DBUS_REPLY_TIMEOUT_MS" \
-    --dest=org.freedesktop.login1 /org/freedesktop/login1 \
-    org.freedesktop.login1.Manager.PowerOff boolean:false; } 2>&1); then
+  if _out=$(dbus_call org.freedesktop.login1.Manager.PowerOff boolean:false); then
     printf 'level=info msg="host poweroff dispatched via D-Bus" attempt=%d\n' "$attempt" >&2
     # logind replies before the action runs; PreparingForShutdown tracks delayed_action and is cleared however the queued job ends.
     # Queued failures reach only the host journal (systemd src/login/logind-dbus.c:2307-2312, :1951, :325-344).
     sleep "$DBUS_SETTLE_SLEEP"
-    _settle=$({ timeout 5 dbus-send --system --print-reply --reply-timeout="$DBUS_REPLY_TIMEOUT_MS" \
-      --dest=org.freedesktop.login1 /org/freedesktop/login1 \
-      org.freedesktop.DBus.Properties.Get string:org.freedesktop.login1.Manager \
-      string:PreparingForShutdown; } 2>&1) || :
+    _settle=$(dbus_call org.freedesktop.DBus.Properties.Get \
+      string:org.freedesktop.login1.Manager string:PreparingForShutdown) || :
     case "$_settle" in
-      *'boolean true'*) exit 0 ;;
+      *'boolean true'*)
+        printf 'level=info msg="logind still reports a pending poweroff after the settle wait" attempt=%d\n' "$attempt" >&2
+        exit 0
+        ;;
       *'boolean false'*)
         printf 'level=error msg="D-Bus poweroff failed after logind accepted the request; host poweroff NOT confirmed" attempt=%d detail="%s"\n' "$attempt" "$(log_value "$_settle")" >&2
         clear_killpower
@@ -71,9 +75,7 @@ while [ "$attempt" -le "$DBUS_MAX_ATTEMPTS" ]; do
 done
 
 printf 'level=error msg="D-Bus poweroff failed after %d attempts; host poweroff NOT confirmed" detail="%s"\n' "$DBUS_MAX_ATTEMPTS" "$(log_value "$_out")" >&2
-_inhibitors=$({ timeout 5 dbus-send --system --print-reply --reply-timeout="$DBUS_REPLY_TIMEOUT_MS" \
-  --dest=org.freedesktop.login1 /org/freedesktop/login1 \
-  org.freedesktop.login1.Manager.ListInhibitors; } 2>&1) || :
+_inhibitors=$(dbus_call org.freedesktop.login1.Manager.ListInhibitors) || :
 printf 'level=error msg="D-Bus poweroff inhibitors at failure" detail="%s"\n' "$(log_value "$_inhibitors")" >&2
 clear_killpower
 exit 1

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 # Holds each state alert's range above twice the shipped producer cadence.
+# Assigned config values and the probe fake are consumed by the extracted emitter.
+# shellcheck disable=SC2034,SC2329
 set -u
 
 # shellcheck source-path=SCRIPTDIR
@@ -64,8 +66,21 @@ check_pair() {
   fi
 }
 
+check_published_default() {
+  local alert=$1 var=$2 claim cadence
+  claim=$(rule_text "$alert")
+  cadence=$(default_seconds "$var")
+  if printf '%s\n' "$claim" | grep -Fq "default $cadence"; then
+    ok "$alert publishes $var's shipped default ($cadence)"
+  else
+    no "$alert/$var published default" "the alert annotation no longer names the shipped default $cadence"
+  fi
+}
+
 check_pair UPSCommsLost NOCOMMWARNTIME
 check_pair UPSPowerOffPathBroken DBUS_PROBE_INTERVAL
+check_published_default UPSCommsLost NOCOMMWARNTIME
+check_published_default UPSHardwareFault RBWARNTIME
 
 ENTRYPOINT="$REPO_ROOT/generate-config.sh"
 new_workdir >/dev/null
@@ -104,6 +119,27 @@ if printf '%s\n' "$generated_upsmon" | grep -q '^MONITOR ups@127\.0\.0\.1:3493 '
 else
   no 'UPSProtectionDegraded OVERDURATION contract' \
     'the generated config or the scoped annotation no longer carries the published absence'
+fi
+
+unavailable_claim=$(rule_text UPSProtectionUnavailable)
+if [ -z "$unavailable_claim" ]; then
+  printf 'harness error: UPSProtectionUnavailable annotation was not found\n' >&2
+  exit 1
+fi
+
+offduration_tail=""
+case "$unavailable_claim" in
+  *OFFDURATION*) offduration_tail=${unavailable_claim#*OFFDURATION} ;;
+esac
+
+if printf '%s\n' "$generated_upsmon" | grep -q '^NOTIFYFLAG OFF ' \
+  && printf '%s\n' "$generated_upsmon" | grep -q '^OFFDURATION 30$' \
+  && printf '%s\n' "$offduration_tail" | grep -Eq '^ 30([ .,:]|$)' \
+  && printf '%s\n' "$offduration_tail" | grep -Eq '(force|forced).*shutdown|shutdown.*(force|forced)'; then
+  ok 'UPSProtectionUnavailable publishes the generated upsmon.conf OFFDURATION pin and forced-shutdown consequence'
+else
+  no 'UPSProtectionUnavailable OFFDURATION contract' \
+    'the generated config or scoped annotation no longer carries the published pinned consequence'
 fi
 
 on_battery_annotation=$(awk '

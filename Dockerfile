@@ -18,8 +18,8 @@ WORKDIR /build/libmodbus
 # <sys/ioctl.h> on musl, so modbus-rtu.c fails to compile. Force the type check
 # off to build the portable classic-termios path (as 3.1.x did). Modbus support
 # is unaffected: NUT's modbus drivers run at standard baud rates, so only the
-# termios2 custom-baud RTU path is lost. Remove once upstream libmodbus builds
-# cleanly on musl.
+# termios2 custom-baud RTU path is lost (termios2 arrived in
+# stephane/libmodbus#761). Remove once upstream builds cleanly on musl.
 RUN wget -qO libmodbus.tar.gz \
       "https://github.com/stephane/libmodbus/releases/download/${LIBMODBUS_VERSION}/libmodbus-${LIBMODBUS_VERSION#v}.tar.gz" \
     && printf '%s  %s\n' "${LIBMODBUS_SHA256}" libmodbus.tar.gz | sha256sum -c - \
@@ -161,6 +161,7 @@ RUN echo "OS package refresh: ${PKG_REFRESH}" \
         # util-linux-misc provides `wall`: the shipped upsmon popen()s it in
         # doshutdown() and for every notify type keeping NUT's default WALL bit, so
         # without it /bin/sh writes `wall: not found` onto upsmon's stderr mid-outage.
+        # https://github.com/networkupstools/nut/blob/v2.8.5/clients/upsmon.c#L968
         util-linux-misc \
     && addgroup -S nut \
     && adduser -S -G nut -h /var/run/nut -s /sbin/nologin nut \
@@ -209,17 +210,14 @@ COPY --from=test /tests-passed /tests-passed
 
 # No USER: root is required at container init (see .trivyignore).
 
-# Probe upsd where it listens (upsd_probe_host, lifecycle.sh). upsc's stderr
-# is NOT discarded: it is the only signal in the docker health log separating
-# "Data stale" from "Connection refused" from a timeout.
-#
-# Canonicalize FIRST, default SECOND, mirroring the entrypoint: dockerd execs
-# this probe with the RAW container env, and an LF-only value is non-empty
-# raw, so defaulting from it would probe an empty name, address or port.
-#
-# --start-period covers the ~132s boot the entrypoint ACCEPTS (90s driver +
-# 30s upsd + two <=6s pidfile waits), not the fleet-default 15s.
-#
+# Probe upsd where it listens (upsd_probe_host, lifecycle.sh); upsc's stderr is
+# kept, because it separates "Data stale" from "Connection refused" from a
+# timeout in the docker health log. Canonicalize FIRST, default SECOND like the
+# entrypoint: dockerd execs this probe with the RAW container env, where an
+# LF-only value is non-empty, so defaulting from it would probe an empty name,
+# address or port. --start-period is sized from the entrypoint's 90s driver and
+# 30s upsd bounds plus two nominal 5s pidfile polls, not the 15s default.
+
 # DL3025: this probe sources lifecycle.sh and expands three env vars, which
 # exec form cannot do; this image wraps NUT with a shell entrypoint, so it can
 # never become shell-less.

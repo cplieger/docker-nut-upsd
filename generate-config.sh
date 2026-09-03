@@ -2,9 +2,10 @@
 # generate-config.sh — NUT config file generation helpers.
 # Sourced by entrypoint.sh; not executed directly.
 
-# ---------------------------------------------------------------------------
-# Config generation helpers
-# ---------------------------------------------------------------------------
+# Reclamation consumes this inventory so operator-owned /etc/nut *.tmp.* paths remain untouched.
+# shellcheck disable=SC2034  # consumed by entrypoint.sh boot reclamation
+readonly NUT_STAGED_CONFIGS='ups.conf upsd.conf upsd.users upsmon.conf'
+
 decide_user_overrides() {
   if [ -e /etc/nut/ups.conf.user ]; then
     _uo_ups_conf=true
@@ -46,15 +47,11 @@ _user_override_present() {
   esac
 }
 
-# Reclamation consumes this inventory so operator-owned /etc/nut *.tmp.* paths remain untouched.
-readonly NUT_STAGED_CONFIGS='ups.conf upsd.conf upsd.users upsmon.conf'
-
 # If /etc/nut/<name>.user was present when overrides were decided, copy it over
 # /etc/nut/<name> and return 0 (caller skips generation). Return 1 when no
 # override is present; abort the boot (exit 1) when the decided override cannot
 # be applied, including when its path has since gone away.
 use_user_override() {
-  _uo_probed="${_uo_probed:-} $1"
   if ! _user_override_present "$1"; then
     # A dangling symlink (e.g. a mounted directory of symlinks with a broken
     # target) fails -e and would silently drop the operator's override; name
@@ -84,8 +81,9 @@ use_user_override() {
   # and the override is logged as applied while /etc/nut/<name> is still a
   # directory, so startup fails later with a misleading daemon/config error.
   _uo_dst="/etc/nut/$1"
-  _uo_tmp=$(mktemp "${_uo_dst}.tmp.XXXXXX" 2>/dev/null) || {
-    printf 'level=error msg="failed to create mounted-override staging file; aborting" file=%s.user\n' "$1" >&2
+  _uo_tmp=$(mktemp "${_uo_dst}.tmp.XXXXXX" 2>&1) || {
+    printf 'level=error msg="failed to create mounted-override staging file; aborting" file=%s.user err="%s"\n' \
+      "$1" "$(log_value "$_uo_tmp")" >&2
     exit 1
   }
   if ! cat "${_uo_dst}.user" >"$_uo_tmp" \
@@ -98,8 +96,9 @@ use_user_override() {
 }
 
 _stage_generated() {
-  _sg_tmp=$(mktemp "/etc/nut/$1.tmp.XXXXXX" 2>/dev/null) || {
-    printf 'level=error msg="failed to create generated-config staging file; aborting" file=%s\n' "$1" >&2
+  _sg_tmp=$(mktemp "/etc/nut/$1.tmp.XXXXXX" 2>&1) || {
+    printf 'level=error msg="failed to create generated-config staging file; aborting" file=%s err="%s"\n' \
+      "$1" "$(log_value "$_sg_tmp")" >&2
     exit 1
   }
 }
@@ -280,10 +279,11 @@ generate_upsd_users() {
 # fault. ALARM and OTHER omit SYSLOG because their stock notices interpolate
 # device-controlled strings (NUT clients/upsmon.h) that would otherwise be
 # re-emitted raw on the alert-matched stream.
-# The seven timing directives below are emitted unconditionally: their
-# defaults (entrypoint.sh) are NUT v2.8.5's own (clients/upsmon.c:59-118)
-# and are pinned deliberately, so a NUT bump cannot move the generated
-# file's shutdown-path timing.
+# The timing and criticality directives below are emitted at NUT
+# v2.8.5's own defaults (clients/upsmon.c:59-133), so a NUT bump
+# cannot move the generated file's shutdown decision. OFFDURATION,
+# OBLBDURATION and ALARMCRITICAL are the three that decide whether a
+# state is critical at all; see is_ups_critical.
 _emit_upsmon_conf() {
   cat <<MONEOF || return 1
 MONITOR $UPS_NAME@$(upsd_probe_host):$API_PORT 1 "$_mon_user" "$_mon_password" primary
@@ -297,6 +297,9 @@ FINALDELAY $FINALDELAY
 HOSTSYNC $HOSTSYNC
 NOCOMMWARNTIME $NOCOMMWARNTIME
 RBWARNTIME $RBWARNTIME
+OFFDURATION 30
+OBLBDURATION 0
+ALARMCRITICAL 1
 NOTIFYFLAG ONLINE SYSLOG+EXEC
 NOTIFYFLAG ONBATT SYSLOG+EXEC
 NOTIFYFLAG LOWBATT SYSLOG+EXEC
@@ -352,20 +355,18 @@ generate_all_configs() {
   : "${ADMIN_PASSWORD:?generate_all_configs requires ADMIN_PASSWORD}"
   : "${SHUTDOWN_CMD:?generate_all_configs requires SHUTDOWN_CMD}"
 
-  _uo_probed=''
-
   generate_ups_conf
   generate_upsd_conf
   generate_upsd_users
   generate_upsmon_conf
 
-  # An operator's *.user file the four generators never probed was ignored; from
-  # the log an ignored override and an absent one are otherwise identical.
+  # An operator's *.user file not named by NUT_STAGED_CONFIGS is not one this
+  # image stages; from the log an ignored override and an absent one are otherwise identical.
   for _uo_file in /etc/nut/*.user; do
     [ -e "$_uo_file" ] || [ -L "$_uo_file" ] || continue
     _uo_name=${_uo_file##*/}
     _uo_was_probed=false
-    for _uo_probed_name in $_uo_probed; do
+    for _uo_probed_name in $NUT_STAGED_CONFIGS; do
       if [ "$_uo_probed_name" = "${_uo_name%.user}" ]; then
         _uo_was_probed=true
         break

@@ -12,6 +12,9 @@
 # still needs a real UPS and is covered by the runtime healthcheck.
 #
 # Run locally inside the image:  sh /tmp/tests/smoke.sh
+# Test doubles are called by sourced production code; bare mktemp calls use its default template.
+# Assigned fixture variables likewise feed sourced production functions.
+# shellcheck disable=SC2034,SC2119,SC2120,SC2329
 set -eu
 
 # shellcheck source=/dev/null
@@ -150,6 +153,8 @@ NOTIFYFLAG COMMOK SYSLOG+EXEC
 NOTIFYFLAG COMMBAD SYSLOG+EXEC
 NOTIFYFLAG SHUTDOWN SYSLOG+EXEC
 NOTIFYFLAG REPLBATT SYSLOG+EXEC
+NOTIFYFLAG NOPARENT SYSLOG+EXEC
+NOTIFYFLAG OFF SYSLOG+EXEC
 NOTIFYFLAG BYPASS SYSLOG+EXEC
 NOTIFYFLAG OVER SYSLOG+EXEC
 NOTIFYFLAG NOCOMM SYSLOG+EXEC
@@ -218,7 +223,7 @@ fi
 # Battery thresholds: with no overrides, preserve the UPS hardware LB flag;
 # with LOWBATT_PERCENT set, emit NUT's low-charge override and arm ignorelb.
 if ! (
-  unset LOWBATT_PERCENT LOWBATT_RUNTIME CRITBATT_PERCENT CRITBATT_RUNTIME
+  unset LOWBATT_PERCENT LOWBATT_RUNTIME
   generate_ups_conf >/dev/null 2>&1
   ! grep -q '^    ignorelb$' /etc/nut/ups.conf \
     && ! grep -q '^    override\.battery\.' /etc/nut/ups.conf
@@ -228,7 +233,7 @@ if ! (
 fi
 if ! (
   LOWBATT_PERCENT=20
-  unset LOWBATT_RUNTIME CRITBATT_PERCENT CRITBATT_RUNTIME
+  unset LOWBATT_RUNTIME
   generate_ups_conf >/dev/null 2>&1
   [ "$(grep -c '^    ignorelb$' /etc/nut/ups.conf)" -eq 1 ] \
     && grep -q '^    override\.battery\.charge\.low = 20$' /etc/nut/ups.conf
@@ -538,6 +543,13 @@ if ! grep -q 'level=warn msg="upsmon.conf.user mounted without upsd.users.user' 
   err "FAIL: upsd.users API-pair fallback was not logged at level=warn"
   fail=1
 fi
+powerdown_owner_count=$(grep -cF 'level=info msg="mounted upsmon.conf.user owns POWERDOWNFLAG;' "$FALLBACK_ERR" || :)
+if [ "$powerdown_owner_count" -ne 1 ] \
+  || ! grep -F 'level=info msg="mounted upsmon.conf.user owns POWERDOWNFLAG;' "$FALLBACK_ERR" \
+    | grep -Fq " path=$POWERDOWNFLAG_FILE"; then
+  err "FAIL: mounted upsmon.conf.user emitted $powerdown_owner_count POWERDOWNFLAG ownership advisories, want exactly one with path=$POWERDOWNFLAG_FILE"
+  fail=1
+fi
 rm -f /etc/nut/upsmon.conf.user "$FALLBACK_ERR"
 
 printf '# override fixture\n' >/etc/nut/ups.conf.user
@@ -551,6 +563,13 @@ if ! generate_all_configs >/dev/null 2>"$OVERRIDE_SWEEP_ERR"; then
   err "FAIL: config generation failed while checking mounted-override diagnostics"
   fail=1
 fi
+for override_name in ups.conf upsd.conf upsd.users upsmon.conf; do
+  using_mounted_count=$(grep -cF "level=info msg=\"using mounted $override_name.user\"" "$OVERRIDE_SWEEP_ERR" || :)
+  if [ "$using_mounted_count" -ne 1 ]; then
+    err "FAIL: applied $override_name.user emitted $using_mounted_count using-mounted records, want 1"
+    fail=1
+  fi
+done
 override_warn_count=$(grep -cF 'level=warn msg="mounted override is not a file this image applies; ignoring it"' "$OVERRIDE_SWEEP_ERR" || :)
 if [ "$override_warn_count" -ne 1 ]; then
   err "FAIL: mounted-override sweep emitted $override_warn_count ignored-file warnings, want 1"
@@ -658,21 +677,21 @@ decide_user_overrides
 generate_ups_conf >/dev/null 2>&1
 
 #    Non-regular override refusal (use_user_override): a FIFO planted at an
-#    override path passes a bare existence check and cp then blocks forever
-#    waiting for a writer, hanging config generation with no diagnostic. The
-#    regular-file gate must refuse it with an explicit error BEFORE cp — an
-#    elapsed timeout budget means cp blocked, i.e. the gate failed. BusyBox
-#    timeout (the only one in this image) reports expiry as 143 (128+TERM)
-#    because it execs the command in the parent and signals it from a watchdog;
-#    coreutils' 124 is matched too for portability. Matching 124 alone would
-#    read a blocked cp as a pass and make the gate deletable with this green.
+#    override path passes a bare existence check and cat then blocks forever
+#    waiting for a writer while staging the override. The regular-file gate must
+#    refuse it with an explicit error BEFORE cat — an elapsed timeout budget means
+#    the staged read blocked, i.e. the gate failed. BusyBox timeout (the only one
+#    in this image) reports expiry as 143 (128+TERM) because it execs the command
+#    in the parent and signals it from a watchdog; coreutils' 124 is matched too
+#    for portability. Matching 124 alone would read a blocked cat as a pass and
+#    make the gate deletable with this green.
 mkfifo /etc/nut/ups.conf.user
 FIFO_ERR=$(mktemp)
 fifo_rc=0
 timeout 2 sh -c '. /usr/local/bin/generate-config.sh; decide_user_overrides; generate_ups_conf' \
   >/dev/null 2>"$FIFO_ERR" || fifo_rc=$?
 if [ "$fifo_rc" -eq 0 ] || [ "$fifo_rc" -eq 124 ] || [ "$fifo_rc" -eq 143 ]; then
-  err "FAIL: FIFO at /etc/nut/ups.conf.user was not refused before cp (rc=$fifo_rc; 124/143 = cp blocked until timeout)"
+  err "FAIL: FIFO at /etc/nut/ups.conf.user was not refused before the staged read (rc=$fifo_rc; 124/143 = cat blocked until timeout)"
   fail=1
 fi
 if ! grep -q 'level=error msg="mounted override path is not a regular file' "$FIFO_ERR"; then
@@ -752,7 +771,7 @@ if [ -n "$(ls -A /etc/nut/ups.conf)" ]; then
   fail=1
 fi
 if ls /etc/nut/ups.conf.tmp.* >/dev/null 2>&1; then
-  err "FAIL: generated ups.conf staging file remained after install refusal"
+  err "FAIL: generated ups.conf staging file remained after the destination-directory refusal"
   fail=1
 fi
 rmdir /etc/nut/ups.conf
@@ -1188,6 +1207,20 @@ if (
   err "FAIL: snmp-ups with UPS_PORT=auto was accepted (auto is USB-only)"
   fail=1
 fi
+NETWORK_PORT_ERR=$(mktemp)
+if (
+  UPS_DRIVER='snmp-ups'
+  UPS_PORT='/dev/ttyUSB0'
+  run_validations
+) >/dev/null 2>"$NETWORK_PORT_ERR"; then
+  err "FAIL: snmp-ups with a device-node UPS_PORT was accepted (network drivers require an endpoint)"
+  fail=1
+elif ! grep -Fq 'msg="UPS_PORT must be a host or host:port endpoint for a network driver"' "$NETWORK_PORT_ERR"; then
+  err "FAIL: snmp-ups device-node UPS_PORT was not refused by the network-endpoint guard"
+  err "$(head -c 200 "$NETWORK_PORT_ERR")"
+  fail=1
+fi
+rm -f "$NETWORK_PORT_ERR"
 # A trailing LF on UPS_DRIVER must not dodge the transport check: raw
 # "snmp-ups<LF>" fails driver_transport's literal case match and classifies
 # as "other" (where auto is allowed), so canonicalization must strip it
@@ -1284,7 +1317,13 @@ if ! LIFECYCLE_TOPLEVEL_BAD=$(awk '
   }
   /^[[:space:]]*$/ { next }
   /^[[:space:]]*#/ { next }
-  /^readonly[[:space:]]+[A-Z0-9_]+=/ { next }
+  /^readonly[[:space:]]+[A-Z0-9_]+=/ {
+    rhs = $0
+    sub(/^readonly[[:space:]]+[A-Z0-9_]+=/, "", rhs)
+    sub(/[[:space:]]+#.*$/, "", rhs)
+    if (rhs ~ /\$\(|`/) print NR ":" $0
+    next
+  }
   /^[a-zA-Z_][a-zA-Z0-9_]*\(\)[[:space:]]*\{$/ {
     in_function = 1
     next
@@ -1321,7 +1360,7 @@ DBUS_OUTER_TIMEOUT_S=$(awk '
   }
 ' /usr/local/bin/lifecycle.sh)
 case "$DBUS_REPLY_TIMEOUT_MS:$DBUS_OUTER_TIMEOUT_S" in
-  '' | :* | *: | *[!0-9:]* )
+  :* | *: | *[!0-9:]*)
     err "FAIL: could not read both D-Bus timeout operands from lifecycle.sh"
     fail=1
     ;;
@@ -1772,6 +1811,11 @@ for pem in /var/run/nut-secrets/upsd-selfsigned.pem /etc/nut/upsd-selfsigned.pem
     err "FAIL: self-signed PEM missing the private key: $pem"
     fail=1
   fi
+  first_pem_marker=$(sed -n '/^-----BEGIN /{p;q;}' "$pem")
+  if [ "$first_pem_marker" != '-----BEGIN CERTIFICATE-----' ]; then
+    err "FAIL: self-signed PEM does not place the certificate before its private key: $pem (first marker '$first_pem_marker')"
+    fail=1
+  fi
 done
 # upsd reads CERTFILE as the dropped nut user (ssl_init runs after
 # become_user), so the working copy must be root:nut 640 — and the root-only
@@ -1848,23 +1892,37 @@ else
     fi
   fi
 
-  cp "$tls_exp_pem" /etc/nut/upsd.pem
-  : >"$tls_exp_err"
-  if ! resolve_tls_cert 2>"$tls_exp_err"; then
-    err "FAIL: resolve_tls_cert rejected an expiring operator-mounted certificate"
+  tls_chain_leaf=$(mktemp)
+  tls_chain_key=$(mktemp)
+  tls_chain_pem=$(mktemp)
+  if ! openssl x509 -in /var/run/nut-secrets/upsd-selfsigned.pem -out "$tls_chain_leaf" \
+    || ! openssl pkey -in /var/run/nut-secrets/upsd-selfsigned.pem -out "$tls_chain_key" \
+    || ! cat "$tls_chain_leaf" "$tls_exp_crt" "$tls_chain_key" >"$tls_chain_pem"; then
+    err "FAIL: could not create the two-certificate TLS chain fixture"
+    fail=1
+  elif ! tls_cert_parses "$tls_chain_pem" || tls_cert_fresh "$tls_chain_pem"; then
+    err "FAIL: TLS chain fixture does not isolate a fresh leaf from an expiring later certificate"
     fail=1
   else
-    if ! grep -q 'mounted TLS certificate expires within a day' "$tls_exp_err"; then
-      err "FAIL: expiring mounted TLS certificate did not log its warning"
+    cp "$tls_chain_pem" /etc/nut/upsd.pem
+    : >"$tls_exp_err"
+    if ! resolve_tls_cert 2>"$tls_exp_err"; then
+      err "FAIL: resolve_tls_cert rejected an operator chain with an expiring later certificate"
       fail=1
+    else
+      if ! grep -Fqx 'level=warn msg="a certificate in the served TLS chain expires within a day or has already expired; upsd will still serve it" path=/etc/nut/upsd.pem' "$tls_exp_err"; then
+        err "FAIL: expiring later certificate in the mounted TLS chain did not log the chain-wide warning"
+        fail=1
+      fi
+      if [ "$TLS_CERT_PATH" != "/etc/nut/upsd-mounted.pem" ] \
+        || ! cmp -s "$tls_chain_pem" /etc/nut/upsd-mounted.pem; then
+        err "FAIL: mounted TLS chain with an expiring later certificate was not served through its working copy"
+        fail=1
+      fi
     fi
-    if [ "$TLS_CERT_PATH" != "/etc/nut/upsd-mounted.pem" ] \
-      || ! cmp -s "$tls_exp_pem" /etc/nut/upsd-mounted.pem; then
-      err "FAIL: expiring mounted TLS certificate was not served through its working copy"
-      fail=1
-    fi
+    rm -f /etc/nut/upsd.pem /etc/nut/upsd-mounted.pem
   fi
-  rm -f /etc/nut/upsd.pem /etc/nut/upsd-mounted.pem
+  rm -f "$tls_chain_leaf" "$tls_chain_key" "$tls_chain_pem"
 fi
 rm -f "$tls_exp_key" "$tls_exp_crt" "$tls_exp_pem" "$tls_exp_err"
 

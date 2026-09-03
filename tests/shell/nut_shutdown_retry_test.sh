@@ -54,6 +54,7 @@ _result=$(sed -n "${_call}p" "$DBUS_RESULTS")
 case "$_result" in
   success) printf 'method return\n'; exit 0 ;;
   failure) printf 'D-Bus refused request\n' >&2; exit 1 ;;
+  failure:*) printf '%s\n' "${_result#failure:}" >&2; exit 1 ;;
   *) printf 'unexpected D-Bus call %s\n' "$_call" >&2; exit 94 ;;
 esac
 EOF
@@ -103,6 +104,22 @@ else
   no 'first-attempt success' "rc=$RUN_RC dbus=$(wc -l <"$DBUS_CALLS") timeout=$(wc -l <"$TIMEOUT_CALLS") sleeps=$(wc -l <"$SLEEP_CALLS"); stderr: $(tr '\n' ' ' <"$ERR")"
 fi
 
+container_error_pattern=$(awk '
+  /- alert: UPSContainerError$/ { inrule = 1; next }
+  inrule && /- alert: / { exit }
+  inrule { print }
+' "$REPO_ROOT/alerts/logql.yaml" \
+  | sed -n 's/.*|~ `\([^`]*\)`.*/\1/p' \
+  | head -1)
+initial_record=$(head -n 1 "$ERR")
+if [ -n "$container_error_pattern" ] \
+  && [ "$initial_record" = 'level=error msg="UPS forced shutdown triggered; powering off host"' ] \
+  && printf '%s\n' "$initial_record" | grep -Eq -- "$container_error_pattern"; then
+  ok 'the forced-shutdown opening record matches UPSContainerError'
+else
+  no 'forced-shutdown opening record' "record=[$initial_record] matcher=[$container_error_pattern]"
+fi
+
 run_shutdown failure success
 if [ "$RUN_RC" -eq 0 ] \
   && [ "$(wc -l <"$DBUS_CALLS")" -eq 2 ] \
@@ -135,6 +152,16 @@ if [ "$RUN_RC" -eq 1 ] \
   ok 'three failed attempts clear killpower and report that comms recovery is re-armed'
 else
   no 'terminal-failure killpower cleanup' "rc=$RUN_RC rm=$(tr '\n' ' ' <"$RM_CALLS"); stderr: $(tr '\n' ' ' <"$ERR")"
+fi
+
+run_shutdown 'failure:first refusal' 'failure:second refusal' 'failure:third refusal'
+if [ "$RUN_RC" -eq 1 ] \
+  && grep -qxF 'level=warn msg="D-Bus poweroff failed, retrying" attempt=1 detail="first refusal"' "$ERR" \
+  && grep -qxF 'level=warn msg="D-Bus poweroff failed, retrying" attempt=2 detail="second refusal"' "$ERR" \
+  && grep -qxF 'level=error msg="D-Bus poweroff failed after 3 attempts; host poweroff NOT confirmed" detail="third refusal"' "$ERR"; then
+  ok 'the terminal poweroff failure reports the last attempt detail'
+else
+  no 'per-attempt poweroff failure detail' "rc=$RUN_RC; stderr: $(tr '\n' '|' <"$ERR")"
 fi
 
 poweroff_failed_matcher=$(awk '
@@ -172,7 +199,6 @@ if [ "$RUN_RC" -eq 1 ] \
   && [ ! -s "$INHIBITOR_CALLS" ] \
   && [ "$(wc -l <"$TIMEOUT_CALLS")" -eq 2 ] \
   && [ "$settle_sleep" = 8 ] \
-  && [ "$settle_sleep" -gt 5 ] \
   && [ "$(cat "$RM_CALLS")" = '-f /var/run/nut-secrets/killpower' ] \
   && grep -qxF "$settle_record" "$ERR" \
   && printf '%s\n' "$settle_message" | grep -Eq -- "^${poweroff_failed_matcher}$" \
@@ -211,6 +237,14 @@ if [ "$*" = "$SETTLE_ARGS" ]; then
     malformed) printf 'method return\n   string "not a boolean"\n' ;;
     valueless) printf 'method return\n   variant boolean\n' ;;
     truncated) printf 'method return\n' ;;
+    false_long)
+      _body=$(printf '%0600d' 0)
+      printf 'method return\n   variant boolean false %s\n' "$_body"
+      ;;
+    malformed_long)
+      _body=$(printf '%0600d' 0)
+      printf 'method return\n   string "%s"\n' "$_body"
+      ;;
     *) exit 91 ;;
   esac
   exit 0
@@ -262,6 +296,38 @@ for SETTLE_VALUE in failed empty malformed valueless truncated; do
     no "$SETTLE_VALUE unreadable settle reply" "$(write_settle_observables | tr '\n' ' ')"
   fi
 done
+
+cat >"$BIN/rm" <<'EOF'
+#!/bin/sh
+[ "$#" -eq 2 ] && [ "$1" = -f ] && [ "$2" = /var/run/nut-secrets/killpower ] || exit 92
+printf '%s\n' "$*" >>"$RM_CALLS"
+EOF
+chmod +x "$BIN/rm"
+
+SETTLE_VALUE=false_long
+run_shutdown success
+false_long_rc=$RUN_RC
+false_long_record=$(grep -F 'D-Bus poweroff failed after logind accepted the request' "$ERR" || :)
+false_long_detail=${false_long_record##* detail=\"}
+false_long_detail=${false_long_detail%\"}
+
+SETTLE_VALUE=malformed_long
+run_shutdown success
+malformed_long_rc=$RUN_RC
+malformed_long_record=$(grep -F 'D-Bus poweroff settle state unreadable' "$ERR" || :)
+malformed_long_detail=${malformed_long_record##* detail=\"}
+malformed_long_detail=${malformed_long_detail%\"}
+
+if [ "$false_long_rc" -eq 1 ] \
+  && [ "$malformed_long_rc" -eq 0 ] \
+  && [ "${#false_long_detail}" -eq 512 ] \
+  && [ "${false_long_detail: -3}" = '...' ] \
+  && [ "${#malformed_long_detail}" -eq 512 ] \
+  && [ "${malformed_long_detail: -3}" = '...' ]; then
+  ok 'overlong settle replies stay bounded on both terminal branches'
+else
+  no 'overlong settle reply bounds' "false_rc=$false_long_rc false_length=${#false_long_detail} malformed_rc=$malformed_long_rc malformed_length=${#malformed_long_detail}"
+fi
 SETTLE_VALUE=true
 
 cat >"$BIN/dbus-send" <<'EOF'

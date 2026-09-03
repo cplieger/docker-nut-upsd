@@ -36,10 +36,11 @@ if [ -n "$(stale_nut_pid_paths | head -c 1)" ]; then
 fi
 
 # Clear temps leaked by a kill between mktemp and rm -f/mv. The secrets
-# directory is app-owned; NUT_STAGED_CONFIGS limits cleanup in operator-mountable
-# /etc/nut to names this app stages.
+# directory is app-owned; in operator-mountable /etc/nut cleanup is limited to the
+# names this app stages: the generated configs, plus the two TLS working copies
+# named through the constants that own their destinations so a rename carries.
 _clt_etc=''
-for _clt_name in $NUT_STAGED_CONFIGS; do
+for _clt_name in $NUT_STAGED_CONFIGS "${TLS_CERT_RUNTIME##*/}" "${TLS_CERT_MOUNTED_RUNTIME##*/}"; do
   _clt_etc="$_clt_etc /etc/nut/$_clt_name.tmp.*"
 done
 # Word splitting expands the staged-config inventory into distinct rm arguments.
@@ -124,7 +125,7 @@ fi
 warn_weak_api_password
 
 # ---------------------------------------------------------------------------
-# Input validation (table-driven, from validate.sh)
+# Input validation (from validate.sh)
 # ---------------------------------------------------------------------------
 run_validations
 
@@ -321,7 +322,7 @@ printf 'level=info msg="NUT services started successfully"\n' >&2
 # Start the USB comms watchdog (recovers from UPS-initiated re-enumeration).
 if [ "$COMMS_WATCHDOG" = "true" ] && [ "$COMMS_CHECK_INTERVAL" -ge 1 ]; then
   printf 'level=info msg="starting comms watchdog" interval=%ss recovery_timeout=%ss\n' \
-    "$COMMS_CHECK_INTERVAL" "$COMMS_RECOVERY_TIMEOUT" >&2
+    "$COMMS_CHECK_INTERVAL" "$COMMS_RECOVERY_TIMEOUT" >&2 || :
   comms_watchdog &
   WATCHDOG_PID=$!
 else
@@ -333,7 +334,7 @@ fi
 # broken mount alerts in advance instead of failing during a forced shutdown.
 if [ "$SHUTDOWN_ON_BATTERY_CRITICAL" = "true" ]; then
   if [ "$DBUS_PROBE_INTERVAL" -ge 1 ]; then
-    printf 'level=info msg="starting D-Bus poweroff-path probe" interval=%ss\n' "$DBUS_PROBE_INTERVAL" >&2
+    printf 'level=info msg="starting D-Bus poweroff-path probe" interval=%ss\n' "$DBUS_PROBE_INTERVAL" >&2 || :
     dbus_liveness_probe &
     DBUS_PROBE_PID=$!
   else
@@ -372,14 +373,14 @@ while kill -0 "$UPSMON_PID" 2>/dev/null; do
   if [ -n "${WATCHDOG_PID:-}" ] && ! kill -0 "$WATCHDOG_PID" 2>/dev/null; then
     _wd_rc=0
     wait "$WATCHDOG_PID" 2>/dev/null || _wd_rc=$?
-    printf 'level=error msg="comms watchdog exited; starting a fresh one, whose recovery cadence restarts from zero" rc=%d\n' "$_wd_rc" >&2
+    printf 'level=error msg="comms watchdog exited; starting a fresh one, whose recovery cadence restarts from zero" rc=%d\n' "$_wd_rc" >&2 || :
     comms_watchdog &
     WATCHDOG_PID=$!
   fi
   if [ -n "${DBUS_PROBE_PID:-}" ] && ! kill -0 "$DBUS_PROBE_PID" 2>/dev/null; then
     _dp_rc=0
     wait "$DBUS_PROBE_PID" 2>/dev/null || _dp_rc=$?
-    printf 'level=error msg="D-Bus poweroff-path probe exited; starting a fresh one, whose unreachable/recovered state restarts from zero" rc=%d\n' "$_dp_rc" >&2
+    printf 'level=error msg="D-Bus poweroff-path probe exited; starting a fresh one, whose unreachable/recovered state restarts from zero" rc=%d\n' "$_dp_rc" >&2 || :
     dbus_liveness_probe &
     DBUS_PROBE_PID=$!
   fi

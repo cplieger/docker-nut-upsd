@@ -55,7 +55,7 @@ resolve() {
 
 regenerated() {
   [ "${#PW}" -eq "$PASSWORD_LENGTH" ] && [ "$PW" != "$1" ] \
-    && grep -q 'cached ADMIN_PASSWORD invalid (wrong size, unreadable, or not from the generated alphabet); regenerating' "$ERR"
+    && grep -q 'cached ADMIN_PASSWORD invalid (wrong size, shortened by trailing whitespace, unreadable, or not from the generated alphabet); regenerating' "$ERR"
 }
 
 # n_chars <count> <char>: a repeated-byte string built without seq.
@@ -77,9 +77,9 @@ resolve
 
 # --- 2. an OVERSIZED cache is not silently truncated -----------------------------
 #
-# Isolates the `stat -c %s` clause: the read is capped at PASSWORD_LENGTH, so
+# Isolates the `stat -Lc %s` clause: the read is capped at PASSWORD_LENGTH, so
 # without the size test a grown or corrupted cache yields a well-formed
-# PASSWORD_LENGTH-character prefix and is trusted.
+# PASSWORD_LENGTH-character prefix and is trusted. This fixture is not a symlink.
 BIG=$(n_chars $((PASSWORD_LENGTH * 3)) A)
 printf '%s' "$BIG" >"$CACHE"
 resolve
@@ -111,10 +111,33 @@ regenerated "$SHORT_BY_LF" \
   && ok 'a right-sized cache shortened by command substitution is regenerated at full length' \
   || no 'command-substitution-shortened cache' "PW=[$PW] len=${#PW}; log: $(head -c 200 "$ERR")"
 
+# --- 3c. a symlink is measured through the same target that head reads -----------
+#
+# The relative link text is exactly PASSWORD_LENGTH bytes. Plain `stat -c`
+# therefore accepts the link itself while `head` follows it into a longer file.
+SYMLINK_NAME=$(n_chars "$PASSWORD_LENGTH" s)
+SYMLINK_TARGET="$WORK/$SYMLINK_NAME"
+FOREIGN_PREFIX=$(n_chars "$PASSWORD_LENGTH" F)
+printf '%s%s%s' "$FOREIGN_PREFIX" "$FOREIGN_PREFIX" "$FOREIGN_PREFIX" >"$SYMLINK_TARGET"
+rm -f "$CACHE"
+ln -s "$SYMLINK_NAME" "$CACHE"
+if [ "${#SYMLINK_NAME}" -ne "$PASSWORD_LENGTH" ] \
+  || [ "$(stat -c %s "$CACHE")" -ne "$PASSWORD_LENGTH" ] \
+  || [ "$(stat -Lc %s "$CACHE")" -le "$PASSWORD_LENGTH" ]; then
+  no 'symlink-cache fixture' 'the link text and target do not isolate follow-vs-lstat size'
+else
+  resolve
+  [ "${#PW}" -eq "$PASSWORD_LENGTH" ] && [ "$PW" != "$FOREIGN_PREFIX" ] \
+    && [ ! -L "$CACHE" ] && [ "$(cat "$CACHE")" = "$PW" ] \
+    && grep -q 'cached ADMIN_PASSWORD invalid' "$ERR" \
+    && ok 'a symlink to a longer credential is rejected, regenerated, and replaced' \
+    || no 'symlinked credential cache' "PW=[$PW] link=$([ -L "$CACHE" ] && printf yes || printf no); log: $(head -c 200 "$ERR")"
+fi
+
 # --- 4. an undersized cache is rejected ------------------------------------------
 #
-# The truncated-write shape an interrupted write actually produces; cases 2 and 3
-# isolate the size/length clauses individually.
+# The truncated-write shape an interrupted write actually produces; cases 2 and
+# 3b isolate the size and generated-value length clauses independently.
 printf 'short' >"$CACHE"
 resolve
 regenerated "$GOOD" \
@@ -132,6 +155,7 @@ regenerated "$GOOD" \
 # test) runs for real. Asserts status AND the absence of a cached weak value,
 # not just the log line.
 rm -f "$CACHE"
+# Invoked by the extracted credential generator.
 # shellcheck disable=SC2329
 base64() {
   printf 'abc'

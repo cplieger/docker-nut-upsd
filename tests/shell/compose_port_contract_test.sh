@@ -27,6 +27,8 @@ if [ "$(printf '%s\n' "$mapping" | grep -c .)" -ne 1 ]; then
 fi
 container_port=${mapping#*:}
 
+# The sed program matches the literal parameter expansion in entrypoint.sh.
+# shellcheck disable=SC2016
 default_port=$(sed -n 's/^: "${API_PORT:=\([0-9][0-9]*\)}"$/\1/p' "$entrypoint")
 if [ -z "$default_port" ]; then
   printf 'harness error: no numeric API_PORT default found in entrypoint.sh\n' >&2

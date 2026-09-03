@@ -112,6 +112,7 @@ cat >"$WORK/drive-temp-cleanup.sh" <<'DRIVER'
 set -euf
 . "$VALIDATE"
 . "$GENERATE_CONFIG"
+. "$SECRETS"
 WD_RESTART_CAPTURE_PREFIX="$WORK/wd-restart"
 STOP_CMD_CAPTURE_PREFIX="$WORK/stop-cmd"
 
@@ -132,6 +133,7 @@ run_temp_cleanup() {
   : >"$WORK/stderr"
   if env MODE="$1" TEMP_BLOCK="$TEMP_BLOCK" WORK="$WORK" RM_ARGS="$WORK/rm-args" \
     VALIDATE="$REPO_ROOT/validate.sh" GENERATE_CONFIG="$REPO_ROOT/generate-config.sh" \
+    SECRETS="$REPO_ROOT/secrets.sh" \
     bash "$WORK/drive-temp-cleanup.sh" >"$WORK/stdout" 2>"$WORK/stderr"; then
     RUN_RC=0
   else
@@ -140,22 +142,40 @@ run_temp_cleanup() {
 }
 
 run_temp_cleanup success
-expected_args=$(cat <<EOF
--f
-$WORK/wd-restart.*
-$WORK/stop-cmd.*
-/var/run/nut-secrets/*.tmp.*
-/etc/nut/ups.conf.tmp.*
-/etc/nut/upsd.conf.tmp.*
-/etc/nut/upsd.users.tmp.*
-/etc/nut/upsmon.conf.tmp.*
-EOF
+producer_prefixes=$(awk '
+  FILENAME ~ /generate-config[.]sh$/ && $1 == "_stage_generated" {
+    print "/etc/nut/" $2 ".tmp.*"
+    next
+  }
+  FILENAME ~ /secrets[.]sh$/ && $1 == "readonly" && $2 ~ /^TLS_CERT_[A-Z_]+=\/etc\/nut\// {
+    split($2, pair, "=")
+    destination[pair[1]] = pair[2]
+    next
+  }
+  FILENAME ~ /secrets[.]sh$/ && $1 == "_install_cert_working_copy" {
+    name = $3
+    gsub(/["$]/, "", name)
+    if (!(name in destination)) {
+      printf "harness error: unresolved TLS working-copy destination %s\n", name > "/dev/stderr"
+      failed = 1
+      next
+    }
+    print destination[name] ".tmp.*"
+  }
+  END { if (failed) exit 1 }
+' "$REPO_ROOT/generate-config.sh" "$REPO_ROOT/secrets.sh" | sort -u) || exit 1
+expected_args=$(
+  {
+    printf '%s\n' -f "$WORK/wd-restart.*" "$WORK/stop-cmd.*" /var/run/nut-secrets/'*.tmp.*'
+    printf '%s\n' "$producer_prefixes"
+  } | sort -u
 )
+actual_args=$(sort -u "$WORK/rm-args")
 [ "$RUN_RC" -eq 0 ] && [ ! -s "$WORK/stderr" ] \
-  && [ "$(cat "$WORK/rm-args")" = "$expected_args" ] \
-  && ok 'startup submits every owned temporary-file namespace for reclamation' \
-  || no 'temporary-file namespace reclamation' \
-    "rc=$RUN_RC args=$(tr '\n' ' ' <"$WORK/rm-args") stderr=$(cat "$WORK/stderr")"
+  && [ "$actual_args" = "$expected_args" ] \
+  && ok 'startup submits every in-container staging producer namespace for reclamation without claiming unrelated /etc/nut names' \
+  || no 'producer-derived temporary-file namespace reclamation' \
+    "rc=$RUN_RC expected=$(printf '%s' "$expected_args" | tr '\n' ' ') actual=$(printf '%s' "$actual_args" | tr '\n' ' ') stderr=$(cat "$WORK/stderr")"
 
 run_temp_cleanup failure
 warning_count=$(grep -c 'crash-leaked temp file from a previous lifecycle; continuing' "$WORK/stderr" || true)
