@@ -176,6 +176,22 @@ done
   && ok 'every NUT event the alert rules match carries EXEC in the generated upsmon.conf' \
   || no 'NOTIFYFLAG routing' "alerts/logql.yaml matches these events but $GENERATOR does not route them to NOTIFYCMD:$_unrouted"
 
+# --- 1c. every routed event is matched or named as deliberately unalerted --------
+# The reverse of 1b fails silently: an EXEC-routed event with no rule is
+# invisible elsewhere. Read both sets at run time and accept an unmatched event
+# only when the header names it; no inventory count or exception list is pinned.
+routed_events=$(sed -n 's/^NOTIFYFLAG \([A-Z][A-Z0-9]*\) .*EXEC.*$/\1/p' "$GENERATOR" | sort -u)
+matched_events=$(sed -n 's/.*| logfmt | event=~*"\([^"]*\)".*/\1/p' "$ALERTS" | tr '|' '\n' | sort -u)
+header_text=$(awk '/^groups:/ { exit } { print }' "$ALERTS")
+_unexcused=""
+for _ev in $(comm -23 <(printf '%s\n' "$routed_events") <(printf '%s\n' "$matched_events")); do
+  printf '%s\n' "$header_text" | grep -qw -- "$_ev" || _unexcused="$_unexcused $_ev"
+done
+[ -n "$routed_events" ] && [ -z "$_unexcused" ] \
+  && ok 'every routed event is matched by an alert rule or named in the header as deliberately unalerted' \
+  || no 'routed alert coverage' \
+    "routed=$(printf '%s' "$routed_events" | tr '\n' ' ')| unexcused and unmatched:$_unexcused"
+
 # --- 2. the record fields the logfmt parser and the matchers both depend on --------
 #
 # Field presence AND, for event, position: logfmt binds the first occurrence

@@ -167,6 +167,7 @@ nut-upsd has no metrics endpoint; its operational state is in its logs. Its `ups
 | `UPSLowBattery` | a `LOWBATT` event: the UPS raised its low-battery flag (on battery plus low battery starts the shutdown sequence) | critical |
 | `UPSForcedShutdown` | an `FSD`/`SHUTDOWN` event: the shutdown sequence has started | critical |
 | `UPSHostSyncExpired` | `upsmon` logged `Host sync timer expired, forcing shutdown`: a secondary was still logged in when HOSTSYNC ran out, so the primary shut down without it | warning |
+| `UPSNotifyExecFailed` | `upsmon` could not execute `NOTIFYCMD`, so structured UPS event records stopped | warning |
 | `UPSCommsLost` | a `NOCOMM` event: upsmon could not reach the UPS for `NOCOMMWARNTIME` seconds (default 300) | warning |
 | `UPSHardwareFault` | a `REPLBATT`/`ALARM` event: the UPS reports a worn or missing battery, a fan failure, overheat, or a charger fault | warning |
 | `UPSProtectionDegraded` | a `BYPASS`/`OVER` event: the UPS no longer protects the load or the load exceeds its rating | warning |

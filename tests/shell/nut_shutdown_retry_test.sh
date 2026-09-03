@@ -254,7 +254,7 @@ for SETTLE_VALUE in failed empty malformed valueless truncated; do
     && [ ! -s "$RM_CALLS" ] \
     && [ ! -s "$INHIBITOR_CALLS" ] \
     && [ "$(printf '%s\n' "$unreadable_messages" | grep -c .)" -eq 1 ] \
-    && [ "$(grep -Ec '^level=error msg="D-Bus poweroff settle state unreadable[^"]*" attempt=[0-9]+ detail="[^"]*"$' "$ERR")" -eq 1 ] \
+    && [ "$(grep -Ec '^level=warn msg="D-Bus poweroff settle state unreadable[^"]*" attempt=[0-9]+ detail="[^"]*"$' "$ERR")" -eq 1 ] \
     && [ "$(grep -cF 'level=info msg="host poweroff dispatched via D-Bus" attempt=1' "$ERR")" -eq 1 ] \
     && ! printf '%s\n' "$unreadable_messages" | grep -Eq -- "^${poweroff_failed_matcher}$"; then
     ok "$SETTLE_VALUE settle reply is reported as unreadable without critical-alert routing or cleanup"

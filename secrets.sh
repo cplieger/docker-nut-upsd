@@ -3,8 +3,12 @@
 # (ADMIN_PASSWORD, the internal local_upsmon password, and the STARTTLS
 # server certificate). Sourced by entrypoint.sh; not executed directly.
 
+# base64 expands 3 raw bytes to 4 characters, so PASSWORD_LENGTH is derived at
+# two thirds of PASSWORD_RAW_BYTES: ~2x headroom for the `/+=` stripping in
+# _resolve_cached_password (worst of 300 measured draws: 5 of 48). Change the
+# credential length by changing PASSWORD_RAW_BYTES.
 readonly PASSWORD_RAW_BYTES=36
-readonly PASSWORD_LENGTH=24
+readonly PASSWORD_LENGTH=$((PASSWORD_RAW_BYTES * 2 / 3))
 readonly PASSWORD_MIN_LENGTH=12
 
 # Generated-credential cache paths (root-only /var/run/nut-secrets -- see

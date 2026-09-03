@@ -14,6 +14,20 @@
 # windows, and the severity labels are starting points; adjust the container
 # selector to your deployment.
 #
+# upsmon also writes its own unstructured lines to this stream because the image
+# runs it in the foreground. These include its LOG_NOTICE copy of every
+# SYSLOG-flagged event, warnings such as "assuming dead" and "Too few UPS(es)
+# are healthy", and process errors. They carry no level= prefix and no logfmt
+# fields. Only UPSHostSyncExpired and UPSNotifyExecFailed match specific raw
+# diagnostics; read the rest in the log.
+#
+# The generated upsmon.conf routes fifteen events to NOTIFYCMD; the event rules
+# read twelve. COMMBAD (every failed poll, including each driver bounce the
+# comms watchdog performs), COMMOK (its recovery), and OTHER (status tokens
+# upsmon does not classify) are deliberately unalerted. They reach the log with
+# an event= field and no rule here on purpose. An event= line with no alert is
+# one of those three or the label collision below, not a missing rule.
+#
 # The event and msg rules below read PARSED logfmt fields, so a token inside a
 # quoted value cannot match one; the level-prefix rule (UPSContainerError) reads
 # the line position instead, deliberately. One consequence of the parser: where a
@@ -157,8 +171,29 @@ groups:
             secondary. This is a raw upsmon diagnostic rather than an
             event=<TYPE> line, so it carries no level= prefix and no logfmt
             fields, which is why the filter is a plain substring match and not
-            the `| logfmt` shape its nine siblings use. TRANSITION record,
-            emitted once per forced-shutdown attempt that timed out.
+            the `| logfmt` shape used by the event and parsed-msg rules.
+            TRANSITION record, emitted once per forced-shutdown attempt that
+            timed out.
+      - alert: UPSNotifyExecFailed
+        expr: |
+          sum by (container) (count_over_time(
+            {container="nut-upsd"}
+            |= `execvp(` |= `failed` [15m]
+          )) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "nut-upsd could not exec its NOTIFYCMD ({{ $labels.container }})"
+          description: >
+            upsmon forked to run NOTIFYCMD and the exec failed (upstream logs
+            "execvp(<cmd>) failed" from the child). Every event=<TYPE> record
+            this ruleset keys on comes from that handler, so while this
+            persists the seven event= rules are blind; for ALARM and OTHER
+            (wired EXEC-only) the event is lost outright. This is reachable
+            only with a mounted upsmon.conf.user whose NOTIFYCMD is wrong or
+            not executable; the generated config wires the shipped handler.
+            Fix the NOTIFYCMD path or permissions in the mounted file.
       - alert: UPSCommsLost
         expr: |
           sum by (container) (count_over_time(
