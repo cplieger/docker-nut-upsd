@@ -212,4 +212,80 @@ run_comm_match /usr/lib/nut/usbhid-ups
   && ok 'the comm fallback refuses an unreadable comm file' \
   || no 'unreadable comm' 'a failed comm read was accepted'
 
+# --- 7. TERM reaches PID 1's trap while the gate is polling ----------------------
+#
+# The poll's sleep is backgrounded and `wait`ed on (lifecycle.sh:111-112) so a
+# SIGTERM during the boot gate reaches the trap immediately; a foreground sleep
+# defers the pending trap until it returns. Nothing else in the suite or in
+# tests/smoke.sh observes that, so deleting the `&` and the `wait` is invisible.
+#
+# Every signal here goes through `command kill`, as the earlier cases do with
+# `command head`: the file-scope kill stub answers `-0` from LIVE_PIDS and
+# swallows every other signal, so the driver would never be signalled and would
+# be declared finished before it was.
+BUSYBOX=$(command -v busybox) || {
+  printf 'harness error: busybox is required to test PID 1 signal timing\n' >&2
+  exit 1
+}
+
+# The stub sleeps 3s rather than "$1": the assertion must not depend on the
+# shipped interval, because a 0.1s foreground sleep also returns inside any
+# bound this harness can measure, and the case would then pin nothing.
+cat >"$WORK/drive-pidfile-signal.sh" <<'DRIVER'
+#!/bin/sh
+set -eu
+. "$SUBJECT"
+read_pidfile() { :; }
+sleep() {
+  : >"$READY"
+  "$BUSYBOX" sleep 3
+}
+trap 'exit 0' TERM
+wait_for_pidfile "signal latency probe" /nonexistent /bin/false >/dev/null 2>&1
+DRIVER
+
+env SUBJECT="$SUBJECT" READY="$WORK/pidfile-signal-ready" BUSYBOX="$BUSYBOX" \
+  "$BUSYBOX" ash "$WORK/drive-pidfile-signal.sh" \
+  >"$WORK/pidfile-signal-stdout" 2>"$WORK/pidfile-signal-stderr" &
+signal_driver_pid=$!
+
+ready=0
+for _ in $(seq 1 40); do
+  if [ -e "$WORK/pidfile-signal-ready" ]; then
+    ready=1
+    break
+  fi
+  sleep 0.05
+done
+if [ "$ready" -eq 1 ]; then
+  command kill -TERM "$signal_driver_pid"
+fi
+
+# Half a second, then SIGKILL: a deferred handler must fail this case, never hang
+# the file. 137 is not a status the green path can produce.
+finished=0
+for _ in $(seq 1 10); do
+  if ! command kill -0 "$signal_driver_pid" 2>/dev/null; then
+    finished=1
+    break
+  fi
+  sleep 0.05
+done
+if [ "$finished" -eq 1 ]; then
+  if wait "$signal_driver_pid"; then
+    RUN_RC=0
+  else
+    RUN_RC=$?
+  fi
+else
+  command kill -KILL "$signal_driver_pid" 2>/dev/null || true
+  wait "$signal_driver_pid" 2>/dev/null || true
+  RUN_RC=137
+fi
+
+[ "$ready" -eq 1 ] && [ "$finished" -eq 1 ] && [ "$RUN_RC" -eq 0 ] \
+  && ok 'TERM reaches the trap while the PID-file gate is polling' \
+  || no 'PID-file poll signal latency' \
+    "ready=$ready finished=$finished rc=$RUN_RC stderr=$(cat "$WORK/pidfile-signal-stderr")"
+
 report

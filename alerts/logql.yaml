@@ -143,8 +143,11 @@ groups:
           description: >
             nut-upsd logged an FSD/SHUTDOWN event: the shutdown sequence has
             started. With SHUTDOWN_ON_BATTERY_CRITICAL=true, the container
-            attempts a host poweroff; UPSPowerOffFailed reports its outcome,
-            while UPSPowerOffPathBroken watches the same path predictively.
+            attempts a host poweroff; UPSPowerOffFailed reports an attempt that
+            failed or was refuted, but not one whose settle state was unreadable
+            (that record is level=warn and no rule here matches it), so a silent
+            UPSPowerOffFailed is not confirmation the host powered off.
+            UPSPowerOffPathBroken watches the same path predictively.
             With the shipped default (false), nut-shutdown-noop.sh logs the
             event, no host is powered off, upsmon's privileged parent exits
             after SHUTDOWNCMD, and this container exits with it. The example's

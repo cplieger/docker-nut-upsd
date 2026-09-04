@@ -453,4 +453,62 @@ else
     "ready=$ready entered=$entered finished=$finished rc=$RUN_RC records=$shutdown_records events=$(tr '\n' ' ' <"$WORK/events") stderr=$(tr '\n' ' ' <"$WORK/stderr")"
 fi
 
+cat >"$WORK/drive-nonzero-sleep-wait.sh" <<'DRIVER'
+#!/bin/sh
+set -eu
+UPSMON_PID=4242
+WATCHDOG_PID=""
+DBUS_PROBE_PID=""
+API_PORT=3493
+
+sleep() { :; }
+kill() {
+  [ "$1" = -0 ] && [ "$2" = "$UPSMON_PID" ] || return 1
+  _calls=$(wc -l <"$LIVENESS_CALLS")
+  printf '%s\n' "$2" >>"$LIVENESS_CALLS"
+  # The loop probes upsmon TWICE per iteration (the while head, then the
+  # post-wait `|| break`), so the fifth probe is what ends two full iterations.
+  [ "$_calls" -lt 4 ]
+}
+wait() {
+  if [ "$1" = "$UPSMON_PID" ]; then
+    return 0
+  fi
+  printf '%s\n' "$1" >>"$SLEEP_WAITS"
+  return 143
+}
+upsd_responsive() {
+  printf 'probe\n' >>"$PROBE_CALLS"
+  return 0
+}
+upsd_probe_host() { printf '127.0.0.1'; }
+teardown_all() { printf 'teardown\n' >>"$TEARDOWN_CALLS"; }
+
+. "$BLOCK"
+DRIVER
+chmod +x "$WORK/drive-nonzero-sleep-wait.sh"
+
+: >"$WORK/nonzero-liveness"
+: >"$WORK/nonzero-sleep-waits"
+: >"$WORK/nonzero-probes"
+: >"$WORK/nonzero-teardown"
+: >"$WORK/nonzero-stderr"
+if env BLOCK="$BLOCK" LIVENESS_CALLS="$WORK/nonzero-liveness" \
+  SLEEP_WAITS="$WORK/nonzero-sleep-waits" PROBE_CALLS="$WORK/nonzero-probes" \
+  TEARDOWN_CALLS="$WORK/nonzero-teardown" \
+  "$BUSYBOX" ash "$WORK/drive-nonzero-sleep-wait.sh" \
+  >"$WORK/nonzero-stdout" 2>"$WORK/nonzero-stderr"; then
+  RUN_RC=0
+else
+  RUN_RC=$?
+fi
+
+[ "$RUN_RC" -eq 0 ] \
+  && [ "$(wc -l <"$WORK/nonzero-sleep-waits")" -eq 2 ] \
+  && [ "$(wc -l <"$WORK/nonzero-probes")" -eq 2 ] \
+  && [ "$(wc -l <"$WORK/nonzero-teardown")" -eq 1 ] \
+  && ok 'nonzero background-sleep waits do not let errexit bypass supervision or teardown' \
+  || no 'nonzero supervision sleep wait' \
+    "rc=$RUN_RC waits=$(wc -l <"$WORK/nonzero-sleep-waits") probes=$(wc -l <"$WORK/nonzero-probes") teardown=$(wc -l <"$WORK/nonzero-teardown") stderr=$(cat "$WORK/nonzero-stderr")"
+
 report
