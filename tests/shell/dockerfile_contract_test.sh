@@ -80,6 +80,61 @@ else
   no 'source archive checksum ordering' "failed archives: ${failed_archives:-all}"
 fi
 
+publisher_verified=0
+failed_publishers=""
+for spec in \
+  'netsnmp.tar.gz=NETSNMP_SHA256' \
+  'nut.tar.gz=NUT_SHA256'; do
+  archive=${spec%%=*}
+  sha=${spec#*=}
+  if awk -v archive="$archive" -v sha="$sha" '
+    function assess(    lines, count, i, offset, line, signature, checksum, extraction) {
+      if (index(instruction, archive) == 0) return
+      found = 1
+      count = split(instruction, lines, "\n")
+      offset = 0
+      for (i = 1; i <= count; i++) {
+        line = lines[i]
+        if (index(line, "gpgv ") > 0 && index(line, archive) > 0) signature = offset + index(line, "gpgv ")
+        if (index(line, "\"${" sha "}\" " archive) > 0 && index(line, "sha256sum -c -") > 0) checksum = offset + index(line, "sha256sum -c -")
+        if (index(line, "tar xz --strip-components=1 -f " archive) > 0) extraction = offset + index(line, "tar xz")
+        offset += length(line) + 1
+      }
+      if (signature > 0 && checksum > 0 && extraction > signature && extraction > checksum) valid = 1
+    }
+    /^RUN / {
+      if (active) assess()
+      instruction = $0
+      active = 1
+      if ($0 !~ /\\[[:space:]]*$/) {
+        assess()
+        active = 0
+      }
+      next
+    }
+    active {
+      instruction = instruction "\n" $0
+      if ($0 !~ /\\[[:space:]]*$/) {
+        assess()
+        active = 0
+      }
+    }
+    END {
+      if (active) assess()
+      exit !(found && valid)
+    }
+  ' "$dockerfile"; then
+    publisher_verified=$((publisher_verified + 1))
+  else
+    failed_publishers="${failed_publishers}${failed_publishers:+, }$archive"
+  fi
+done
+if [ "$publisher_verified" -eq 2 ]; then
+  ok 'signed source archives are publisher- and checksum-verified before extraction'
+else
+  no 'source archive publisher verification ordering' "failed archives: ${failed_publishers:-all}"
+fi
+
 source_components=$(awk '
   /^# renovate: datasource=github-(releases|tags) depName=/ { count++ }
   END { print count + 0 }
@@ -169,6 +224,23 @@ runtime_stage=$(awk '
   /^FROM / && in_stage { exit }
   in_stage { print }
 ' "$dockerfile")
+
+exposed_port=$(awk '
+  $1 == "EXPOSE" && $2 ~ /^[0-9][0-9]*$/ { print $2 }
+' <<<"$runtime_stage")
+entrypoint_port=$(sed -n \
+  's/^: "${API_PORT:=\([0-9][0-9]*\)}"$/\1/p' \
+  "$REPO_ROOT/entrypoint.sh")
+
+if [ "$(printf '%s\n' "$exposed_port" | grep -c .)" -eq 1 ] \
+  && [ "$(printf '%s\n' "$entrypoint_port" | grep -c .)" -eq 1 ] \
+  && [ "$exposed_port" = "$entrypoint_port" ]; then
+  ok "runtime image exposes its API_PORT default ($entrypoint_port)"
+else
+  no 'EXPOSE/API_PORT contract' \
+    "EXPOSE=${exposed_port:-missing} API_PORT default=${entrypoint_port:-missing}"
+fi
+
 runtime_env=$(grep -v '^[[:space:]]*#' <<<"$runtime_stage")
 if grep -Eq '^(ENV[[:space:]]+|[[:space:]]+)NUT_DEBUG_SYSLOG=stderr([[:space:]]*\\)?[[:space:]]*$' <<<"$runtime_env"; then
   ok 'runtime image preserves daemon stderr logging'

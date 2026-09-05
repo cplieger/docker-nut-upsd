@@ -8,10 +8,11 @@
 # also corrupt or split the error line that reports it. The octal RANGE
 # \040-\176 is deliberate: BusyBox tr treats a complemented character CLASS
 # (tr -c '[:print:]') as a literal set, mangling every value. LC_ALL=C pins
-# the byte semantics.
+# the byte semantics. The marker reports whether the caller exceeded 512
+# characters; cut only bounds the captured sanitized value.
 log_value() {
-  _lv=$(printf '%s' "$1" | tr -d '\\"' | LC_ALL=C tr -c '\040-\176' ' ' | cut -c 1-513)
-  if [ "${#_lv}" -le 512 ]; then
+  _lv=$(printf '%s' "$1" | tr -d '\\"' | LC_ALL=C tr -c '\040-\176' ' ' | cut -c 1-512)
+  if [ "${#1}" -le 512 ]; then
     printf '%s' "$_lv"
   else
     printf '%.509s...' "$_lv"
@@ -138,20 +139,15 @@ validate_no_whitespace() {
 }
 
 validate_nut_word() {
-  # NUT parseconf will not preserve every byte, and this app's env-var-to-config
-  # mapping is the only place that can name the variable: common/parseconf.c
-  # addchar() discards every byte below 0x20 or above 0x7F (CVE-2012-2944, one
-  # byte wider than this check) printing only the byte, and stops appending at
-  # PCONF_DEFAULT_WORDLEN_LIMIT (512) with no message at all — so a credential
-  # is stored as a password no client can send.
-  case "$2" in
-    *[!' '-'~']*)
-      printf 'level=error msg="env var contains a byte NUT will not preserve (ASCII 0x20-0x7E only)" var=%s\n' "$1" >&2
-      return 1
-      ;;
-  esac
-  if [ "${#2}" -gt 512 ]; then
-    printf 'level=error msg="env var is longer than NUT 512-byte word limit" var=%s length=%d\n' "$1" "${#2}" >&2
+  # upsd and its clients apply the same parseconf byte filter, so mixed
+  # non-ASCII input authenticates as the shared filtered value. Refuse only
+  # the degenerate empty stored word and the length no bundled client can send.
+  if [ -z "$(printf '%s' "$2" | LC_ALL=C tr -cd '\040-\176')" ]; then
+    printf 'level=error msg="env var becomes an empty NUT word after parsing" var=%s\n' "$1" >&2
+    return 1
+  fi
+  if [ "${#2}" -gt 501 ]; then
+    printf 'level=error msg="env var is longer than the bundled NUT client password limit" var=%s length=%d limit=501\n' "$1" "${#2}" >&2
     return 1
   fi
 }
@@ -335,11 +331,12 @@ check_optional_vars() {
 
 # canonicalize_validated_values: strip trailing newline bytes (env-file
 # artifacts) from every value whose PRESENTATION may safely change, by
-# assigning it through $(). MUST run BEFORE run_validations: a surviving LF
-# breaks mid-line config writes (upsmon.conf's MONITOR host:$API_PORT) and
-# raw-value cross-field checks (driver_transport matches ${UPS_DRIVER}
-# literally, so "snmp-ups<LF>" classifies as "other"). A no-op for every
-# value with no trailing LF.
+# assigning it through $(). MUST run BEFORE run_validations: every row runs
+# `control`, so an unstripped trailing LF ends the boot instead of being
+# tolerated. Tolerance is a STRIP rather than a byte allowed through because
+# a raw LF would break mid-line config writes (upsmon.conf's MONITOR
+# host:$API_PORT) and cross-field checks (driver_transport matches
+# ${UPS_DRIVER} literally). A no-op for every value with no trailing LF.
 canonicalize_validated_values() {
   UPS_NAME=$(printf '%s' "${UPS_NAME:-}")
   UPS_DESC=$(printf '%s' "${UPS_DESC:-}")

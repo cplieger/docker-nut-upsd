@@ -1,7 +1,7 @@
 #!/bin/sh
 # NUT notification handler — emits structured log lines for Alloy pickup.
 # Invoked by upsmon for each event with NOTIFYFLAG ... EXEC.
-# NUT passes the notification type in NOTIFYTYPE and the message as $1.
+# NUT passes NOTIFYTYPE, UPSNAME (upsmon's "upsname@hostname[:port]") and the message as $1.
 
 # log_value: sanitize a value before interpolating it into a logfmt field, so
 # untrusted text cannot corrupt or split the log record. Byte-identical copy of
@@ -9,8 +9,8 @@
 # it cannot rely on the helper already being sourced. validate.sh owns the
 # BusyBox-tr octal-range rationale; parity across the copies is asserted.
 log_value() {
-  _lv=$(printf '%s' "$1" | tr -d '\\"' | LC_ALL=C tr -c '\040-\176' ' ' | cut -c 1-513)
-  if [ "${#_lv}" -le 512 ]; then
+  _lv=$(printf '%s' "$1" | tr -d '\\"' | LC_ALL=C tr -c '\040-\176' ' ' | cut -c 1-512)
+  if [ "${#1}" -le 512 ]; then
     printf '%s' "$_lv"
   else
     printf '%.509s...' "$_lv"

@@ -42,6 +42,22 @@ load_function _replace_file
 load_function _resolve_cached_password
 load_function resolve_admin_password
 
+CACHE_INVALID_MESSAGE=$(awk '
+  /if \[ -s "\$_rcp_file" \]/ { next_printf = 1; next }
+  next_printf && /printf .*level=warn msg=/ {
+    line = $0
+    sub(/^.*msg="/, "", line)
+    sub(/" path=.*$/, "", line)
+    print line
+    exit
+  }
+' "$SUBJECT")
+CACHE_INVALID_MESSAGE=${CACHE_INVALID_MESSAGE/\%s/ADMIN_PASSWORD}
+if [ -z "$CACHE_INVALID_MESSAGE" ]; then
+  printf 'harness error: could not read the invalid-cache diagnostic from secrets.sh\n' >&2
+  exit 1
+fi
+
 CACHE="$WORK/admin_password"
 ERR="$WORK/err.log"
 ADMIN_PASSWORD_FILE="$CACHE"
@@ -55,7 +71,7 @@ resolve() {
 
 regenerated() {
   [ "${#PW}" -eq "$PASSWORD_LENGTH" ] && [ "$PW" != "$1" ] \
-    && grep -q 'cached ADMIN_PASSWORD invalid (wrong size, shortened by trailing whitespace, unreadable, or not from the generated alphabet); regenerating' "$ERR"
+    && grep -Fq "$CACHE_INVALID_MESSAGE" "$ERR"
 }
 
 # n_chars <count> <char>: a repeated-byte string built without seq.
@@ -213,6 +229,8 @@ fi
 # --- 10. credential-cache diagnostics never disclose credential bytes ---------
 leak_failed=0
 leak_generated=$(n_chars "$PASSWORD_LENGTH" G)
+# Invoked by the extracted credential generator.
+# shellcheck disable=SC2329
 base64() {
   printf '%s' "$leak_generated"
 }
@@ -259,5 +277,34 @@ unset -f base64 log_omits
 [ "$leak_failed" -eq 0 ] \
   && ok 'credential-cache diagnostics omit reused, rejected, and generated credential bytes' \
   || no 'credential-cache diagnostic secrecy' 'a diagnostic arm was not reached or disclosed its credential bytes'
+
+ENTRYPOINT="$SUBJECT"
+load_function _install_nut_config
+INSTALL_SRC="$WORK/install-staging"
+INSTALL_DST="$WORK/install-destination"
+CHOWN_ARGS="$WORK/chown.args"
+printf 'staged bytes\n' >"$INSTALL_SRC"
+printf 'old bytes\n' >"$INSTALL_DST"
+: >"$ERR"
+# shellcheck disable=SC2329
+chown() {
+  printf '%s\n' "$*" >"$CHOWN_ARGS"
+  printf 'simulated chown failure\n' >&2
+  return 1
+}
+INSTALL_CAUSE=
+if _install_nut_config "$INSTALL_SRC" "$INSTALL_DST" INSTALL_CAUSE 2>"$ERR"; then
+  no 'staged install refuses owner failure before rename' 'returned success after chown failed'
+else
+  [ "$(cat "$INSTALL_DST")" = 'old bytes' ] \
+    && [ "$(cat "$INSTALL_SRC")" = 'staged bytes' ] \
+    && [ "$(cat "$CHOWN_ARGS")" = "root:nut $INSTALL_SRC" ] \
+    && [ -n "$INSTALL_CAUSE" ] \
+    && printf '%s' "$INSTALL_CAUSE" | grep -Fq 'simulated chown failure' \
+    && [ ! -s "$ERR" ] \
+    && ok 'staged install refuses owner failure before rename' \
+    || no 'staged install refuses owner failure before rename' "dst=[$(cat "$INSTALL_DST")] log=[$(head -c 200 "$ERR")]"
+fi
+unset -f chown
 
 report

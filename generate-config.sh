@@ -3,47 +3,33 @@
 # Sourced by entrypoint.sh; not executed directly.
 
 # Reclamation consumes this inventory so operator-owned /etc/nut *.tmp.* paths remain untouched.
-# shellcheck disable=SC2034  # consumed by entrypoint.sh boot reclamation
 readonly NUT_STAGED_CONFIGS='ups.conf upsd.conf upsd.users upsmon.conf'
 
 decide_user_overrides() {
-  if [ -e /etc/nut/ups.conf.user ]; then
-    _uo_ups_conf=true
-  else
-    _uo_ups_conf=false
-  fi
-  if [ -e /etc/nut/upsd.conf.user ]; then
-    _uo_upsd_conf=true
-  else
-    _uo_upsd_conf=false
-  fi
-  if [ -e /etc/nut/upsd.users.user ]; then
-    _uo_upsd_users=true
-  else
-    _uo_upsd_users=false
-  fi
-  if [ -e /etc/nut/upsmon.conf.user ]; then
-    _uo_upsmon_conf=true
-  else
-    _uo_upsmon_conf=false
-  fi
+  _uo_present=''
+  for _uo_probe_name in $NUT_STAGED_CONFIGS; do
+    if [ -e "/etc/nut/$_uo_probe_name.user" ]; then
+      _uo_present="$_uo_present $_uo_probe_name"
+    fi
+  done
   _uo_decided=true
 }
 
-_user_override_present() {
+user_override_present() {
   if [ "${_uo_decided:-}" != true ]; then
     printf 'level=error msg="config override topology was read before it was decided; aborting" file=%s.user\n' "$1" >&2
     exit 1
   fi
-  case "$1" in
-    ups.conf) [ "$_uo_ups_conf" = true ] ;;
-    upsd.conf) [ "$_uo_upsd_conf" = true ] ;;
-    upsd.users) [ "$_uo_upsd_users" = true ] ;;
-    upsmon.conf) [ "$_uo_upsmon_conf" = true ] ;;
+  case " $NUT_STAGED_CONFIGS " in
+    *" $1 "*) ;;
     *)
       printf 'level=error msg="unknown config override name; aborting" file=%s.user\n' "$1" >&2
       exit 1
       ;;
+  esac
+  case " $_uo_present " in
+    *" $1 "*) ;;
+    *) return 1 ;;
   esac
 }
 
@@ -52,7 +38,7 @@ _user_override_present() {
 # override is present; abort the boot (exit 1) when the decided override cannot
 # be applied, including when its path has since gone away.
 use_user_override() {
-  if ! _user_override_present "$1"; then
+  if ! user_override_present "$1"; then
     # A dangling symlink (e.g. a mounted directory of symlinks with a broken
     # target) fails -e and would silently drop the operator's override; name
     # it before falling back to generation.
@@ -86,10 +72,12 @@ use_user_override() {
       "$1" "$(log_value "$_uo_tmp")" >&2
     exit 1
   }
-  if ! cat "${_uo_dst}.user" >"$_uo_tmp" \
-    || ! _install_nut_config "$_uo_tmp" "$_uo_dst"; then
-    rm -f "$_uo_tmp"
-    printf 'level=error msg="failed to apply mounted override; aborting" file=%s.user\n' "$1" >&2
+  _uo_err=
+  if ! _uo_err=$(cat "${_uo_dst}.user" 2>&1 >"$_uo_tmp") \
+    || ! _install_nut_config "$_uo_tmp" "$_uo_dst" _uo_err; then
+    rm -f "$_uo_tmp" || :
+    printf 'level=error msg="failed to apply mounted override; aborting" file=%s.user err="%s"\n' \
+      "$1" "$(log_value "$_uo_err")" >&2
     exit 1
   fi
   printf 'level=info msg="using mounted %s.user"\n' "$1" >&2 || :
@@ -104,15 +92,17 @@ _stage_generated() {
 }
 
 _install_generated() {
-  if ! _install_nut_config "$_sg_tmp" "/etc/nut/$1"; then
-    rm -f "$_sg_tmp"
-    printf 'level=error msg="failed to install generated config; aborting" file=%s\n' "$1" >&2
+  _sg_err=
+  if ! _install_nut_config "$_sg_tmp" "/etc/nut/$1" _sg_err; then
+    rm -f "$_sg_tmp" || :
+    printf 'level=error msg="failed to install generated config; aborting" file=%s err="%s"\n' \
+      "$1" "$(log_value "$_sg_err")" >&2
     exit 1
   fi
 }
 
 _staged_write_failed() {
-  rm -f "$_sg_tmp"
+  rm -f "$_sg_tmp" || :
   printf 'level=error msg="failed to write generated config; aborting" file=%s\n' "$1" >&2
   exit 1
 }
@@ -222,7 +212,7 @@ generate_upsd_conf() {
 # When both files are generated, they share the internal credential. When
 # exactly one is overridden, the generated half uses the documented API pair.
 local_upsmon_credential_active() {
-  ! _user_override_present upsd.users && ! _user_override_present upsmon.conf
+  ! user_override_present upsd.users && ! user_override_present upsmon.conf
 }
 
 # --- upsd.users — skipped if user-mounted ---
@@ -266,12 +256,7 @@ generate_upsd_users() {
 }
 
 # --- upsmon.conf — skipped if user-mounted ---
-# POWERDOWNFLAG lives in the root-only /var/run/nut-secrets rather than the
-# nut-writable /var/run/nut, so a compromised nut-user process cannot plant the
-# flag and latch the comms watchdog's stand-down (lifecycle.sh
-# restart_ups_driver). Every legitimate actor is root: upsmon's privileged
-# parent writes it on FSD, the entrypoint clears it at boot, the watchdog tests
-# it, nut-shutdown.sh clears it on a failed poweroff.
+# POWERDOWNFLAG_FILE in lifecycle.sh owns the flag path invariant.
 
 # MONITOR host: upsd_probe_host (lifecycle.sh) owns the LISTEN-address mapping.
 # MONITOR credential: local_upsmon_credential_active owns the choice.
@@ -279,11 +264,11 @@ generate_upsd_users() {
 # fault. ALARM and OTHER omit SYSLOG because their stock notices interpolate
 # device-controlled strings (NUT clients/upsmon.h) that would otherwise be
 # re-emitted raw on the alert-matched stream.
-# The timing and criticality directives below are emitted at NUT
-# v2.8.5's own defaults (clients/upsmon.c:59-133), so a NUT bump
-# cannot move the generated file's shutdown decision. OFFDURATION,
-# OBLBDURATION and ALARMCRITICAL are the three that decide whether a
-# state is critical at all; see is_ups_critical.
+# The timing and criticality directives below are emitted at NUT v2.8.5's
+# own defaults (clients/upsmon.c:59-133), so a NUT bump cannot move the
+# ones stated here. is_ups_critical reads a fourth criticality knob,
+# OVERDURATION (upsmon.c:133, :1471), which this file leaves to upstream
+# and alerts/logql.yaml publishes as unset.
 _emit_upsmon_conf() {
   cat <<MONEOF || return 1
 MONITOR $UPS_NAME@$(upsd_probe_host):$API_PORT 1 "$_mon_user" "$_mon_password" primary
@@ -312,6 +297,7 @@ NOTIFYFLAG NOPARENT SYSLOG+EXEC
 NOTIFYFLAG OFF SYSLOG+EXEC
 NOTIFYFLAG BYPASS SYSLOG+EXEC
 NOTIFYFLAG OVER SYSLOG+EXEC
+NOTIFYFLAG CAL SYSLOG+EXEC
 NOTIFYFLAG NOCOMM SYSLOG+EXEC
 NOTIFYFLAG ALARM EXEC
 NOTIFYFLAG OTHER EXEC
@@ -352,7 +338,9 @@ generate_all_configs() {
   if [ "$API_TLS" = "true" ]; then
     : "${TLS_CERT_PATH:?generate_all_configs requires TLS_CERT_PATH when API_TLS=true}"
   fi
-  : "${ADMIN_PASSWORD:?generate_all_configs requires ADMIN_PASSWORD}"
+  if ! user_override_present upsd.users; then
+    : "${ADMIN_PASSWORD:?generate_all_configs requires ADMIN_PASSWORD}"
+  fi
   : "${SHUTDOWN_CMD:?generate_all_configs requires SHUTDOWN_CMD}"
 
   generate_ups_conf
@@ -373,7 +361,7 @@ generate_all_configs() {
       fi
     done
     if [ "$_uo_was_probed" = true ]; then
-      if [ -e "$_uo_file" ] && ! _user_override_present "${_uo_name%.user}"; then
+      if [ -e "$_uo_file" ] && ! user_override_present "${_uo_name%.user}"; then
         printf 'level=warn msg="mounted override appeared after boot read the override topology; ignoring it for this boot (a container restart applies it)" file="%s"\n' \
           "$(log_value "$_uo_name")" >&2
       fi

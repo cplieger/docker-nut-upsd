@@ -81,6 +81,7 @@ check_pair UPSCommsLost NOCOMMWARNTIME
 check_pair UPSPowerOffPathBroken DBUS_PROBE_INTERVAL
 check_published_default UPSCommsLost NOCOMMWARNTIME
 check_published_default UPSHardwareFault RBWARNTIME
+check_published_default UPSPowerOffPathBroken DBUS_PROBE_INTERVAL
 
 ENTRYPOINT="$REPO_ROOT/generate-config.sh"
 new_workdir >/dev/null
@@ -140,6 +141,35 @@ if printf '%s\n' "$generated_upsmon" | grep -q '^NOTIFYFLAG OFF ' \
 else
   no 'UPSProtectionUnavailable OFFDURATION contract' \
     'the generated config or scoped annotation no longer carries the published pinned consequence'
+fi
+
+hardware_claim=$(rule_text UPSHardwareFault)
+if [ -z "$hardware_claim" ]; then
+  printf 'harness error: UPSHardwareFault annotation was not found\n' >&2
+  exit 1
+fi
+
+generated_alarmcritical=$(printf '%s\n' "$generated_upsmon" | awk '
+  $1 == "ALARMCRITICAL" && NF == 2 { print $2 }
+')
+if [ -z "$generated_alarmcritical" ]; then
+  printf 'harness error: generated upsmon.conf has no ALARMCRITICAL value\n' >&2
+  exit 1
+fi
+
+published_alarmcritical=""
+case "$hardware_claim" in
+  *ALARMCRITICAL\ *)
+    alarmcritical_tail=${hardware_claim#*ALARMCRITICAL }
+    published_alarmcritical=${alarmcritical_tail%%[ .,:;]*}
+    ;;
+esac
+
+if [ "$published_alarmcritical" = "$generated_alarmcritical" ]; then
+  ok "UPSHardwareFault publishes the generated upsmon.conf ALARMCRITICAL pin ($generated_alarmcritical)"
+else
+  no 'UPSHardwareFault ALARMCRITICAL contract' \
+    "annotation=$published_alarmcritical generated=$generated_alarmcritical"
 fi
 
 on_battery_annotation=$(awk '

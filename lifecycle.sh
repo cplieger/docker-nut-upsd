@@ -12,6 +12,9 @@ readonly DBUS_PROBE_REPLY_TIMEOUT_MS=3000 # under the outer timeout 5 at dbus_po
 # 3 stop_services commands x 3s = 9s worst case, inside Docker's default 10s
 # stop budget before SIGKILL.
 readonly STOP_CMD_TIMEOUT=3
+# Root-only dir so a nut-user process cannot plant the flag and latch
+# restart_ups_driver's stand-down; entrypoint.sh clears it at boot.
+readonly POWERDOWNFLAG_FILE=/var/run/nut-secrets/killpower
 
 # Shared temp-file capture lifecycle for bounded subprocess output. Capture via
 # a regular file, never $(): timeout signals only the program it exec'd, so a
@@ -20,9 +23,15 @@ readonly STOP_CMD_TIMEOUT=3
 # constants because the entrypoint's leaked-temp cleanup globs "$PREFIX".*.
 readonly STOP_CMD_CAPTURE_PREFIX=/var/run/nut-secrets/stop-cmd
 readonly WD_RESTART_CAPTURE_PREFIX=/var/run/nut-secrets/wd-restart
-readonly POWERDOWNFLAG_FILE=/var/run/nut-secrets/killpower
 capture_tmpfile() {
-  mktemp "$1.XXXXXX" 2>/dev/null || printf '/dev/null'
+  # mktemp writes its own cause to stderr; carry it, never re-derive one.
+  if _ct_out=$(mktemp "$1.XXXXXX" 2>&1); then
+    printf '%s' "$_ct_out"
+    return 0
+  fi
+  printf 'level=warn msg="bounded capture allocation failed; command output will be discarded" prefix=%s detail="%s"\n' \
+    "$1" "$(log_value "$_ct_out")" >&2 || :
+  printf '/dev/null'
 }
 capture_head() {
   # 513, not 512: log_value marks truncation only above 512 characters.
@@ -31,7 +40,11 @@ capture_head() {
 capture_cleanup() {
   # Deliberately status-neutral: every caller publishes a best-effort contract
   # an unlink failure must not abort.
-  [ "$1" = "/dev/null" ] || rm -f "$1" 2>/dev/null || true
+  [ "$1" = "/dev/null" ] && return 0
+  _cc_err=$(rm -f "$1" 2>&1) && return 0
+  printf 'level=warn msg="bounded capture cleanup failed; temp file left for the entrypoint sweep" path=%s detail="%s"\n' \
+    "$1" "$(log_value "$_cc_err")" >&2 || :
+  return 0
 }
 
 # stop_nut_cmd: run one NUT stop control bounded by STOP_CMD_TIMEOUT so a
@@ -64,7 +77,7 @@ stop_services() {
   stop_nut_cmd "upsmon" /usr/sbin/upsmon -c stop
   stop_nut_cmd "upsd" /usr/sbin/upsd -c stop
   stop_nut_cmd "upsdrvctl" /usr/sbin/upsdrvctl stop
-  printf 'level=info msg="NUT services stopped"\n' >&2
+  printf 'level=info msg="NUT service stop sequence completed"\n' >&2
 }
 
 # read_pidfile: bounded, race-safe read of a NUT pidfile from the nut-writable
@@ -88,33 +101,35 @@ read_pidfile() {
 wait_for_pidfile() {
   # $1 = label, $2 = absolute PID file path, $3 = expected daemon binary.
   : "${3:?wait_for_pidfile requires an expected binary path}"
-  _wf_i=0
-  while [ "$_wf_i" -lt "$PIDFILE_POLL_MAX" ]; do
-    # Only trust strictly numeric content (mirrors restart_ups_driver's
-    # confused-deputy guard).
-    _wf_pid=$(read_pidfile "$2")
-    case "$_wf_pid" in
-      '' | *[!0-9]*) ;; # empty, partial write, or untrusted content: keep polling
-      *[!0]*)
-        # Live PID verified as the expected daemon — a planted PID of some
-        # unrelated live process must not satisfy the startup gate.
-        if kill -0 "$_wf_pid" 2>/dev/null \
-          && pid_matches_binary "$_wf_pid" "$3"; then
-          return 0
-        fi
-        ;;
-      *) ;; # all-zero PID: `kill -0 0` signals the caller's own process group — refuse
-    esac
-    # Background + wait: `wait` is where a trapped signal interrupts at
-    # once, so a SIGTERM during the boot gate reaches PID 1's trap
-    # instead of waiting out the poll.
-    sleep "$PIDFILE_POLL_INTERVAL" &
-    wait "$!" || true
-    _wf_i=$((_wf_i + 1))
-  done
-  printf 'level=error msg="%s did not confirm a live PID for the expected binary in time" path=%s polls=%d interval=%s\n' \
-    "$1" "$2" "$PIDFILE_POLL_MAX" "$PIDFILE_POLL_INTERVAL" >&2
-  return 1
+  # Poll in a background subshell and `wait` on it, as start_nut_daemon does
+  # and for the same reason: a boot-time SIGTERM must reach PID 1's trap at
+  # once. Both the sleep and read_pidfile's bounded `su` open are foreground
+  # here, so the wrapper belongs at the poll, not at one command inside it.
+  (
+    _wf_i=0
+    while [ "$_wf_i" -lt "$PIDFILE_POLL_MAX" ]; do
+      # Only trust strictly numeric content (mirrors restart_ups_driver's
+      # confused-deputy guard).
+      _wf_pid=$(read_pidfile "$2")
+      case "$_wf_pid" in
+        '' | *[!0-9]*) ;; # empty, partial write, or untrusted content: keep polling
+        *[!0]*)
+          # pid_matches_binary is the whole gate: a planted PID of some unrelated
+          # live process must not satisfy it, and it refuses a dead PID too.
+          if pid_matches_binary "$_wf_pid" "$3"; then
+            exit 0
+          fi
+          ;;
+        *) ;; # all-zero PID: `kill -0 0` signals the caller's own process group — refuse
+      esac
+      sleep "$PIDFILE_POLL_INTERVAL"
+      _wf_i=$((_wf_i + 1))
+    done
+    printf 'level=error msg="%s did not confirm a live PID for the expected binary in time" path=%s polls=%d interval=%s\n' \
+      "$1" "$2" "$PIDFILE_POLL_MAX" "$PIDFILE_POLL_INTERVAL" >&2
+    exit 1
+  ) &
+  wait "$!"
 }
 
 # ---------------------------------------------------------------------------
@@ -176,8 +191,10 @@ driver_binary() {
   printf '/usr/lib/nut/%s' "$UPS_DRIVER"
 }
 
-# pid_matches_binary PID BINARY: verify the live process PID is an instance of
-# BINARY. Prefers the kernel-truth /proc/<pid>/exe symlink; falls back to the
+# pid_matches_binary PID BINARY: verify PID is a LIVE instance of BINARY —
+# both probes read /proc/<pid>, so a PID with no process is refused and
+# callers need no separate liveness check. Prefers the kernel-truth
+# /proc/<pid>/exe symlink; falls back to the
 # world-readable /proc/<pid>/comm when exe is unreadable — a NUT daemon
 # setuid()s without exec-ing, which clears its dumpable flag (CONTRIBUTING
 # "/proc/<pid>/exe is unreadable for the NUT daemons"). comm is self-reported,
@@ -233,9 +250,10 @@ kill_stale_driver_from_pidfile() {
     if ! pid_matches_binary "$_ksd_pid" "$(driver_binary)"; then
       printf 'level=error msg="comms watchdog refusing to kill PID not verified as the UPS driver" ups=%s pid=%s expected=%s\n' \
         "$UPS_NAME" "$_ksd_pid" "$(driver_binary)" >&2
-    # Re-check existence immediately before signaling to narrow the
-    # PID-reuse window as far as plain sh allows.
-    elif kill -0 "$_ksd_pid" 2>/dev/null && kill -9 "$_ksd_pid" 2>/dev/null; then
+    # No probe before the signal: `kill -9` refuses an absent PID exactly as
+    # `kill -0` does, so one here only widens the identity-to-signal window.
+    # What remains is unclosable in POSIX sh (PID wraparound prices it).
+    elif kill -9 "$_ksd_pid" 2>/dev/null; then
       printf 'level=warn msg="comms watchdog force-killed the UPS driver that survived upsdrvctl stop" ups=%s pid=%s\n' \
         "$UPS_NAME" "$_ksd_pid" >&2
     fi
@@ -270,8 +288,7 @@ start_recovered_driver() {
 # reconnect can open a freshly created root:root node, then bounces the
 # driver. The chgrp is load-bearing, not belt-and-braces: the driver drops
 # to nut at NUT v2.8.5 drivers/main.c:2538 and opens the device only in
-# upsdrv_initups() at :2997, so it must reach the node AS nut, and this
-# order (group first, bounce second) is what makes the restart able to.
+# upsdrv_initups() at :2997, so it must reach the node AS nut.
 restart_ups_driver() {
   _attempt=${1:-1}
   # Stand down only when a real host poweroff is in progress. upsmon writes
@@ -291,7 +308,7 @@ restart_ups_driver() {
   if [ "$_attempt" -ge "$COMMS_FAST_RETRIES" ]; then
     printf 'level=error msg="comms watchdog still restarting driver after repeated attempts" ups=%s attempt=%d\n' "$UPS_NAME" "$_attempt" >&2
   else
-    printf 'level=warn msg="comms watchdog re-homing UPS driver after stale comms" ups=%s attempt=%d\n' "$UPS_NAME" "$_attempt" >&2
+    printf 'level=warn msg="comms watchdog restarting UPS driver after stale comms" ups=%s attempt=%d\n' "$UPS_NAME" "$_attempt" >&2
   fi
   if usb_bus_required; then
     if ! _rud_chg_err=$(chgrp -R nut /dev/bus/usb 2>&1); then

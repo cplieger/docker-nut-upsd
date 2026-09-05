@@ -16,39 +16,37 @@ readonly PASSWORD_MIN_LENGTH=12
 readonly ADMIN_PASSWORD_FILE=/var/run/nut-secrets/admin_password
 readonly LOCAL_UPSMON_PASSWORD_FILE=/var/run/nut-secrets/local_upsmon_password
 
-# _replace_file SRC DST: atomic-install rename with a directory-destination
-# guard, shared by every mktemp + rename site below. Plain mv treats an
-# existing directory at DST as a container (POSIX mv destination-directory
-# semantics), so a stale or Docker-created directory at a cache or
-# working-copy path would silently break the file-at-DST contract while the
-# caller logs success. Rejecting the directory routes such a boot through
-# the caller's existing cleanup/warn/error branch instead.
+# _replace_file SRC DST CAUSE_VAR: atomic-install rename with a
+# directory-destination guard, shared by every mktemp + rename site below.
+# Plain mv treats an existing directory at DST as a container (POSIX mv
+# destination-directory semantics), so a stale or Docker-created directory at
+# a cache or working-copy path would silently break the file-at-DST contract.
 _replace_file() {
   _rf_src="$1"
   _rf_dst="$2"
+  _rf_cause_var="$3"
   if [ -d "$_rf_dst" ]; then
-    printf 'level=warn msg="destination is a directory; refusing to install file into it" dst=%s\n' \
-      "$_rf_dst" >&2
+    _rf_err='destination is a directory; refusing to install file into it'
+    eval "$_rf_cause_var=\$_rf_err"
     return 1
   fi
   if ! _rf_err=$(mv "$_rf_src" "$_rf_dst" 2>&1); then
-    printf 'level=warn msg="rename failed while installing file" dst=%s err="%s"\n' \
-      "$_rf_dst" "$(log_value "$_rf_err")" >&2
+    eval "$_rf_cause_var=\$_rf_err"
     return 1
   fi
 }
 
-# Installs a container-owned staging file as root:nut 640 before its atomic
-# rename, so the destination is never visible with the wrong owner or mode.
+# _install_nut_config SRC DST CAUSE_VAR: applies root:nut 640 to a staging
+# file before its atomic rename, so the destination never has the wrong mode.
 _install_nut_config() {
   _inc_src="$1"
   _inc_dst="$2"
+  _inc_cause_var="$3"
   if ! _inc_err=$({ chown root:nut "$_inc_src" && chmod 640 "$_inc_src"; } 2>&1); then
-    printf 'level=warn msg="could not set owner/mode before installing file" dst=%s err="%s"\n' \
-      "$_inc_dst" "$(log_value "$_inc_err")" >&2
+    eval "$_inc_cause_var=\$_inc_err"
     return 1
   fi
-  _replace_file "$_inc_src" "$_inc_dst"
+  _replace_file "$_inc_src" "$_inc_dst" "$_inc_cause_var"
 }
 
 # _resolve_cached_password LABEL CACHE_FILE: shared engine for the credentials
@@ -65,13 +63,12 @@ _resolve_cached_password() {
   # reports the link's own size, so a link to a longer file would serve a
   # truncated prefix of it as the credential.
   _rcp_size=$(stat -Lc %s "$_rcp_file" 2>/dev/null) || _rcp_size=""
-  # Generation writes exactly PASSWORD_LENGTH bytes, so only that size is
-  # trusted: an unbounded read of a grown cache would OOM PID 1 on every
-  # restart. The length clause is not redundant with the stat — command
-  # substitution strips a trailing newline, so 24 bytes can yield 23
-  # characters. Only generation's own alphabet (A-Za-z0-9) is trusted:
-  # whitespace and the quote/backslash/control bytes break out of
-  # generate-config.sh's quoted password fields.
+  # Only generation's own output is trusted. The stat refuses a grown cache
+  # (`head -c` would otherwise truncate it into a well-formed prefix of
+  # itself); the length clause catches what the stat cannot, since command
+  # substitution strips a trailing newline; the alphabet clause refuses the
+  # quote, backslash and control bytes that break generate-config.sh's quoted
+  # password field, and the whitespace that would pass as a weak credential.
   if [ "$_rcp_size" = "$PASSWORD_LENGTH" ] \
     && _rcp_pw=$(head -c "$PASSWORD_LENGTH" "$_rcp_file" 2>/dev/null) \
     && [ "${#_rcp_pw}" -eq "$PASSWORD_LENGTH" ] \
@@ -85,8 +82,6 @@ _resolve_cached_password() {
     printf 'level=warn msg="cached %s invalid (wrong size, shortened by trailing whitespace, unreadable, or not from the generated alphabet); regenerating" path=%s size=%s chars=%s expected=%s\n' \
       "$_rcp_label" "$_rcp_file" "${_rcp_size:-unreadable}" "${#_rcp_pw}" "$PASSWORD_LENGTH" >&2
   fi
-  # Pull more entropy than needed so stripping `/+=` still leaves
-  # >=PASSWORD_LENGTH usable characters.
   _rcp_pw=$(head -c "$PASSWORD_RAW_BYTES" /dev/urandom | base64 | tr -d '/+=' | head -c "$PASSWORD_LENGTH")
   # Never cache or use a short password: stripping `/+=` can in principle
   # leave fewer than PASSWORD_LENGTH characters. Fail loudly rather than
@@ -98,14 +93,16 @@ _resolve_cached_password() {
   fi
   # mktemp in the root-only dir gives an O_EXCL, unpredictable temp name so
   # a compromised `nut` process cannot plant a symlink at the write target.
+  _rcp_err=
   if _rcp_tmp=$(mktemp "${_rcp_file}.tmp.XXXXXX" 2>/dev/null) \
-    && printf '%s' "$_rcp_pw" >"$_rcp_tmp" && _replace_file "$_rcp_tmp" "$_rcp_file"; then
+    && printf '%s' "$_rcp_pw" >"$_rcp_tmp" \
+    && _replace_file "$_rcp_tmp" "$_rcp_file" _rcp_err; then
     printf 'level=info msg="generated %s; cached for intra-container restarts" path=%s\n' \
       "$_rcp_label" "$_rcp_file" >&2
   else
     rm -f "$_rcp_tmp" 2>/dev/null || true
-    printf 'level=warn msg="generated %s but failed to cache; a new value will be generated on next restart" path=%s\n' \
-      "$_rcp_label" "$_rcp_file" >&2
+    printf 'level=warn msg="generated %s but failed to cache; a new value will be generated on next restart" path=%s err="%s"\n' \
+      "$_rcp_label" "$_rcp_file" "$(log_value "$_rcp_err")" >&2
   fi
   printf '%s' "$_rcp_pw"
 }
@@ -129,16 +126,34 @@ resolve_local_upsmon_password() {
   LOCAL_UPSMON_PASSWORD=$(_resolve_cached_password LOCAL_UPSMON_PASSWORD "$LOCAL_UPSMON_PASSWORD_FILE") || return 1
 }
 
+withdraw_unused_credential_caches() {
+  _wuc_files=''
+  if user_override_present upsd.users; then
+    _wuc_files="$ADMIN_PASSWORD_FILE"
+  fi
+  if ! local_upsmon_credential_active; then
+    _wuc_files="$_wuc_files $LOCAL_UPSMON_PASSWORD_FILE"
+  fi
+  for _wuc_file in $_wuc_files; do
+    _wuc_err=$(rm -f "$_wuc_file" 2>&1) || :
+    if [ -e "$_wuc_file" ] || [ -L "$_wuc_file" ]; then
+      printf 'level=warn msg="could not withdraw unused generated credential cache; continuing" path=%s err="%s"\n' \
+        "$_wuc_file" "$(log_value "$_wuc_err")" >&2
+    fi
+  done
+}
+
 # Warn (don't block) when an operator-settable credential is shorter than
 # PASSWORD_MIN_LENGTH. API_PASSWORD's default `secret` is caught by that
 # length; ADMIN_PASSWORD has no default (unset auto-generates
 # PASSWORD_LENGTH chars), so its arm fires only on an operator's short value.
 warn_weak_api_password() {
   if [ "${#API_PASSWORD}" -lt "$PASSWORD_MIN_LENGTH" ]; then
-    printf 'level=warn msg="API_PASSWORD is weak (<%d chars; the default `secret` is one). Acceptable on a trusted LAN; rotate it if your NUT client supports custom credentials."\n' \
+    printf 'level=warn msg="API_PASSWORD is weak (<%d chars; so is the shipped default). Acceptable on a trusted LAN; rotate it if your NUT client supports custom credentials."\n' \
       "$PASSWORD_MIN_LENGTH" >&2
   fi
-  if [ "${#ADMIN_PASSWORD}" -lt "$PASSWORD_MIN_LENGTH" ]; then
+  if ! user_override_present upsd.users \
+    && [ "${#ADMIN_PASSWORD}" -lt "$PASSWORD_MIN_LENGTH" ]; then
     printf 'level=warn msg="ADMIN_PASSWORD is weak (<%d chars). It guards upsd set/FSD actions unless a mounted upsd.users.user owns those accounts; use a longer value or unset it to auto-generate a strong one."\n' \
       "$PASSWORD_MIN_LENGTH" >&2
   fi
@@ -225,7 +240,7 @@ _generate_selfsigned_cert() {
     return 1
   fi
   if ! _gc_err=$(cat "$_gc_crt" "$_gc_key" 2>&1 >"$_gc_pem") \
-    || ! _replace_file "$_gc_pem" "$TLS_CERT_CACHE"; then
+    || ! _replace_file "$_gc_pem" "$TLS_CERT_CACHE" _gc_err; then
     rm -f "$_gc_key" "$_gc_crt" "$_gc_pem"
     printf 'level=error msg="self-signed TLS certificate generation failed" path=%s err="%s"\n' \
       "$TLS_CERT_CACHE" "$(log_value "$_gc_err")" >&2
@@ -244,8 +259,9 @@ _install_cert_working_copy() {
   _ic_src="$1"
   _ic_dst="$2"
   _ic_tmp=$(_tls_mktemp "$_ic_dst") || return 1
-  if _ic_err=$(cat "$_ic_src" >"$_ic_tmp" 2>&1) \
-    && _install_nut_config "$_ic_tmp" "$_ic_dst"; then
+  _ic_err=
+  if _ic_err=$(cat "$_ic_src" 2>&1 >"$_ic_tmp") \
+    && _install_nut_config "$_ic_tmp" "$_ic_dst" _ic_err; then
     return 0
   fi
   rm -f "$_ic_tmp"
@@ -290,7 +306,7 @@ resolve_tls_cert() {
         "$TLS_CERT_MOUNT" >&2
       return 1
     elif ! tls_cert_fresh "$TLS_CERT_MOUNTED_RUNTIME"; then
-      printf 'level=warn msg="a certificate in the served TLS chain expires within a day or has already expired; upsd will still serve it" path=%s\n' \
+      printf 'level=warn msg="a certificate block in the served TLS chain did not pass the expiry check (expired, expiring within a day, or unparseable); upsd'\''s own certificate loading decides whether it still serves" path=%s\n' \
         "$TLS_CERT_MOUNT" >&2
     fi
     TLS_CERT_PATH="$TLS_CERT_MOUNTED_RUNTIME"

@@ -14,20 +14,26 @@ set -eu
 # any new temp/config write (a late cleanup is unreachable under set -e
 # exactly when needed most).
 
-# stale_nut_pid_paths: every reserved *.pid path in /var/run/nut. One left by
-# a crashed run makes upsdrvctl report "Duplicate driver instance detected".
-# Matches every object type, not just files: a symlink/FIFO/socket/directory
-# planted there obstructs or redirects the root daemon's later pidfile write.
+# stale_nut_pid_paths: every reserved *.pid path in /var/run/nut. Matches every
+# object type, not just files. upsdrvctl overwrites a leftover FILE only when the
+# PID it names is dead in THIS namespace (warns, then overwrites — v2.8.5
+# drivers/main.c:2891-2935); a `docker restart` keeps the writable layer while PIDs
+# restart near 1, so a recorded PID can be live and unrelated in the new namespace,
+# and upsdrvctl reports "Duplicate driver instance detected" instead. A symlink/
+# FIFO/socket/directory redirects or blocks the root daemon's pidfile write, whose
+# fopen has no O_NOFOLLOW (common/common.c:2180).
 stale_nut_pid_paths() {
   find /var/run/nut -maxdepth 1 -name '*.pid' "$@" 2>/dev/null || true
 }
-# `head -c 1`/`-c 512` below bound this nut-writable directory's contents
-# against CWE-400 in PID 1; the re-scan re-checks the pathname postcondition
-# because BusyBox find exits 0 even when a directory at a *.pid path survives -delete.
+# `head -c 1`/`-c 513` below bound the BYTES PID 1 retains from this nut-writable
+# directory (513, not 512: log_value marks truncation only above 512 — see
+# capture_head); the scan itself is unbounded and cheap. The re-scan re-checks the
+# pathname postcondition because BusyBox find exits 0 even when a directory at a
+# *.pid path survives -delete.
 if [ -n "$(stale_nut_pid_paths | head -c 1)" ]; then
   printf 'level=info msg="clearing stale NUT PID paths from previous lifecycle" path=/var/run/nut\n' >&2
   stale_nut_pid_paths -delete
-  _stale_pids=$(stale_nut_pid_paths | head -c 512)
+  _stale_pids=$(stale_nut_pid_paths | head -c 513)
   if [ -n "$_stale_pids" ]; then
     printf 'level=error msg="failed to clear a stale NUT PID path; refusing to start" path=/var/run/nut surviving="%s"\n' \
       "$(log_value "$_stale_pids")" >&2
@@ -51,10 +57,11 @@ if ! _clt_err=$(rm -f "$WD_RESTART_CAPTURE_PREFIX".* "$STOP_CMD_CAPTURE_PREFIX".
     "$(log_value "$_clt_err")" >&2
 fi
 
-# Clear a stale POWERDOWNFLAG (killpower) from a previous lifecycle: it
-# survives a `docker restart` in the writable /var/run/nut-secrets, and a
-# latched flag would make the comms watchdog stand down indefinitely (see
-# restart_ups_driver).
+# Clear a stale POWERDOWNFLAG (killpower) from a previous lifecycle. upsmon
+# unlinks a flag it wrote itself at startup (v2.8.5 clients/upsmon.c:4140-4142);
+# a flag WITHOUT the magic string it only disables (:3375-3391), and
+# restart_ups_driver stands down on a bare `-e` test, so that residue would
+# disarm comms recovery for the container's life.
 if [ -e "$POWERDOWNFLAG_FILE" ]; then
   printf 'level=info msg="clearing stale killpower flag from previous lifecycle" path=%s\n' "$POWERDOWNFLAG_FILE" >&2
   rm -f "$POWERDOWNFLAG_FILE" || {
@@ -113,14 +120,17 @@ canonicalize_validated_values
 # ---------------------------------------------------------------------------
 # Password resolution (from secrets.sh)
 # ---------------------------------------------------------------------------
-resolve_admin_password
+decide_user_overrides
+if ! user_override_present upsd.users; then
+  resolve_admin_password
+fi
 # The internal upsmon credential only exists when both upsd.users and
 # upsmon.conf are generated (generate-config.sh); with an override mounted for
 # either file, the generated half uses the legacy API pair instead.
-decide_user_overrides
 if local_upsmon_credential_active; then
   resolve_local_upsmon_password
 fi
+withdraw_unused_credential_caches
 
 warn_weak_api_password
 
@@ -130,10 +140,13 @@ warn_weak_api_password
 run_validations
 
 # ---------------------------------------------------------------------------
-# USB device validation (USB transports only — see usb_bus_required)
+# USB device validation (when the USB bus is required: every USB transport,
+# plus a dual-mode driver using `auto` or a /dev/bus/usb node; see
+# usb_bus_required)
 # ---------------------------------------------------------------------------
 if usb_bus_required && [ ! -d /dev/bus/usb ]; then
-  printf 'level=error msg="/dev/bus/usb not found — bind-mount the host /dev/bus/usb directory into the container"\n' >&2
+  printf 'level=error msg="/dev/bus/usb not found; this app requires it for USB drivers and treats drivers not categorised as serial-only or USB as requiring it while UPS_PORT is auto; bind-mount the host /dev/bus/usb directory into the container or set UPS_PORT to the serial device node" driver=%s port=%s\n' \
+    "$UPS_DRIVER" "$UPS_PORT" >&2
   exit 1
 fi
 
@@ -185,11 +198,11 @@ DBUS_PROBE_INTERVAL=$(strip_leading_zeros "$DBUS_PROBE_INTERVAL")
 # generate_all_configs, which writes the resolved TLS_CERT_PATH.
 if [ "$API_TLS" = "true" ]; then
   resolve_tls_cert || exit 1
-  if [ -e /etc/nut/upsd.conf.user ]; then
+  if user_override_present upsd.conf; then
     printf 'level=info msg="TLS certificate provisioned; mounted upsd.conf.user owns the TLS directives, and upsd serves this certificate only when the override names it in CERTFILE"\n' >&2
   fi
 else
-  if [ -e /etc/nut/upsd.conf.user ]; then
+  if user_override_present upsd.conf; then
     printf 'level=info msg="API_TLS=false: no certificate provisioned; mounted upsd.conf.user owns the TLS directives (an override referencing the self-signed PEM needs API_TLS=true)"\n' >&2
   else
     printf 'level=info msg="TLS disabled (API_TLS=false); upsd serves cleartext only"\n' >&2
@@ -211,23 +224,6 @@ generate_all_configs
 # ---------------------------------------------------------------------------
 # Permissions
 # ---------------------------------------------------------------------------
-# Normalizes what an operator's mounts left behind. Everything the container
-# itself installs in /etc/nut is already root:nut 640 when it first appears
-# under its final name (_install_nut_config, secrets.sh), so this is not
-# load-bearing for any of it. The -type d arm is what still matters: a
-# whole-directory bind mount at host mode 700 is untraversable by `nut`.
-# upsd.pem (operator-mounted) is excluded like *.user overrides: it is a bind
-# mount the container must never mutate. resolve_tls_cert (secrets.sh)
-# serves a root:nut 640 working copy inside /etc/nut instead.
-if ! _perm_err=$(
-  find /etc/nut -name '*.user' -prune -o -name "${TLS_CERT_MOUNT##*/}" -prune -o \( -type d -o -type f \) -exec chown root:nut {} + 2>&1 \
-    && find /etc/nut -name '*.user' -prune -o -name "${TLS_CERT_MOUNT##*/}" -prune -o -type d -exec chmod 750 {} + 2>&1 \
-    && find /etc/nut -name '*.user' -prune -o -name "${TLS_CERT_MOUNT##*/}" -prune -o -type f -exec chmod 640 {} + 2>&1
-); then
-  printf 'level=error msg="could not normalize /etc/nut ownership and modes; refusing to start" err="%s"\n' \
-    "$(log_value "$_perm_err")" >&2
-  exit 1
-fi
 if usb_bus_required; then
   if _chg_err=$(chgrp -R nut /dev/bus/usb 2>&1); then
     printf 'level=info msg="chgrp nut:/dev/bus/usb applied (host device nodes)"\n' >&2
@@ -298,7 +294,10 @@ start_nut_daemon() {
 }
 
 # 90s outer bound on upsdrvctl wedging, sized above NUT's own default
-# maxstartdelay (75s). A mounted ups.conf.user can raise it past that bound.
+# maxstartdelay (75s). Not redundant with it: at v2.8.5 a maxstartdelay of 0 or
+# below skips the alarm() and then blocks in waitpid() forever
+# (drivers/upsdrvctl.c:879-906), so a mounted ups.conf.user can remove NUT's
+# bound entirely, or raise it past this one (README, custom config override).
 start_nut_daemon "upsdrvctl" 90 /usr/sbin/upsdrvctl start
 # NUT drivers write /var/run/nut/<driver>-<ups>.pid on successful start.
 wait_for_pidfile "UPS driver" "$(driver_pidfile)" "$(driver_binary)" || {
@@ -317,9 +316,9 @@ printf 'level=info msg="starting upsmon"\n' >&2
 /usr/sbin/upsmon -F &
 UPSMON_PID=$!
 
-printf 'level=info msg="NUT services started successfully"\n' >&2
+printf 'level=info msg="NUT services started; supervising upsmon"\n' >&2
 
-# Start the USB comms watchdog (recovers from UPS-initiated re-enumeration).
+# Start the comms watchdog (any transport; motivated by USB re-enumeration).
 if [ "$COMMS_WATCHDOG" = "true" ] && [ "$COMMS_CHECK_INTERVAL" -ge 1 ]; then
   printf 'level=info msg="starting comms watchdog" interval=%ss recovery_timeout=%ss\n' \
     "$COMMS_CHECK_INTERVAL" "$COMMS_RECOVERY_TIMEOUT" >&2 || :

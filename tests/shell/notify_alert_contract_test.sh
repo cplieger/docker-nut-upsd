@@ -3,13 +3,10 @@
 # of the log lines this repo's alert rules match.
 #
 # WHY THIS IS A CONTRACT, NOT A FORMATTING PREFERENCE: alerts/logql.yaml parses these
-# lines with logfmt and filters on the PARSED event label. Rename the field or
-# emit a second event= keyval ahead of the real one, and UPSOnBattery /
-# UPSLowBattery / UPSForcedShutdown / UPSCommsLost / UPSHardwareFault /
-# UPSProtectionDegraded stop firing SILENTLY: nothing errors, no test fails, and
-# the gap surfaces during a real outage. Event names are read OUT of
-# alerts/logql.yaml rather than named here, so a divergence between the two files
-# fails.
+# lines with logfmt and filters on the PARSED event label. Renaming or shadowing
+# that field silently disables every rule in the bundle that filters it. The
+# rule inventory is derived from alerts/logql.yaml below, and its count is
+# asserted there rather than written here.
 #
 # Not covered by tests/smoke.sh: this script runs standalone (upsmon execs
 # it, so it cannot rely on the shared helper already being sourced) and is
@@ -92,51 +89,46 @@ logfmt_field() {
   }'
 }
 
-E_LOWBATT=$(rule_events UPSLowBattery)
-E_FSD=$(rule_events UPSForcedShutdown)
-E_NOCOMM=$(rule_events UPSCommsLost)
-E_FAULT=$(rule_events UPSHardwareFault)
-E_PROTECTION=$(rule_events UPSProtectionDegraded)
-E_ONBATT_PAIR=$(rule_events UPSOnBattery)
+# event_rules -> every alert whose expression filters the parsed event field.
+event_rules=$(awk '
+  /^[[:space:]]*- alert:/ { alert = $3; next }
+  alert != "" && /\| logfmt \| event=~*"/ {
+    print alert
+    alert = ""
+  }
+' "$ALERTS")
+if [ -z "$event_rules" ]; then
+  printf 'harness error: no event-bearing alert rules found in %s\n' "$ALERTS" >&2
+  exit 1
+fi
 
 require_event_count() {
-  local alert=$1 expected=$2 events=$3 count=0
-  if [ -z "$events" ]; then
-    printf 'harness error: %s yielded no event names from %s\n' "$alert" "$ALERTS" >&2
-    exit 1
-  fi
+  local alert=$1 events=$2 count=0
   for _event in $events; do
     count=$((count + 1))
   done
-  if [ "$count" -ne "$expected" ]; then
-    printf 'harness error: %s yielded %d event names from %s, want %d\n' \
-      "$alert" "$count" "$ALERTS" "$expected" >&2
+  if [ "$count" -eq 0 ]; then
+    printf 'harness error: %s yielded no event names from %s\n' "$alert" "$ALERTS" >&2
     exit 1
   fi
 }
 
-require_event_count UPSLowBattery 1 "$E_LOWBATT"
-require_event_count UPSForcedShutdown 2 "$E_FSD"
-require_event_count UPSCommsLost 1 "$E_NOCOMM"
-require_event_count UPSHardwareFault 2 "$E_FAULT"
-require_event_count UPSProtectionDegraded 2 "$E_PROTECTION"
-require_event_count UPSOnBattery 2 "$E_ONBATT_PAIR"
-
-# Non-emptiness is not enough: a name extracted from the WRONG rule would be
-# non-empty but meaningless. Every NUT notify type is upper-case ASCII, so the
-# SHAPE is the guard that catches both.
-for _ev in $E_LOWBATT $E_FSD $E_NOCOMM $E_FAULT $E_PROTECTION $E_ONBATT_PAIR; do
-  case "$_ev" in
-    '' | *[!A-Z]*)
-      printf 'harness error: extracted event name %s from %s is not a NUT notify type (lowbatt=%s fsd=%s nocomm=%s fault=%s protection=%s onbatt-pair=%s)\n' \
-        "${_ev:-<empty>}" "$ALERTS" "$E_LOWBATT" "$(printf '%s' "$E_FSD" | tr '\n' ' ')" \
-        "$E_NOCOMM" "$(printf '%s' "$E_FAULT" | tr '\n' ' ')" \
-        "$(printf '%s' "$E_PROTECTION" | tr '\n' ' ')" \
-        "$(printf '%s' "$E_ONBATT_PAIR" | tr '\n' ' ')" >&2
-      exit 1
-      ;;
-  esac
+_all_rule_events=""
+for _rule in $event_rules; do
+  _events=$(rule_events "$_rule")
+  require_event_count "$_rule" "$_events"
+  for _ev in $_events; do
+    case "$_ev" in
+      '' | *[!A-Z]*)
+        printf 'harness error: %s extracted invalid NUT notify type %s from %s\n' \
+          "$_rule" "${_ev:-<empty>}" "$ALERTS" >&2
+        exit 1
+        ;;
+    esac
+  done
+  _all_rule_events="$_all_rule_events $_events"
 done
+matched_rule_events=$(printf '%s\n' "$_all_rule_events" | tr ' ' '\n' | sed '/^$/d' | sort -u)
 
 # emits_event <event> -> 0 when the handler's record binds that event to the
 # parsed event label, not merely a substring anywhere on the line.
@@ -153,63 +145,26 @@ unbound_events() {
   printf '%s' "$_ue"
 }
 
-emits_event "$E_LOWBATT" \
-  && ok "a LOWBATT event binds event=$E_LOWBATT, the label UPSLowBattery filters on in alerts/logql.yaml" \
-  || no 'UPSLowBattery event label' "alerts/logql.yaml wants event=$E_LOWBATT, line: $(notify "$E_LOWBATT")"
-
-[ -z "$(unbound_events "$E_FSD")" ] \
-  && ok "every event UPSForcedShutdown names ($(printf '%s' "$E_FSD" | tr '\n' ' ')) binds its own event label" \
-  || no 'UPSForcedShutdown event labels' "not bound:$(unbound_events "$E_FSD")"
-
-emits_event "$E_NOCOMM" \
-  && ok "a NOCOMM event binds event=$E_NOCOMM, the label UPSCommsLost filters on in alerts/logql.yaml" \
-  || no 'UPSCommsLost event label' "alerts/logql.yaml wants event=$E_NOCOMM, line: $(notify "$E_NOCOMM")"
-
-[ -z "$(unbound_events "$E_FAULT")" ] \
-  && ok "every event UPSHardwareFault names ($(printf '%s' "$E_FAULT" | tr '\n' ' ')) binds its own event label" \
-  || no 'UPSHardwareFault event labels' "not bound:$(unbound_events "$E_FAULT")"
-
-[ -z "$(unbound_events "$E_PROTECTION")" ] \
-  && ok "every event UPSProtectionDegraded names ($(printf '%s' "$E_PROTECTION" | tr '\n' ' ')) binds its own event label" \
-  || no 'UPSProtectionDegraded event labels' "not bound:$(unbound_events "$E_PROTECTION")"
-
-# UPSOnBattery needs BOTH halves of the pair to reach the log: with ONLINE
-# missing the rule can never resolve, and with ONBATT missing it can never
-# fire. The count is pinned above, so a deleted arm cannot quietly reduce this
-# to whichever event survived.
-_pair_seen=$(printf '%s' "$E_ONBATT_PAIR" | tr '\n' ' ')
-[ -z "$(unbound_events "$E_ONBATT_PAIR")" ] \
-  && ok "UPSOnBattery's pair from alerts/logql.yaml ($_pair_seen) binds on both events" \
-  || no 'UPSOnBattery event pair' "not bound:$(unbound_events "$E_ONBATT_PAIR")"
+for _rule in $event_rules; do
+  _events=$(rule_events "$_rule")
+  _unbound=$(unbound_events "$_events")
+  [ -z "$_unbound" ] \
+    && ok "every event $_rule names ($(printf '%s' "$_events" | tr '\n' ' ')) binds its own event label" \
+    || no "$_rule event labels" "not bound:$_unbound"
+done
 
 # --- 1b. every matched NUT event is actually routed to this handler ----------------
 # This script only runs when upsmon's NOTIFYFLAG for the event carries EXEC
-# (generate-config.sh) -- ALARM was matched by an alert but not wired to EXEC
-# before this test existed. Read BOTH sides: event names out of the alert
-# matchers, EXEC routing out of the generator, so dropping either fails.
-# Scoped per event name, not a file-wide grep for "EXEC".
+# (generate-config.sh). Read BOTH sides at run time so a new event-bearing rule
+# enters this check without another hand-maintained list.
 GENERATOR="$REPO_ROOT/generate-config.sh"
 _unrouted=""
-for _ev in $E_LOWBATT $E_FSD $E_NOCOMM $E_FAULT $E_PROTECTION $E_ONBATT_PAIR; do
+for _ev in $matched_rule_events; do
   grep -Eq "^NOTIFYFLAG $_ev .*EXEC" "$GENERATOR" || _unrouted="$_unrouted $_ev"
 done
 [ -z "$_unrouted" ] \
   && ok 'every NUT event the alert rules match carries EXEC in the generated upsmon.conf' \
   || no 'NOTIFYFLAG routing' "alerts/logql.yaml matches these events but $GENERATOR does not route them to NOTIFYCMD:$_unrouted"
-
-E_UNAVAILABLE=$(rule_events UPSProtectionUnavailable)
-_unavailable_n=0
-for _ev in $E_UNAVAILABLE; do
-  _unavailable_n=$((_unavailable_n + 1))
-done
-_unavailable_seen=$(printf '%s' "$E_UNAVAILABLE" | tr '\n' ' ')
-_unavailable_unrouted=""
-for _ev in $E_UNAVAILABLE; do
-  grep -Eq "^NOTIFYFLAG $_ev .*EXEC" "$GENERATOR" || _unavailable_unrouted="$_unavailable_unrouted $_ev"
-done
-[ "$_unavailable_n" -eq 2 ] && [ -z "$_unavailable_unrouted" ] \
-  && ok "UPSProtectionUnavailable's pair from alerts/logql.yaml ($_unavailable_seen) carries EXEC in the generated upsmon.conf" \
-  || no 'UPSProtectionUnavailable NOTIFYFLAG routing' "alerts/logql.yaml should name 2 events, got $_unavailable_n ($_unavailable_seen); not routed:$_unavailable_unrouted"
 
 # --- 1c. every routed event is matched or named as deliberately unalerted --------
 # The reverse of 1b fails silently: an EXEC-routed event with no rule is
@@ -248,26 +203,62 @@ _upsmon_line=$(notify ONBATT "$_upsmon_system" 'UPS ups is on battery')
   && ok 'upsmon system words bind the bare UPS name in the log record' \
   || no 'UPSNAME system-word normalization' "UPSNAME=$_upsmon_system, line: $_upsmon_line"
 
+_quoted_field_pattern='^level=warn msg="UPS event" event="[^"]*" ups="[^"]*" detail="[^"]*"$'
+
+_hostile_event_line=$(notify 'ALARM" forged=1' ups safe)
+printf '%s\n' "$_hostile_event_line" | grep -Eq "$_quoted_field_pattern" \
+  && printf '%s\n' "$_hostile_event_line" | grep -Fq 'event="ALARM forged=1"' \
+  && [ "$(printf '%s\n' "$_hostile_event_line" | wc -l)" -eq 1 ] \
+  && ok 'NOTIFYTYPE quotes stay inside the event field' \
+  || no 'NOTIFYTYPE quoted-field boundary' "line: $_hostile_event_line"
+
+_hostile_ups_line=$(notify ALARM 'ups" forged=1' safe)
+printf '%s\n' "$_hostile_ups_line" | grep -Eq "$_quoted_field_pattern" \
+  && printf '%s\n' "$_hostile_ups_line" | grep -Fq 'ups="ups forged=1"' \
+  && [ "$(printf '%s\n' "$_hostile_ups_line" | wc -l)" -eq 1 ] \
+  && ok 'UPSNAME quotes stay inside the ups field' \
+  || no 'UPSNAME quoted-field boundary' "line: $_hostile_ups_line"
+
+_hostile_detail_line=$(notify ALARM ups 'alarm" forged=1')
+printf '%s\n' "$_hostile_detail_line" | grep -Eq "$_quoted_field_pattern" \
+  && printf '%s\n' "$_hostile_detail_line" | grep -Fq 'detail="alarm forged=1"' \
+  && [ "$(printf '%s\n' "$_hostile_detail_line" | wc -l)" -eq 1 ] \
+  && ok 'notification-message quotes stay inside the detail field' \
+  || no 'notification-message quoted-field boundary' "line: $_hostile_detail_line"
+
 # --- 3. severity classification, per class ----------------------------------------
 #
-# The severity is what routes the alert; a class that silently degrades to warn
-# (or escalates to error) changes who gets paged for what.
-all_match '^level=info ' ONLINE COMMOK \
-  && ok 'ONLINE and COMMOK classify as level=info' \
-  || no 'info class' 'an info-class event did not log at level=info'
+# The routed set is derived above, but this class table is literal: the bundle
+# carries no log level to derive. A new routed event must be classified here.
+expected_level() {
+  case "$1" in
+    ONLINE | COMMOK) printf 'info' ;;
+    FSD | SHUTDOWN) printf 'error' ;;
+    ONBATT | LOWBATT | COMMBAD | NOCOMM | REPLBATT | NOPARENT | OFF | BYPASS | OVER | CAL | ALARM | OTHER) printf 'warn' ;;
+    *) return 1 ;;
+  esac
+}
 
-all_match '^level=info ' NOTALARM NOTBYPASS NOTOVER NOTOFF NOTCAL \
-  && [ -z "$(unbound_events 'NOTALARM NOTBYPASS NOTOVER NOTOFF NOTCAL')" ] \
-  && ok 'NOTALARM, NOTBYPASS, NOTOVER, NOTOFF and NOTCAL retain their event names and classify as level=info' \
-  || no 'clear-state info class' "not bound:$(unbound_events 'NOTALARM NOTBYPASS NOTOVER NOTOFF NOTCAL')"
+_unclassified=""
+_misclassified=""
+for _ev in $routed_events; do
+  if ! _level=$(expected_level "$_ev"); then
+    _unclassified="$_unclassified $_ev"
+  elif ! notify "$_ev" | grep -q "^level=$_level "; then
+    _misclassified="$_misclassified $_ev(want=$_level)"
+  fi
+done
+[ -z "$_unclassified" ] && [ -z "$_misclassified" ] \
+  && ok 'every routed event has its literal severity class and logs at that level' \
+  || no 'routed-event severity classes' "unclassified:$_unclassified; mismatched:$_misclassified"
 
-all_match '^level=warn ' ONBATT LOWBATT COMMBAD NOCOMM REPLBATT ALARM \
-  && ok 'ONBATT, LOWBATT, COMMBAD, NOCOMM, REPLBATT and ALARM classify as level=warn' \
-  || no 'warn class' 'a warn-class event did not log at level=warn'
-
-all_match '^level=error ' FSD SHUTDOWN \
-  && ok 'FSD and SHUTDOWN classify as level=error (the forced-shutdown pair)' \
-  || no 'error class' 'a forced-shutdown event did not log at level=error'
+# A mounted upsmon.conf.user can route these clear-state twins even though the
+# generated file does not. Their membership class stays explicit here.
+clear_events=(NOTALARM NOTBYPASS NOTOVER NOTOFF NOTCAL NOTOTHER)
+all_match '^level=info ' "${clear_events[@]}" \
+  && [ -z "$(unbound_events "${clear_events[*]}")" ] \
+  && ok 'mounted-config clear-state twins retain their event names and classify as level=info' \
+  || no 'mounted-config clear-state info class' "not bound:$(unbound_events "${clear_events[*]}")"
 
 # --- 4. the default arm: an event this image has never seen still reports ----------
 #

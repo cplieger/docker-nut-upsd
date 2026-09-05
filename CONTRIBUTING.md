@@ -120,10 +120,15 @@ new generated file should respect that same override hook.
   - the [README's License section](README.md#license), which keeps
     `patches/` as a GPL-2.0-or-later exception;
   - this checklist.
-  Removing the CVE-2026-54161 NOTIFYCMD/execvp backport additionally touches
-  the [README's Alerting section](README.md#alerting), whose "`NOTIFYCMD` is
-  executed directly" note then describes stock v2.8.6 behavior rather than a
-  backport.
+  Removing the CVE-2026-54161 NOTIFYCMD/execvp backport additionally requires
+  re-reading the [README's Alerting section](README.md#alerting). Re-affirm both
+  claims in its `NOTIFYCMD` paragraph against the new pin: NUT executes the
+  command directly, and `NOTIFYCMD` must be an executable path with arguments or
+  shell snippets wrapped in a script. Upstream master parses `NOTIFYCMD` into an
+  argument vector, so do not assume that the second claim remains true. Also
+  re-affirm the `UPSNotifyExecFailed` matcher in `alerts/logql.yaml`. Its
+  `execvp(`/`failed` filters match a diagnostic that the backport introduces,
+  and dropping the patch removes the current `--fuzz=0` drift signal.
   Do not edit the diff bodies: a patch that no longer matches what
   upstream wrote is no longer a backport, and the removal drops the whole
   file with nothing recording the divergence - so a defect found in
@@ -146,29 +151,41 @@ new generated file should respect that same override hook.
   proves nothing about whether upstream fixed the musl detection.
 - **The `upsmon` timing defaults are hand-copied from the pin.** The
   consecutive `: "${VAR:=N}"` directives in `entrypoint.sh`, from `POLLFREQ`
-  through `RBWARNTIME`, restate NUT v2.8.5's defaults
-  (`clients/upsmon.c:59-118`). A `NUT_VERSION` bump must compare every directive
-  against that file and either update it or reaffirm the pin deliberately.
-  Pinning keeps the FSD sequence and notification intervals stable across a
-  bump. If one moves, review the coupled sites in the same change:
-  `alerts/logql.yaml` carries the literals 5, 300 and 43200 in its windows and
-  prose, and `tests/shell/alert_state_window_contract_test.sh` reads `POLLFREQ`,
-  `NOCOMMWARNTIME` and `RBWARNTIME` from the directives. The test stays green
-  while its window inequalities hold. No runtime check is possible because the
-  runtime image carries no NUT source tree.
+  through `RBWARNTIME`, restate NUT v2.8.5's defaults. A `NUT_VERSION` bump must
+  compare every directive against `clients/upsmon.c` and either update it or
+  reaffirm the pin deliberately. Pinning keeps the FSD sequence and notification
+  intervals stable across a bump. `generate-config.sh` separately pins
+  `OFFDURATION`, `OBLBDURATION` and `ALARMCRITICAL`, and deliberately leaves
+  `OVERDURATION` unset. Compare all four choices with the new pin and decide
+  whether to re-pin them. Re-read the `UPSHardwareFault` annotation for
+  `ALARMCRITICAL` and the `UPSProtectionUnavailable` annotation for
+  `OFFDURATION`; both credit upstream for the pinned default. If a timing default
+  moves, review the coupled sites in the same change: `alerts/logql.yaml` carries
+  the literals 5, 300 and 43200 in its windows and prose, and
+  `tests/shell/alert_state_window_contract_test.sh` reads `POLLFREQ`,
+  `POLLFREQALERT`, `NOCOMMWARNTIME` and `RBWARNTIME` from the directives. Its
+  window assertions derive their minimum ranges from the shipped defaults, and
+  its published-default assertions require the alert prose to match those
+  defaults. No runtime check of the upstream pin is possible because the runtime
+  image carries no NUT source tree.
 - **The `clients/upsmon.c` citations are pinned to NUT v2.8.5.** On a
   `NUT_VERSION` bump, find every site with
   `grep -n 'clients/upsmon\.c' entrypoint.sh generate-config.sh validate.sh alerts/logql.yaml`
-  and re-affirm each against the new pin. The timing-default comments in
-  `entrypoint.sh` and `generate-config.sh` claim their values are upstream's own
-  defaults (`clients/upsmon.c:59-118`). The `HOSTSYNC` ceiling comment in
-  `validate.sh` (`:2428-2460`) justifies a refusal. Other citations explain the
-  `DEADTIME` comparison (`:1712`) and the `ups_on_batt` cadence (`:887`). The
-  `UPSHostSyncExpired` rule is the only alert matcher keyed to upstream prose;
-  an upstream reword silently breaks that alert. At v2.8.6, re-verify every
-  citation before removing the checked-in patches. Applying them with
-  `patch -p1 --fuzz=0` is the only mechanical drift signal for this source
-  file, and that version removes the patches that provide it.
+  and re-affirm each against the new pin. The timing-default comment in
+  `entrypoint.sh` and the timing-and-criticality comment in `generate-config.sh`
+  claim their values are upstream's own defaults. The `HOSTSYNC` ceiling comment
+  in `validate.sh` justifies a refusal. Other citations explain the `DEADTIME`
+  comparison and the `ups_on_batt` cadence. Two alert matchers key directly on
+  upstream prose: `UPSHostSyncExpired` matches upsmon's host-sync diagnostic,
+  and `UPSNotifyExecFailed` matches the execvp failure diagnostic introduced by
+  the CVE backport. An upstream reword silently breaks either matcher, and the
+  second matcher loses its patch-application drift signal when the backport is
+  dropped. The criticality pin also couples `_emit_upsmon_conf`, the
+  `UPSHardwareFault` and `UPSProtectionUnavailable` annotations, the
+  `SHUTDOWN_ON_BATTERY_CRITICAL` row in the README, and the criticality cases in
+  `tests/shell/alert_state_window_contract_test.sh`; the `OVERDURATION` absence
+  is deliberate. At v2.8.6, re-verify every citation and both matchers before
+  removing the checked-in patches.
 - **USB re-enumeration is expected, not exceptional.** Many UPSes reset
   their USB link periodically (the driver runs fine, then goes "Data
   stale"). The `comms_watchdog` in `lifecycle.sh` recovers from this by
@@ -230,9 +247,21 @@ new generated file should respect that same override hook.
 
 ## Local validation
 
-Put assertions that need the assembled image in `tests/smoke.sh`. Put pure
-shell logic and cross-file contracts that read both source files in
+Put assertions that run inside the image filesystem — the compiled binaries,
+config generation, and the validation matrix — in `tests/smoke.sh`. That is a
+Dockerfile `test` stage on the pre-final runtime stage, so it never executes the
+baked ENTRYPOINT or HEALTHCHECK.
+
+Put assertions that need the assembled, running container in the `smoke_verify`
+hook in `tests/image-smoke.conf`, which drives the live container through
+`$SMOKE_CONTAINER`.
+
+Put pure shell logic and cross-file contracts that read both source files in
 `tests/shell/`.
+
+`tests/image-smoke.sh` is synced verbatim from the shared harness in
+`cplieger/ci` and must never be hand-edited — a local edit is overwritten by the
+next sync. Change the harness there and let the sync land it.
 
 The scripts and Dockerfile are linted in CI; run the same tools before
 pushing:

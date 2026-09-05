@@ -39,7 +39,63 @@ EXPECTED='1 15
 [ "$(cat "$CALLS")" = "$EXPECTED" ] \
   && ok 'two stood-down crossings leave the first accepted bounce numbered 1 and on the fast cadence' \
   || no 'stand-down does not spend the restart budget' "calls=$(tr '\n' '|' <"$CALLS") err=$(cat "$WORK/err")"
+
+ENTRYPOINT="$REPO_ROOT/validate.sh"
+load_function strip_leading_zeros
+ENTRYPOINT="$REPO_ROOT/entrypoint.sh"
+CANONICALIZE_WATCHDOG=$(extract_range \
+  '^COMMS_CHECK_INTERVAL=\$(strip_leading_zeros "\$COMMS_CHECK_INTERVAL")$' \
+  '^DBUS_PROBE_INTERVAL=\$(strip_leading_zeros "\$DBUS_PROBE_INTERVAL")$' \
+  "$WORK/canonicalize-watchdog.sh") || exit 1
+ENTRYPOINT="$SUBJECT"
+
+COMMS_CHECK_INTERVAL=08
+COMMS_RECOVERY_TIMEOUT=090
+COMMS_FAST_RETRIES=01
+COMMS_BACKOFF_FACTOR=08
+DBUS_PROBE_INTERVAL=0300
+. "$CANONICALIZE_WATCHDOG"
+PADDED_CALLS="$WORK/padded-restarts"
+: >"$PADDED_CALLS"
+(
+  NOW=0
+  TICKS=0
+  watchdog_epoch() { printf '%s' "$NOW"; }
+  sleep() {
+    NOW=$((NOW + COMMS_CHECK_INTERVAL))
+    TICKS=$((TICKS + 1))
+    [ "$TICKS" -le 105 ] || exit 0
+  }
+  comms_fresh() { return 1; }
+  restart_ups_driver() {
+    printf '%s %s\n' "$1" "$NOW" >>"$PADDED_CALLS"
+    return 0
+  }
+  comms_watchdog
+) 2>"$WORK/padded-err"
+PADDED_EXPECTED='1 104
+2 832'
+[ "$COMMS_CHECK_INTERVAL $COMMS_RECOVERY_TIMEOUT $COMMS_FAST_RETRIES $COMMS_BACKOFF_FACTOR $DBUS_PROBE_INTERVAL" = '8 90 1 8 300' ] \
+  && [ "$(cat "$PADDED_CALLS")" = "$PADDED_EXPECTED" ] \
+  && ok 'zero-padded watchdog timings remain decimal through the backoff threshold' \
+  || no 'zero-padded watchdog arithmetic' \
+    "values=$COMMS_CHECK_INTERVAL,$COMMS_RECOVERY_TIMEOUT,$COMMS_FAST_RETRIES,$COMMS_BACKOFF_FACTOR,$DBUS_PROBE_INTERVAL calls=$(tr '\n' '|' <"$PADDED_CALLS") err=$(cat "$WORK/padded-err")"
+
 load_function driver_pidfile
+load_function watchdog_epoch
+BEFORE=$(awk '{ split($1, parts, "."); print parts[1] }' /proc/uptime)
+GOT=$(watchdog_epoch)
+AFTER=$(awk '{ split($1, parts, "."); print parts[1] }' /proc/uptime)
+case "$BEFORE:$GOT:$AFTER" in
+  :* | *::* | *: | *[!0-9:]*)
+    no 'watchdog monotonic clock' "before=$BEFORE got=$GOT after=$AFTER"
+    ;;
+  *)
+    [ "$GOT" -ge "$BEFORE" ] && [ "$GOT" -le "$AFTER" ] \
+      && ok 'watchdog_epoch reports boot-monotonic seconds within the surrounding /proc/uptime reads' \
+      || no 'watchdog monotonic clock' "before=$BEFORE got=$GOT after=$AFTER"
+    ;;
+esac
 load_function driver_binary
 load_function pid_matches_binary
 load_function kill_stale_driver_from_pidfile
@@ -175,7 +231,6 @@ TX_EXPECTED=$(printf '%s\n' \
   'kill=-0 4242' \
   'readlink=-f /proc/4242/exe' \
   'readlink=-f /usr/lib/nut/usbhid-ups' \
-  'kill=-0 4242' \
   'kill=-9 4242' \
   'rm=-f /var/run/nut/usbhid-ups-ups.pid' \
   "capture_tmpfile=$WD_RESTART_CAPTURE_PREFIX" \
@@ -192,6 +247,39 @@ TX_EXPECTED=$(printf '%s\n' \
 
 : >"$TX_TRACE"
 : >"$TX_ERR"
+TX_STOP_RC=0
+TX_STOP_OUT=""
+TX_START_RC=0
+TX_START_OUT=""
+SHUTDOWN_ON_BATTERY_CRITICAL=true
+if (
+  timeout() {
+    printf 'timeout=%s\n' "$*" >>"$TX_TRACE"
+    case "$*" in
+      '-k 5 30 /usr/sbin/upsdrvctl stop ups')
+        command touch "$POWERDOWNFLAG_FILE"
+        return 0
+        ;;
+      '-k 5 90 /usr/sbin/upsdrvctl start ups') return 0 ;;
+      *) return 99 ;;
+    esac
+  }
+  restart_ups_driver 1
+) 2>"$TX_ERR"; then
+  TX_STATUS=0
+else
+  TX_STATUS=$?
+fi
+command rm -f "$POWERDOWNFLAG_FILE"
+[ "$TX_STATUS" -ne 0 ] \
+  && grep -q 'standing down; forced shutdown (killpower) in progress.*phase=post-stop' "$TX_ERR" \
+  && ! grep -q '^read_pidfile=' "$TX_TRACE" \
+  && ! grep -q 'upsdrvctl start' "$TX_TRACE" \
+  && ok 'a killpower flag raised during driver stop stands recovery down before cleanup or start' \
+  || no 'post-stop killpower stand-down' "status=$TX_STATUS trace=$(tr '\n' '|' <"$TX_TRACE") err=$(tr '\n' '|' <"$TX_ERR")"
+
+: >"$TX_TRACE"
+: >"$TX_ERR"
 TX_START_RC=0
 TX_START_OUT=""
 SHUTDOWN_ON_BATTERY_CRITICAL=false
@@ -205,7 +293,7 @@ command rm -f "$POWERDOWNFLAG_FILE"
 [ "$TX_STATUS" -eq 0 ] \
   && grep -q '^chgrp=-R nut /dev/bus/usb$' "$TX_TRACE" \
   && grep -q '^timeout=-k 5 90 /usr/sbin/upsdrvctl start ups$' "$TX_TRACE" \
-  && grep -q 'comms watchdog re-homing UPS driver after stale comms' "$TX_ERR" \
+  && grep -q 'comms watchdog restarting UPS driver after stale comms' "$TX_ERR" \
   && ! grep -q 'comms watchdog standing down' "$TX_ERR" \
   && ok 'a killpower flag from noop FSD does not disarm recovery while host shutdown is disabled' \
   || no 'killpower flag with host shutdown disabled' "status=$TX_STATUS trace=$(tr '\n' '|' <"$TX_TRACE") err=$(tr '\n' '|' <"$TX_ERR")"

@@ -133,14 +133,15 @@ else
   no 'failure then success' "rc=$RUN_RC dbus=$(wc -l <"$DBUS_CALLS") timeout=$(wc -l <"$TIMEOUT_CALLS") sleeps=$(tr '\n' ' ' <"$SLEEP_CALLS"); stderr: $(tr '\n' ' ' <"$ERR")"
 fi
 
+SETTLE_VALUE=false_long
 run_shutdown failure failure failure
 failure_line=$(grep -nF 'D-Bus poweroff failed after 3 attempts' "$ERR" | cut -d: -f1)
 inhibitor_line=$(grep -nF 'D-Bus poweroff inhibitors at failure' "$ERR" | cut -d: -f1)
 if [ "$RUN_RC" -eq 1 ] \
   && [ "$(wc -l <"$DBUS_CALLS")" -eq 3 ] \
   && [ "$(wc -l <"$INHIBITOR_CALLS")" -eq 1 ] \
-  && [ "$(wc -l <"$TIMEOUT_CALLS")" -eq 4 ] \
-  && [ "$(wc -l <"$SLEEP_CALLS")" -eq 2 ] \
+  && [ "$(wc -l <"$TIMEOUT_CALLS")" -eq 5 ] \
+  && [ "$(wc -l <"$SLEEP_CALLS")" -eq 3 ] \
   && [ "$(cat "$RM_CALLS")" = '-f /var/run/nut-secrets/killpower' ] \
   && [ "$(grep -cF 'D-Bus poweroff failed, retrying"' "$ERR")" -eq 2 ] \
   && [ -n "$failure_line" ] && [ -n "$inhibitor_line" ] \
@@ -217,6 +218,7 @@ exit 1
 EOF
 chmod +x "$BIN/rm"
 
+SETTLE_VALUE=false_long
 run_shutdown failure failure failure
 if [ "$RUN_RC" -eq 1 ] \
   && [ "$(cat "$RM_CALLS")" = '-f /var/run/nut-secrets/killpower' ] \
@@ -249,6 +251,11 @@ if [ "$*" = "$SETTLE_ARGS" ]; then
   esac
   exit 0
 fi
+if [ "$*" = "$INHIBITOR_ARGS" ]; then
+  printf '%s\n' "$*" >>"$INHIBITOR_CALLS"
+  printf 'method return\n   array [\n      struct { string "shutdown" string "backup writer" string "backupd" string "block" uint32 1000 uint32 42 }\n   ]\n'
+  exit 0
+fi
 [ "$*" = "$DBUS_ARGS" ] || exit 95
 printf '%s\n' "$*" >>"$DBUS_CALLS"
 _call=$(wc -l <"$DBUS_CALLS")
@@ -275,9 +282,9 @@ run_shutdown success
 if [ "$RUN_RC" -eq 0 ] \
   && [ ! -s "$RM_CALLS" ] \
   && ! grep -qF 'D-Bus poweroff settle state unreadable' "$ERR"; then
-  ok 'canonical true remains a confirmed poweroff without cleanup or an unreadable-state record'
+  ok 'canonical true remains a pending poweroff without cleanup or an unreadable-state record'
 else
-  no 'canonical true settle precondition' "$(write_settle_observables | tr '\n' ' ')"
+  no 'canonical true pending settle precondition' "$(write_settle_observables | tr '\n' ' ')"
 fi
 
 for SETTLE_VALUE in failed empty malformed valueless truncated; do
@@ -330,9 +337,58 @@ else
 fi
 SETTLE_VALUE=true
 
+for _settle_case in pending refuted unreadable; do
+  case "$_settle_case" in
+    pending) SETTLE_VALUE=true ;;
+    refuted) SETTLE_VALUE=false_long ;;
+    unreadable) SETTLE_VALUE=failed ;;
+  esac
+  run_shutdown failure failure failure
+  _settle_alert_matches=$(sed -n 's/^level=[^ ]* msg="\([^"]*\)".*/\1/p' "$ERR" \
+    | grep -Ec -- "^${poweroff_failed_matcher}$" || :)
+  case "$_settle_case" in
+    pending)
+      if [ "$RUN_RC" -eq 0 ] \
+        && [ ! -s "$RM_CALLS" ] \
+        && [ ! -s "$INHIBITOR_CALLS" ] \
+        && [ "$_settle_alert_matches" -eq 0 ] \
+        && grep -qF 'D-Bus poweroff requests failed but logind reports a pending poweroff; host poweroff NOT refuted' "$ERR"; then
+        ok 'a pending settle state after exhausted PowerOff failures avoids critical-alert routing and cleanup'
+      else
+        no 'failed-PowerOff pending settle state' "$(write_settle_observables | tr '\n' ' ')"
+      fi
+      ;;
+    refuted)
+      if [ "$RUN_RC" -eq 1 ] \
+        && [ "$(cat "$RM_CALLS")" = '-f /var/run/nut-secrets/killpower' ] \
+        && [ "$(wc -l <"$INHIBITOR_CALLS")" -eq 1 ] \
+        && [ "$_settle_alert_matches" -eq 1 ]; then
+        ok 'a refuted settle state after exhausted PowerOff failures takes the confirmed-failure path'
+      else
+        no 'failed-PowerOff refuted settle state' "$(write_settle_observables | tr '\n' ' ')"
+      fi
+      ;;
+    unreadable)
+      if [ "$RUN_RC" -eq 1 ] \
+        && [ "$(cat "$RM_CALLS")" = '-f /var/run/nut-secrets/killpower' ] \
+        && [ ! -s "$INHIBITOR_CALLS" ] \
+        && [ "$_settle_alert_matches" -eq 1 ]; then
+        ok 'an unreadable settle state after exhausted PowerOff failures keeps the terminal failure path without inhibitor reporting'
+      else
+        no 'failed-PowerOff unreadable settle state' "$(write_settle_observables | tr '\n' ' ')"
+      fi
+      ;;
+  esac
+done
+SETTLE_VALUE=true
+
 cat >"$BIN/dbus-send" <<'EOF'
 #!/bin/sh
 _body=$(printf '%0600d' 0)
+if [ "$*" = "$SETTLE_ARGS" ]; then
+  printf 'method return\n   variant boolean %s\n' "$SETTLE_VALUE"
+  exit 0
+fi
 if [ "$*" = "$INHIBITOR_ARGS" ]; then
   printf '%s\n' "$*" >>"$INHIBITOR_CALLS"
   printf 'method return\n   array [\n      struct { string "shutdown" string "backup writer"\nlevel=error msg="forged by inhibitor output" body=%s\\tail" string "backupd" string "block" uint32 1000 uint32 42 }\n   ]\n' "$_body"
@@ -345,6 +401,7 @@ exit 1
 EOF
 chmod +x "$BIN/dbus-send"
 
+SETTLE_VALUE=false_long
 run_shutdown failure failure failure
 if [ "$RUN_RC" -eq 1 ] \
   && [ "$(wc -l <"$INHIBITOR_CALLS")" -eq 1 ] \

@@ -239,6 +239,35 @@ else
   no 'presentation trailing LF canonicalized' 'UPS_DESC did not strip to filesecret and pass validation'
 fi
 
+mixed_nut_word=$(printf 'p\303\244ssword')
+if validate_nut_word API_PASSWORD "$mixed_nut_word" 2>"$ERR"; then
+  ok 'a non-ASCII credential with printable bytes survives the shared NUT parser filter'
+else
+  no 'mixed non-ASCII NUT word accepted' "the shared-filter value was refused: $(head -c 200 "$ERR")"
+fi
+
+empty_nut_word=$(printf '\303\244\303\266')
+: >"$ERR"
+if validate_nut_word API_PASSWORD "$empty_nut_word" 2>"$ERR"; then
+  no 'empty stored NUT word refused' 'a credential with no preserved byte was accepted'
+elif grep -Fq 'msg="env var becomes an empty NUT word after parsing" var=API_PASSWORD' "$ERR"; then
+  ok 'a credential with no preserved byte is refused before it becomes an empty stored word'
+else
+  no 'empty stored NUT word refused' "wrong refusal: $(head -c 200 "$ERR")"
+fi
+
+nut_word_501=$(head -c 501 /dev/zero | tr '\0' A)
+nut_word_502="${nut_word_501}A"
+if ! validate_nut_word API_PASSWORD "$nut_word_501" 2>"$ERR"; then
+  no 'bundled NUT client password boundary accepted' "501 bytes were refused: $(head -c 200 "$ERR")"
+elif validate_nut_word API_PASSWORD "$nut_word_502" 2>"$ERR"; then
+  no 'bundled NUT client password overflow refused' '502 bytes were accepted'
+elif grep -Fq 'limit=501' "$ERR"; then
+  ok 'the bundled NUT client password boundary accepts 501 bytes and refuses 502'
+else
+  no 'bundled NUT client password overflow refused' "wrong refusal: $(head -c 200 "$ERR")"
+fi
+
 # --- 12. every credential-row check refuses without disclosing the value -------
 credential_table=$(awk '
   /^[[:space:]]+_check (API_PASSWORD|ADMIN_PASSWORD) / {
@@ -261,7 +290,7 @@ credential_probe_value() {
     backslash) printf 'LeakMarker\\suffix' ;;
     hash) printf 'LeakMarker#suffix' ;;
     nospace | identifier) printf 'LeakMarker suffix' ;;
-    nut_word) printf 'LeakMarker\377suffix' ;;
+    nut_word) printf '%502s' '' | tr ' ' A ;;
     brackets) printf 'LeakMarker]suffix' ;;
     numeric) printf 'LeakMarker' ;;
     positive | port) printf '0' ;;
@@ -316,6 +345,42 @@ elif diff -u "$documented" "$validated" >"$WORK/inventory.diff"; then
   ok 'every documented environment variable has a shipped validation row, and every row is documented'
 else
   no 'documented and validated environment inventories match' "$(cat "$WORK/inventory.diff")"
+fi
+
+# --- 13b. published defaults match shipped assignments ---------------------------
+documented_defaults="$WORK/documented-defaults"
+shipped_defaults="$WORK/shipped-defaults"
+documented_default_names="$WORK/documented-default-names"
+shipped_default_names="$WORK/shipped-default-names"
+
+# The sed program matches literal Markdown backticks in the final table cell.
+# shellcheck disable=SC2016
+sed -n 's/^| `\([A-Z][A-Z0-9_]*\)` |.*| `\([^`]*\)` |$/\1=\2/p' \
+  "$REPO_ROOT/README.md" | sort -t= -k1,1 >"$documented_defaults"
+# The sed program matches literal shell parameter expansion in entrypoint.sh.
+# shellcheck disable=SC2016
+sed -n 's/^: "${\([A-Z][A-Z0-9_]*\):=\(.*\)}"$/\1=\2/p' \
+  "$REPO_ROOT/entrypoint.sh" | sort -t= -k1,1 >"$shipped_defaults"
+
+cut -d= -f1 "$documented_defaults" | sort -u >"$documented_default_names"
+cut -d= -f1 "$shipped_defaults" | sort -u >"$shipped_default_names"
+
+if [ ! -s "$documented_defaults" ] || [ ! -s "$shipped_defaults" ]; then
+  no 'default inventories parsed' 'README.md or entrypoint.sh produced an empty default inventory'
+elif ! diff -u "$documented_default_names" "$shipped_default_names" >"$WORK/default-inventory.diff"; then
+  no 'documented and shipped default inventories match' "$(cat "$WORK/default-inventory.diff")"
+else
+  default_mismatches=$(join -t= -j1 "$documented_defaults" "$shipped_defaults" \
+    -o 0,1.2,2.2 | awk -F= '
+      $2 != $3 {
+        printf "%s: README=%s shipped=%s\n", $1, $2, $3
+      }
+    ')
+  if [ -z "$default_mismatches" ]; then
+    ok 'every literal README default matches its shipped entrypoint assignment'
+  else
+    no 'documented defaults match shipped assignments' "$default_mismatches"
+  fi
 fi
 
 report

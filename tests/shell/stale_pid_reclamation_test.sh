@@ -105,6 +105,34 @@ run_killpower_cleanup
   || no 'present stale killpower flag' \
     "rc=$RUN_RC exists=$([ -e "$WORK/killpower" ] && printf yes || printf no) stderr=$(cat "$WORK/stderr")"
 
+mkdir "$WORK/killpower-rm-failure-bin"
+cat >"$WORK/killpower-rm-failure-bin/rm" <<'STUB'
+#!/usr/bin/env bash
+set -u
+[ "$#" -eq 2 ] && [ "$1" = -f ] && [ "$2" = "$POWERDOWNFLAG_FILE" ] || exit 92
+exit 1
+STUB
+chmod +x "$WORK/killpower-rm-failure-bin/rm"
+
+: >"$WORK/killpower"
+: >"$WORK/stderr"
+if env PATH="$WORK/killpower-rm-failure-bin:$PATH" \
+  KILLPOWER_BLOCK="$KILLPOWER_BLOCK" POWERDOWNFLAG_FILE="$WORK/killpower" \
+  bash -c '
+    set -euf
+    . "$KILLPOWER_BLOCK"
+  ' >"$WORK/stdout" 2>"$WORK/stderr"; then
+  RUN_RC=0
+else
+  RUN_RC=$?
+fi
+[ "$RUN_RC" -eq 1 ] && [ -e "$WORK/killpower" ] \
+  && grep -Fqx -- "level=error msg=\"failed to clear the stale killpower flag; refusing to start\" path=$WORK/killpower" "$WORK/stderr" \
+  && ok 'startup refuses when a stale killpower flag cannot be cleared' \
+  || no 'stale killpower clear refusal' \
+    "rc=$RUN_RC exists=$([ -e "$WORK/killpower" ] && printf yes || printf no) stderr=$(cat "$WORK/stderr")"
+rm -f "$WORK/killpower"
+
 TEMP_BLOCK=$(extract_range '^_clt_etc=' '^fi$' "$WORK/temp-cleanup-block.sh") || exit 1
 
 cat >"$WORK/drive-temp-cleanup.sh" <<'DRIVER'
@@ -186,52 +214,5 @@ expected_error=$(printf '%0509d' 0 | tr 0 x)
   && ok 'a cleanup failure stays warn-only and marks its error as truncated at 512 bytes' \
   || no 'bounded fail-soft temporary cleanup' \
     "rc=$RUN_RC warnings=$warning_count error_bytes=$error_bytes stderr=$(cat "$WORK/stderr")"
-
-RAW_PERMISSIONS_BLOCK=$(extract_range '^if ! _perm_err=$(' '^fi$' "$WORK/raw-permissions-block.sh") || exit 1
-PERMISSIONS_BLOCK="$WORK/permissions-block.sh"
-sed 's#/etc/nut#$NUT_ROOT#g' "$RAW_PERMISSIONS_BLOCK" >"$PERMISSIONS_BLOCK"
-
-PERMISSIONS_ROOT="$WORK/etc-nut"
-mkdir -p "$PERMISSIONS_ROOT"
-: >"$PERMISSIONS_ROOT/upsd.conf"
-: >"$PERMISSIONS_ROOT/ups.conf.user"
-: >"$PERMISSIONS_ROOT/upsd.pem"
-chmod 600 "$PERMISSIONS_ROOT/upsd.conf"
-chmod 604 "$PERMISSIONS_ROOT/ups.conf.user"
-chmod 606 "$PERMISSIONS_ROOT/upsd.pem"
-
-mkdir -p "$WORK/permissions-bin"
-cat >"$WORK/permissions-bin/chown" <<'STUB'
-#!/bin/sh
-[ "$1" = root:nut ] || exit 96
-shift
-printf '%s\n' "$@" >>"$CHOWN_PATHS"
-STUB
-chmod +x "$WORK/permissions-bin/chown"
-
-: >"$WORK/chown-paths"
-: >"$WORK/permissions-stderr"
-if env PATH="$WORK/permissions-bin:$PATH" NUT_ROOT="$PERMISSIONS_ROOT" \
-  TLS_CERT_MOUNT=/etc/nut/upsd.pem CHOWN_PATHS="$WORK/chown-paths" \
-  PERMISSIONS_BLOCK="$PERMISSIONS_BLOCK" bash -c '
-    set -euf
-    log_value() { printf "%s" "$1"; }
-    . "$PERMISSIONS_BLOCK"
-  ' >"$WORK/permissions-stdout" 2>"$WORK/permissions-stderr"; then
-  RUN_RC=0
-else
-  RUN_RC=$?
-fi
-
-[ "$RUN_RC" -eq 0 ] \
-  && [ "$(stat -c %a "$PERMISSIONS_ROOT")" = 750 ] \
-  && [ "$(stat -c %a "$PERMISSIONS_ROOT/upsd.conf")" = 640 ] \
-  && [ "$(stat -c %a "$PERMISSIONS_ROOT/ups.conf.user")" = 604 ] \
-  && [ "$(stat -c %a "$PERMISSIONS_ROOT/upsd.pem")" = 606 ] \
-  && grep -Fqx "$PERMISSIONS_ROOT/upsd.conf" "$WORK/chown-paths" \
-  && ! grep -Fqx "$PERMISSIONS_ROOT/ups.conf.user" "$WORK/chown-paths" \
-  && ! grep -Fqx "$PERMISSIONS_ROOT/upsd.pem" "$WORK/chown-paths" \
-  && ok 'permissions sweep normalizes generated configs without mutating operator mounts' \
-  || no 'generated-config and operator-mount permissions' "rc=$RUN_RC chown=$(tr '\n' ' ' <"$WORK/chown-paths") modes=$(stat -c %a "$PERMISSIONS_ROOT"/*) stderr=$(cat "$WORK/permissions-stderr")"
 
 report

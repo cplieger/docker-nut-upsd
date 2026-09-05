@@ -133,6 +133,18 @@ run_scenario clean
   && ok 'a zero upsmon status remains zero after teardown' \
   || no 'clean upsmon status propagation' "rc=$RUN_RC stderr=$(cat "$WORK/stderr")"
 
+run_scenario child-failure
+child_exit_record=$(grep -F 'msg="upsmon exited unexpectedly"' "$WORK/stderr" || :)
+run_scenario clean
+fsd_exit_record=$(grep -F 'msg="upsmon parent exited after running SHUTDOWNCMD' "$WORK/stderr" || :)
+if [ "$child_exit_record" = 'level=error msg="upsmon exited unexpectedly" rc=7' ] \
+  && [ "$fsd_exit_record" = 'level=warn msg="upsmon parent exited after running SHUTDOWNCMD; a forced shutdown (FSD) was executed" rc=0' ]; then
+  ok 'upsmon exit records distinguish an executed FSD from an unexpected failure'
+else
+  no 'upsmon exit record classification' \
+    "child=[$child_exit_record] fsd=[$fsd_exit_record]"
+fi
+
 STOP_BG=$(extract_function stop_bg_pid "$WORK/stop_bg_pid.sh") || exit 1
 TEARDOWN=$(extract_function teardown_all "$WORK/teardown_all.sh") || exit 1
 
@@ -216,7 +228,95 @@ if [ -z "$healthcheck" ]; then
   printf 'harness error: final image stage has no HEALTHCHECK in %s\n' "$DOCKERFILE" >&2
   exit 1
 fi
-printf '%s\n' "$healthcheck" | grep -Eq '^[[:space:]]*comms_fresh \|\| exit 1$' \
+
+health_start_period=$(printf '%s\n' "$healthcheck" | sed -n \
+  's/^HEALTHCHECK .*--start-period=\([0-9][0-9]*\)s.*/\1/p')
+daemon_start_budget=$(awk '
+  /^start_nut_daemon "(upsdrvctl|upsd)" [0-9][0-9]* / {
+    total += $3
+    count++
+  }
+  END { if (count == 2) print total }
+' "$SUBJECT")
+pidfile_poll_interval=$(sed -n \
+  's/^readonly PIDFILE_POLL_INTERVAL="\([0-9][0-9.]*\)"$/\1/p' \
+  "$REPO_ROOT/lifecycle.sh")
+pidfile_poll_max=$(sed -n \
+  's/^readonly PIDFILE_POLL_MAX=\([0-9][0-9]*\).*/\1/p' \
+  "$REPO_ROOT/lifecycle.sh")
+
+if [ -z "$health_start_period" ] \
+  || [ -z "$daemon_start_budget" ] \
+  || [ -z "$pidfile_poll_interval" ] \
+  || [ -z "$pidfile_poll_max" ]; then
+  printf 'harness error: could not derive health or startup timing budgets\n' >&2
+  exit 1
+fi
+
+required_start_period=$(awk \
+  -v daemon="$daemon_start_budget" \
+  -v interval="$pidfile_poll_interval" \
+  -v polls="$pidfile_poll_max" \
+  'BEGIN { print daemon + (2 * interval * polls) }')
+if awk -v actual="$health_start_period" -v required="$required_start_period" \
+  'BEGIN { exit !(actual >= required) }'; then
+  ok "healthcheck start period (${health_start_period}s) covers nominal startup budget (${required_start_period}s)"
+else
+  no 'healthcheck nominal startup grace' \
+    "start-period=${health_start_period}s nominal-required=${required_start_period}s"
+fi
+
+healthcheck_command=$(printf '%s\n' "$healthcheck" | awk '
+  /^[[:space:]]*CMD[[:space:]]/ {
+    sub(/^[[:space:]]*CMD[[:space:]]+/, "")
+    in_command = 1
+  }
+  in_command { print }
+')
+if [ -z "$healthcheck_command" ]; then
+  printf 'harness error: final-stage HEALTHCHECK has no CMD program\n' >&2
+  exit 1
+fi
+
+cat >"$WORK/drive-healthcheck-command.sh" <<'DRIVER'
+#!/bin/sh
+set -eu
+timeout() {
+  [ "$1" = 3 ] || return 2
+  shift
+  "$@"
+}
+upsc() {
+  printf '%s\n' "$*" >"$PROBE_LOG"
+  [ "$#" -eq 2 ] \
+    && [ "$1" = 'ups@127.0.0.1:3493' ] \
+    && [ "$2" = 'ups.status' ]
+}
+DRIVER
+printf '%s\n' "$healthcheck_command" \
+  | sed "s|/usr/local/bin/lifecycle.sh|$REPO_ROOT/lifecycle.sh|" \
+  >>"$WORK/drive-healthcheck-command.sh"
+
+HEALTHCHECK_SHELL=$(command -v busybox) || {
+  printf 'harness error: busybox is required to execute the image healthcheck dialect\n' >&2
+  exit 1
+}
+: >"$WORK/healthcheck-probe"
+if env -u UPS_NAME -u API_ADDRESS -u API_PORT \
+  PROBE_LOG="$WORK/healthcheck-probe" \
+  "$HEALTHCHECK_SHELL" ash "$WORK/drive-healthcheck-command.sh" \
+  >"$WORK/healthcheck-stdout" 2>"$WORK/healthcheck-stderr"; then
+  RUN_RC=0
+else
+  RUN_RC=$?
+fi
+
+[ "$RUN_RC" -eq 0 ] \
+  && [ "$(cat "$WORK/healthcheck-probe")" = 'ups@127.0.0.1:3493 ups.status' ] \
+  && ok 'the final image healthcheck command parses and executes its complete protocol probe' \
+  || no 'final image healthcheck command execution' \
+    "rc=$RUN_RC probe=$(cat "$WORK/healthcheck-probe") stderr=$(cat "$WORK/healthcheck-stderr")"
+printf '%s\n' "$healthcheck" | grep -Eq '^[[:space:]]*comms_fresh$' \
   && ok 'the final image healthcheck delegates the freshness query to comms_fresh' \
   || no 'healthcheck freshness owner' "final-stage HEALTHCHECK: $healthcheck"
 

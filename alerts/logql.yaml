@@ -21,19 +21,25 @@
 # fields. Only UPSHostSyncExpired and UPSNotifyExecFailed match specific raw
 # diagnostics; read the rest in the log.
 #
-# The generated upsmon.conf routes fifteen events to NOTIFYCMD; the event rules
-# read twelve. COMMBAD (every failed poll, including each driver bounce the
-# comms watchdog performs), COMMOK (its recovery), and OTHER (status tokens
-# upsmon does not classify) are deliberately unalerted. They reach the log with
-# an event= field and no rule here on purpose. An event= line with no alert is
-# one of those three or the label collision below, not a missing rule.
+# Every event the generated upsmon.conf routes to NOTIFYCMD has a rule below
+# except COMMBAD, COMMOK and OTHER. COMMBAD fires on any transition into lost
+# comms, including upsmon's initial -1 state, so its count cannot separate an
+# outage from a container start (NUT v2.8.5 clients/upsmon.c ups_is_gone).
+# COMMOK is upstream's recovery notice, but a watchdog-repaired outage is
+# alerted from this app's own `comms watchdog UPS comms recovered` record, which
+# carries the outage duration and restart count and cannot fire on a cold start
+# (see UPSCommsRepaired). OTHER carries status tokens upsmon does not classify.
+# All three reach the log with an event= field and no event rule here on purpose.
+# An event= line with no alert is one of those three or the label collision
+# below, not a missing rule.
 #
 # The event and msg rules below read PARSED logfmt fields, so a token inside a
 # quoted value cannot match one; the level-prefix rule (UPSContainerError) reads
 # the line position instead, deliberately. One consequence of the parser: where a
 # collector already sets a stream label with the same name as a field these rules
 # filter on (event, msg), the parsed value lands as event_extracted /
-# msg_extracted and every rule filtering that field then matches nothing.
+# msg_extracted and filters bind to the pre-existing stream label, so they may
+# match nothing or unrelated records instead of filtering on the parsed value.
 #
 # Two shapes live in this group and each single-producer rule below says which it
 # is. UPSContainerError carries neither a shape nor one cadence by design: it is a
@@ -81,9 +87,10 @@ groups:
       # POLLFREQ and the ONLINE half within one POLLFREQALERT, because upsmon
       # switches to the alert cadence when it sees ONBATT (NUT v2.8.5
       # clients/upsmon.c ups_on_batt :887) and restores POLLFREQ only once OL
-      # is seen (try_restore_pollfreq); both default to 5s, so a flicker lands
-      # within about POLLFREQ + POLLFREQALERT - raise this window if you raise
-      # EITHER. It deliberately does NOT try to cover an outage - nothing
+      # is seen (try_restore_pollfreq), so a flicker lands within about
+      # POLLFREQ + POLLFREQALERT - raise this window if you raise EITHER; the
+      # env table in README.md is where both defaults are published.
+      # It deliberately does NOT try to cover an outage - nothing
       # repeats event=ONBATT - so the alert marks mains loss and resolves 2m
       # later while the UPS may still be carrying the load.
       - alert: UPSOnBattery
@@ -159,7 +166,7 @@ groups:
         expr: |
           sum by (container) (count_over_time(
             {container="nut-upsd"}
-            |~ `^Host sync timer expired, forcing shutdown$` [15m]
+            |~ `Host sync timer expired, forcing shutdown$` [15m]
           )) > 0
         for: 0m
         labels:
@@ -175,15 +182,20 @@ groups:
             was hard-powered-off or that its own shutdown failed - check the
             secondary. This is a raw upsmon diagnostic rather than an
             event=<TYPE> line (NUT v2.8.5 clients/upsmon.c:1377), so it carries
-            no level= prefix and no logfmt fields. The filter matches the exact
-            raw line instead of using the `| logfmt` shape of the event and
-            parsed-msg rules. TRANSITION record, emitted once per
-            forced-shutdown attempt that timed out.
+            no level= prefix and no logfmt fields. The filter is anchored at the
+            END of the line rather than using the `| logfmt` shape of the event
+            and parsed-msg rules, so the same phrase inside another record's
+            quoted detail field cannot fire it; it is deliberately not anchored
+            at the start, because a mounted upsmon.conf.user carrying DEBUG_MIN
+            makes upsmon prefix every one of its records with an elapsed-time
+            field. TRANSITION record, emitted once per forced-shutdown attempt
+            that timed out.
       - alert: UPSNotifyExecFailed
         expr: |
           sum by (container) (count_over_time(
             {container="nut-upsd"}
-            |= `execvp(` |= `failed` [15m]
+            |= `execvp(` |= `failed`
+            != `msg="UPS event"` [15m]
           )) > 0
         for: 0m
         labels:
@@ -191,14 +203,22 @@ groups:
         annotations:
           summary: "nut-upsd could not exec its NOTIFYCMD ({{ $labels.container }})"
           description: >
-            upsmon forked to run NOTIFYCMD and the exec failed (upstream logs
-            "execvp(<cmd>) failed" from the child). Every event=<TYPE> record
-            this ruleset keys on comes from that handler, so while this
-            persists the seven event= rules are blind; for ALARM and OTHER
+            upsmon forked to run NOTIFYCMD and the exec failed. The shipped
+            patches/cve-2026-54161-notifycmd-execvp.patch:154-157 backport logs
+            "notify: execvp(<cmd>) failed: <strerror>" from notify(). Every
+            event=<TYPE> record this ruleset keys on comes from that handler,
+            so while this persists every event= rule in this group is blind;
+            for ALARM and OTHER
             (wired EXEC-only) the event is lost outright. This is reachable
             only with a mounted upsmon.conf.user whose NOTIFYCMD is wrong or
             not executable; the generated config wires the shipped handler.
             Fix the NOTIFYCMD path or permissions in the mounted file.
+            TRANSITION rule (see the file header): upsmon writes this line once
+            per event routed to NOTIFYCMD and never repeats it while the
+            misconfiguration holds, so this alert marks each failed exec and
+            resolves 15 minutes after the last routed event; on a quiet UPS the
+            gap between events is unbounded, so no window value can track the
+            condition.
       - alert: UPSCommsLost
         expr: |
           sum by (container) (count_over_time(
@@ -215,6 +235,37 @@ groups:
             NOCOMMWARNTIME seconds while comms stay down. UPS state is unknown
             until communication is restored. Keep this window above twice your
             NOCOMMWARNTIME so the alert stays firing between warnings.
+      # Watchdog repair, read from this app's own composition-side record.
+      # lifecycle.sh emits this line only after at least one driver restart, so
+      # one record means the watchdog bounced the driver and comms came back.
+      # This catches the first repair rather than waiting for a second outage;
+      # stale_secs and restarts already carry the whole-outage evidence.
+      #
+      # TRANSITION rule (see the file header): lifecycle.sh writes one record
+      # when a watchdog-repaired outage recovers and does not repeat it after
+      # recovery, so this alert marks the repair and resolves 6 hours later.
+      # This is the widest range in the group. Its query cost on a live ruler
+      # has not been measured; shorten it or raise the group interval if needed.
+      - alert: UPSCommsRepaired
+        expr: |
+          count_over_time({container="nut-upsd"} | logfmt | msg="comms watchdog UPS comms recovered" [6h]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "UPS communication recovered after watchdog repair ({{ $labels.container }})"
+          description: >
+            nut-upsd logged "comms watchdog UPS comms recovered": stale
+            communication made the watchdog restart the UPS driver, and
+            communication came back. The matched record reports
+            stale_secs={{ $labels.stale_secs }} and
+            restarts={{ $labels.restarts }}. This catches a watchdog repair
+            that can finish before NOCOMMWARNTIME reports the outage. A recovery
+            with COMMS_WATCHDOG=false, or one the UPS made without a driver
+            restart, emits no such record and is outside this rule. TRANSITION
+            rule (see the file header): lifecycle.sh writes this record once per
+            watchdog-repaired outage when comms return, so the alert marks that
+            repair and resolves 6 hours after the record.
       - alert: UPSHardwareFault
         expr: |
           sum by (container) (count_over_time(
@@ -244,7 +295,7 @@ groups:
       - alert: UPSProtectionDegraded
         expr: |
           sum by (container) (count_over_time(
-            {container="nut-upsd"} | logfmt | event=~"BYPASS|OVER" [15m]
+            {container="nut-upsd"} | logfmt | event=~"BYPASS|OVER|CAL" [15m]
           )) > 0
         for: 0m
         labels:
@@ -252,15 +303,19 @@ groups:
         annotations:
           summary: "UPS protection is degraded ({{ $labels.container }})"
           description: >
-            nut-upsd logged a BYPASS or OVER event. BYPASS means the UPS still
-            powers the load but no longer protects it, so the next outage drops
-            the load. While the BYPASS flag holds, upsmon also presumes the UPS
-            dead if communication drops, which counts it out of MINSUPPLIES and
-            starts the forced-shutdown sequence (NUT v2.8.5 clients/upsmon.c
-            is_ups_critical); unlike the ALARM case there is no option to
-            disable that, so treat BYPASS as urgent rather than a note to
-            schedule. OVER means the connected load exceeds the UPS rating;
-            reduce the load. OVER carries no such assumption because
+            nut-upsd logged a CAL, BYPASS or OVER event. CAL means the UPS
+            reported that it was calibrating. While CAL holds, upsmon presumes
+            the UPS dead as soon as communication is lost, so a forced shutdown
+            can follow a single failed poll; unlike ALARM's ALARMCRITICAL and
+            OFF's OFFDURATION, there is no option to disable this arm. BYPASS
+            means the UPS still powers the load but no longer protects it, so
+            the next outage drops the load. While the BYPASS flag holds, upsmon
+            also presumes the UPS dead if communication drops, which counts it
+            out of MINSUPPLIES and starts the forced-shutdown sequence (NUT
+            v2.8.5 clients/upsmon.c is_ups_critical); unlike the ALARM case
+            there is no option to disable that, so treat BYPASS as urgent rather
+            than a note to schedule. OVER means the connected load exceeds the
+            UPS rating; reduce the load. OVER carries no such assumption because
             OVERDURATION is unset. TRANSITION rule (see the file header): NUT
             emits the matched event once when the flag is raised, so this alert
             marks the change and resolves after 15 minutes rather than tracking
@@ -345,10 +400,13 @@ groups:
             line is written once per forced-shutdown attempt, and the example
             restart policy re-enters monitoring. A UPS that stays critical
             produces another attempt and this alert fires approximately once per
-            container life until mains power returns. If all attempts were
-            refused, the detail field carries the bus or authorisation error, and
-            the following "D-Bus poweroff inhibitors at failure" line names
-            current lock holders. On systemd v257 or later, a block inhibitor
+            container life until mains power returns. If all attempts failed,
+            the detail field carries the bus or authorisation error. A separate
+            "D-Bus poweroff inhibitors at failure" record appears only when
+            logind returned a readable refutation; its bounded detail lists
+            current lock holders and truncates a long list. If that record is
+            absent, the settle state was unreadable rather than proof that no
+            inhibitor was held. On systemd v257 or later, a block inhibitor
             causes this failure before polkit. On older systemd releases, root
             silently overrides the lock. If logind first accepted the request,
             detail carries the PreparingForShutdown property reply, no inhibitor

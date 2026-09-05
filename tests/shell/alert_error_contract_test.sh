@@ -87,4 +87,39 @@ else
     "pattern=$HOSTSYNC_PATTERN"
 fi
 
+NOTIFY_EXEC_RULE=$(awk '
+  /^[[:space:]]*- alert: UPSNotifyExecFailed$/ { inrule = 1; next }
+  inrule && /^[[:space:]]*- alert:/ { exit }
+  inrule { print }
+' "$ALERTS")
+mapfile -t NOTIFY_EXEC_INCLUDES < <(
+  printf '%s\n' "$NOTIFY_EXEC_RULE" \
+    | grep -oE '\|= `[^`]+`' \
+    | sed 's/^|= `//; s/`$//'
+)
+NOTIFY_EXEC_EXCLUSION=$(printf '%s\n' "$NOTIFY_EXEC_RULE" \
+  | sed -n 's/.*!= `\([^`]*\)`.*/\1/p')
+if [ "${#NOTIFY_EXEC_INCLUDES[@]}" -ne 2 ] || [ -z "$NOTIFY_EXEC_EXCLUSION" ]; then
+  printf 'harness error: UPSNotifyExecFailed must carry two include filters and one exclusion\n' >&2
+  exit 1
+fi
+
+notify_exec_matches() {
+  local line=$1 filter
+  for filter in "${NOTIFY_EXEC_INCLUDES[@]}"; do
+    printf '%s\n' "$line" | grep -Fq -- "$filter" || return 1
+  done
+  ! printf '%s\n' "$line" | grep -Fq -- "$NOTIFY_EXEC_EXCLUSION"
+}
+
+notify_exec_bare='notify: execvp(/usr/local/bin/nut-notify.sh) failed: No such file or directory'
+notify_exec_structured='level=warn msg="UPS event" event="ALARM" ups="ups" detail="UPS ups: one or more active alarms: [execvp(/x) failed]"'
+if notify_exec_matches "$notify_exec_bare" \
+  && ! notify_exec_matches "$notify_exec_structured"; then
+  ok 'UPSNotifyExecFailed accepts the bare upsmon diagnostic and rejects the tokens inside a structured event record'
+else
+  no 'UPSNotifyExecFailed raw-record boundary' \
+    "includes=${NOTIFY_EXEC_INCLUDES[*]} exclusion=$NOTIFY_EXEC_EXCLUSION"
+fi
+
 report
