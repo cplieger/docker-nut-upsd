@@ -840,7 +840,7 @@ generate_ups_conf >/dev/null 2>&1
 mkfifo /etc/nut/ups.conf.user
 FIFO_ERR=$(mktemp)
 fifo_rc=0
-timeout 2 sh -c '. /usr/local/bin/generate-config.sh; decide_user_overrides; generate_ups_conf' \
+timeout 2 sh -c '. /usr/local/bin/validate.sh; . /usr/local/bin/generate-config.sh; decide_user_overrides; generate_ups_conf' \
   >/dev/null 2>"$FIFO_ERR" || fifo_rc=$?
 if [ "$fifo_rc" -eq 0 ] || [ "$fifo_rc" -eq 124 ] || [ "$fifo_rc" -eq 143 ]; then
   err "FAIL: FIFO at /etc/nut/ups.conf.user was not refused before the staged read (rc=$fifo_rc; 124/143 = cat blocked until timeout)"
@@ -876,14 +876,16 @@ grep -q '^\[ups\]' /etc/nut/ups.conf || {
 #    success, and log the override as applied while the config path is still
 #    a directory. The staged _replace_file install must refuse it promptly
 #    (non-zero, not a hang), log the structured apply failure, and leak
-#    nothing into the directory. secrets.sh is sourced in the subshell so
-#    _replace_file is in scope, as in the entrypoint.
+#    nothing into the directory. validate.sh and secrets.sh are sourced in the
+#    subshell so log_value and _replace_file are both in scope, in the
+#    entrypoint's own source order — without validate.sh every err= field in
+#    generate-config.sh's failure records renders empty.
 printf '[ups]\n    driver = usbhid-ups\n    port = auto\n' >/etc/nut/ups.conf.user
 rm -f /etc/nut/ups.conf
 mkdir /etc/nut/ups.conf
 DIRDST_ERR=$(mktemp)
 dirdst_rc=0
-timeout 2 sh -c '. /usr/local/bin/secrets.sh; . /usr/local/bin/generate-config.sh; decide_user_overrides; generate_ups_conf' \
+timeout 2 sh -c '. /usr/local/bin/validate.sh; . /usr/local/bin/secrets.sh; . /usr/local/bin/generate-config.sh; decide_user_overrides; generate_ups_conf' \
   >/dev/null 2>"$DIRDST_ERR" || dirdst_rc=$?
 if [ "$dirdst_rc" -eq 0 ] || [ "$dirdst_rc" -eq 124 ] || [ "$dirdst_rc" -eq 143 ]; then
   err "FAIL: directory at /etc/nut/ups.conf was not refused promptly (rc=$dirdst_rc; 124/143 = install blocked until timeout)"
