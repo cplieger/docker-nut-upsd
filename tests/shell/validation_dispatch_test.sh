@@ -1,38 +1,20 @@
 #!/usr/bin/env bash
-# The validation table's dispatch layer: _run_table(), _resolve_var(),
+# The validation row dispatch: _check(), _check_optional(), and
 # _dispatch_check().
 #
-# Every input-validation guard in this image is reached through these three
-# functions. tests/smoke.sh drives the guards themselves hard (the whole
-# injection matrix, through run_validations), but it can only ever observe "the
-# table as shipped rejected this value". What it cannot see is the dispatch
-# layer's own fail-closed rules -- the ones that decide whether a row runs AT ALL:
+# tests/smoke.sh drives every shipped row through check_required_vars and
+# check_optional_vars. This file covers direct dispatch, optional empty-value
+# handling, cross-field validation, inventory parity, and credential secrecy.
 #
-#   - a row whose variable name is not in _resolve_var must FAIL, not be skipped;
-#   - a row naming an unknown check must FAIL, not be skipped;
-#   - only the EMPTY line is skipped, so an accidentally indented row (a reformat,
-#     a bad merge) fails loudly instead of silently dropping that variable's
-#     checks -- which would reopen the config-injection surface with no log line
-#     anywhere and every existing test still green;
-#   - the optional table skips only genuinely EMPTY values.
+# _check exits on refusal (the entrypoint's fail-closed path), so every direct
+# call that can fail runs in a subshell used as the condition.
 #
-# The bait for the skip rule is an INDENTED REAL VARIABLE NAME. A bogus name would
-# not distinguish the two rules: it fails on _resolve_var even under a lenient
-# skip, so the case would pass with the strict rule gone.
-#
-# _run_table exits (it is the entrypoint's fail-closed path), so every call here
-# runs in a subshell that IS the condition -- `if ( _run_table ... ); then`. The
-# naive `( fixture; if _run_table; then ...; fi )` form kills the fixture subshell
-# before either branch runs, and the assertion silently vanishes while the tally
-# still reads green.
-# Lint directives for this whole file, each against a stated guarantee rather than
-# an assumption:
-#   SC2015 - the assertion form `[ cond ] && ok "..." || no "..."` cannot mis-fire,
-#     because lib.sh's ok/no return 0 unconditionally by design (see their comment).
-#   SC2034 - UPS_NAME/LOWBATT_PERCENT are the INPUTS to validate.sh code that is
-#     extracted and sourced at RUNTIME, so shellcheck cannot see the reads.
-#   SC1090/SC1091 - the sourced paths are produced by the extraction step above,
-#     so there is nothing on disk for shellcheck to follow at lint time.
+# Lint directives for this whole file, each against a stated guarantee:
+#   SC2015 - ok/no return 0 unconditionally, so `[ cond ] && ok || no` cannot mis-fire.
+#   SC2034 - the env vars assigned here are inputs to code extracted and
+#     sourced at runtime, so shellcheck cannot see the reads.
+#   SC1090/SC1091 - the sourced paths are produced by extraction, so there is
+#     nothing on disk for shellcheck to follow at lint time.
 # shellcheck disable=SC2015,SC2034,SC1090,SC1091
 set -u
 
@@ -40,30 +22,18 @@ set -u
 . "$(dirname -- "$0")/lib.sh"
 new_workdir >/dev/null
 
-# The file under test; a caller who SET ENTRYPOINT wins, which is the red-check:
+# The file under test; a caller who SET ENTRYPOINT wins (the red-check):
 #   ENTRYPOINT=/tmp/mut-validate.sh bash tests/shell/validation_dispatch_test.sh
 [ "$ENTRYPOINT" = "$REPO_ROOT/entrypoint.sh" ] && ENTRYPOINT="$REPO_ROOT/validate.sh"
-
-# The integer ceiling validate_numeric bounds against, sourced from the shipped
-# file rather than restated here. The range ENDS at the following blank line, not
-# at a repeat of the start pattern: sed does not re-test a regex end address on the
-# start line, and with no second copy of the declaration in the file the range ran
-# to EOF and sourced the whole of validate.sh -- which would mask a missing
-# dependency in the explicit load list below.
-consts=$(extract_range '^readonly SHELL_SAFE_INTEGER_MAX=' '^$') || exit 1
-. "$consts"
-[ -n "${SHELL_SAFE_INTEGER_MAX:-}" ] && [ "$(grep -c . "$consts")" -eq 1 ] \
-  || {
-    printf 'harness error: the constant extraction captured %s non-blank lines, want exactly 1\n' \
-      "$(grep -c . "$consts")" >&2
-    exit 1
-  }
 
 # The dispatch layer plus every validator the rows below route to. Loaded, not
 # stubbed: a dispatch test whose validators are fakes proves only that the fakes
 # ran.
 for fn in log_value strip_leading_zeros validate_no_control_chars validate_identifier \
-  validate_numeric validate_percent _dispatch_check _resolve_var _run_table; do
+  validate_no_hash validate_no_quotes validate_no_backslash validate_no_whitespace \
+  nut_stored_word validate_nut_word validate_no_brackets validate_numeric validate_positive validate_port \
+  validate_percent _dispatch_check _check _check_optional check_required_vars \
+  check_optional_vars driver_transport run_validations; do
   load_function "$fn"
 done
 
@@ -73,8 +43,7 @@ LOWBATT_PERCENT=""
 
 # --- 1. an unknown CHECK name fails closed ---------------------------------------
 #
-# The table is edited by hand; a typo'd check name must not mean "this variable is
-# now unvalidated".
+# A typo'd check name must not mean "this variable is now unvalidated".
 if (_dispatch_check UPS_NAME ups notacheck) 2>"$ERR"; then
   no 'unknown check refused' 'a misspelled check name was silently accepted'
 else
@@ -83,100 +52,319 @@ else
     || no 'unknown check refused' "refused without the unknown-check line: $(head -c 200 "$ERR")"
 fi
 
-# --- 2. the control: a known check still dispatches ------------------------------
-if (_dispatch_check UPS_NAME ups control) 2>"$ERR"; then
-  ok 'a known check dispatches and passes a valid value'
+# NUT's atoi-consumed timing values accept INT_MAX and refuse INT_MAX+1.
+if validate_numeric DEADTIME 2147483647 2>"$ERR"; then
+  ok 'the largest value representable by the NUT C-int consumer is accepted'
 else
-  no 'known check dispatches' "rejected a valid value: $(head -c 200 "$ERR")"
+  no 'NUT C-int upper boundary accepted' "INT_MAX was rejected: $(head -c 200 "$ERR")"
 fi
 
-# --- 3. dispatch routes to the RIGHT validator -----------------------------------
+: >"$ERR"
+if validate_numeric DEADTIME 2147483648 2>"$ERR"; then
+  no 'NUT C-int overflow refused' 'INT_MAX+1 was accepted'
+elif grep -Fq 'msg="env var must not exceed 2147483647" var=DEADTIME value="2147483648"' "$ERR"; then
+  ok 'the first value above the NUT C-int boundary is refused by the ceiling arm'
+else
+  no 'NUT C-int overflow refused' "wrong refusal: $(head -c 200 "$ERR")"
+fi
+
+: >"$ERR"
+if validate_numeric DEADTIME 000000000000000001 2>"$ERR" && [ ! -s "$ERR" ]; then
+  ok 'an 18-digit zero-padded value is accepted at the raw digit ceiling'
+else
+  no '18-digit raw numeric boundary accepted' "rejected or emitted a diagnostic: $(head -c 200 "$ERR")"
+fi
+
+# --- 9b. jointly disabled low-battery thresholds fail closed ---------------------
 #
-# Not just "some validator ran": the percent arm must reach validate_percent, whose
-# range message is the one an operator sees. The optional table's percent checks
-# (LOWBATT_PERCENT, CRITBATT_PERCENT) are reached by nothing else.
-if (_dispatch_check LOWBATT_PERCENT 101 percent) 2>"$ERR"; then
-  no 'percent arm routes correctly' 'a 101% threshold was accepted'
+# Each row accepts zero because zero disables only that axis; the pair is
+# unsafe together because ignorelb discards the UPS low-battery flag while
+# both derived paths can never assert. Drives run_validations so this
+# exercises the cross-field boundary.
+run_lowbatt_validation() (
+  UPS_NAME=ups
+  UPS_DESC='Test UPS'
+  UPS_DRIVER=usbhid-ups
+  UPS_PORT=auto
+  API_USER=monuser
+  API_PASSWORD=secret
+  API_ADDRESS=0.0.0.0
+  API_PORT=3493
+  API_TLS=true
+  ADMIN_PASSWORD=adminpass
+  SHUTDOWN_ON_BATTERY_CRITICAL=false
+  DBUS_PROBE_INTERVAL=300
+  POLLFREQ=5
+  POLLFREQALERT=5
+  DEADTIME=15
+  FINALDELAY=5
+  HOSTSYNC=15
+  NOCOMMWARNTIME=300
+  RBWARNTIME=43200
+  COMMS_WATCHDOG=true
+  COMMS_CHECK_INTERVAL=15
+  COMMS_RECOVERY_TIMEOUT=90
+  COMMS_FAST_RETRIES=3
+  COMMS_BACKOFF_FACTOR=5
+  LOWBATT_PERCENT=$1
+  LOWBATT_RUNTIME=$2
+  run_validations
+)
+
+for zero in 0 00 000; do
+  if run_lowbatt_validation "$zero" "$zero" 2>"$ERR"; then
+    ok "both low-battery thresholds at $zero are accepted as the hardware default"
+  else
+    no "both low-battery thresholds at $zero accepted" "the hardware-default configuration was refused: $(head -c 200 "$ERR")"
+  fi
+done
+
+if run_lowbatt_validation 0 300 2>"$ERR" \
+  && run_lowbatt_validation 20 0 2>"$ERR"; then
+  ok 'a zero threshold stays valid when the other low-battery axis is active'
 else
-  grep -q 'must be 0-100' "$ERR" \
-    && ok 'the percent arm reaches validate_percent (101 rejected with its range message)' \
-    || no 'percent arm routes correctly' "wrong validator ran: $(head -c 200 "$ERR")"
+  no 'single disabled low-battery axis accepted' "a coherent single-axis configuration was refused: $(head -c 200 "$ERR")"
 fi
 
-# --- 4. an unknown VARIABLE name fails closed ------------------------------------
-if (_resolve_var NOT_A_REAL_VAR) 2>"$ERR"; then
-  no 'unknown variable refused' 'an unknown table variable resolved successfully'
-else
-  grep -q 'unknown variable in validation table' "$ERR" \
-    && ok 'a row naming an unknown variable fails with the unknown-variable error' \
-    || no 'unknown variable refused' "refused without the unknown-variable line: $(head -c 200 "$ERR")"
-fi
-
-# --- 5. the control: a known variable resolves to its value ----------------------
-[ "$(_resolve_var UPS_NAME 2>/dev/null)" = "ups" ] \
-  && ok 'a known table variable resolves to its environment value' \
-  || no 'known variable resolves' 'the resolver did not return the environment value'
-
-# --- 6. THE SKIP RULE: an indented real row fails loudly -------------------------
+# --- 10. the two hand-maintained inventories agree -------------------------------
 #
-# "  UPS_NAME:control" is a row a reformat or a bad merge produces. If the loop
-# skipped anything that is not a clean row, UPS_NAME -- written into ups.conf as a
-# [section] header -- would stop being checked for control characters, brackets and
-# identifier shape, with nothing failing anywhere. The assertion is the
-# unknown-variable line, which proves the row was DISPATCHED (and rejected),
-# not skipped.
-INDENTED_TABLE='
-  UPS_NAME:control
-'
-if (_run_table "$INDENTED_TABLE" 0) 2>"$ERR"; then
-  no 'indented row fails closed' 'an indented table row was silently skipped (fail-open)'
+# The variable list appears in validation rows and assignments in
+# canonicalize_validated_values. Omitting one leaves the variable validated
+# but written with its raw bytes, with nothing failing anywhere. Read both
+# inventories from the production file rather than restating expected names.
+row_vars=$(awk '
+  /^[[:space:]]+_check(_optional)? [A-Z_][A-Z0-9_]* / { print $2 }
+' "$ENTRYPOINT" | sort)
+unchecked_rows=$(awk '
+  /^[[:space:]]+_check(_optional)? [A-Z_][A-Z0-9_]* / && NF < 4 { print NR ":" $0 }
+' "$ENTRYPOINT")
+if [ -z "$unchecked_rows" ]; then
+  ok 'every validation row names at least one check'
 else
-  grep -q 'unknown variable in validation table' "$ERR" \
-    && ok 'an indented table row fails closed through the unknown-variable path' \
-    || no 'indented row fails closed' "failed for another reason: $(head -c 200 "$ERR")"
+  no 'validation rows carry checks' "rows with no check names: $unchecked_rows"
 fi
 
-# --- 7. the other direction: the literal's own blank lines ARE skipped -----------
+canonical_vars=$(awk '
+  /^canonicalize_validated_values\(\)/ { in_canonical = 1; next }
+  in_canonical && /^}/ { exit }
+  in_canonical && /^[[:space:]]+[A-Z_][A-Z0-9_]*=/ {
+    name = $1
+    sub(/=.*/, "", name)
+    print name
+  }
+' "$ENTRYPOINT" | sort)
+
+if [ -z "$row_vars" ] || [ -z "$canonical_vars" ]; then
+  printf 'harness error: could not extract both validation inventories\n' >&2
+  exit 1
+fi
+
+if [ "$row_vars" = "$canonical_vars" ]; then
+  ok 'validation rows and canonicalizer carry the same variable inventory'
+else
+  no 'validation inventory parity' \
+    "rows: $row_vars; canonicalizer: $canonical_vars"
+fi
+
+# --- 11. normalize_bool's canonical OUTPUT, not just its refusal ------------------
 #
-# Isolates the same `case '' ) continue` rule from the opposite side. Without it
-# every table would fail on its own leading and trailing newline, so this case is
-# what keeps case 6 from being satisfiable by simply deleting the skip.
-CLEAN_TABLE='
-UPS_NAME:control,identifier
-'
-if (_run_table "$CLEAN_TABLE" 0) 2>"$ERR"; then
-  ok 'the blank first and last lines of a table literal are skipped'
+# Every production consumer compares the output with the literal `true`, so
+# the spelling table is the implementation and swapping an accepted spelling
+# between the two arms would reverse a safety toggle while smoke.sh stays green.
+load_function normalize_bool
+
+if [ "$(normalize_bool API_TLS true)" = "true" ] \
+  && [ "$(normalize_bool API_TLS TRUE)" = "true" ] \
+  && [ "$(normalize_bool API_TLS 1)" = "true" ] \
+  && [ "$(normalize_bool API_TLS yes)" = "true" ] \
+  && [ "$(normalize_bool API_TLS On)" = "true" ] \
+  && [ "$(normalize_bool API_TLS false)" = "false" ] \
+  && [ "$(normalize_bool API_TLS FALSE)" = "false" ] \
+  && [ "$(normalize_bool API_TLS 0)" = "false" ] \
+  && [ "$(normalize_bool API_TLS no)" = "false" ] \
+  && [ "$(normalize_bool API_TLS Off)" = "false" ]; then
+  ok 'normalize_bool maps every accepted spelling to its canonical true or false output'
 else
-  no 'blank lines skipped' "a clean table failed: $(head -c 200 "$ERR")"
+  no 'normalize_bool canonical outputs' 'an accepted boolean spelling mapped to the wrong canonical value'
 fi
 
-# --- 8. the optional table skips only genuinely empty values ---------------------
-OPTIONAL_TABLE='
-LOWBATT_PERCENT:control,percent
-'
+# Credentials retain trailing LF for fail-closed validation; presentation values strip it.
+load_function canonicalize_validated_values
+credential_lf=$(printf 'filesecret\nx')
+credential_lf=${credential_lf%x}
+
+credential_lf_refused() (
+  case "$1" in
+    API_PASSWORD)
+      API_PASSWORD="$credential_lf"
+      canonicalize_validated_values
+      _dispatch_check API_PASSWORD "$API_PASSWORD" control
+      ;;
+    ADMIN_PASSWORD)
+      ADMIN_PASSWORD="$credential_lf"
+      canonicalize_validated_values
+      _dispatch_check ADMIN_PASSWORD "$ADMIN_PASSWORD" control
+      ;;
+  esac
+)
+
+for credential_name in API_PASSWORD ADMIN_PASSWORD; do
+  : >"$ERR"
+  if credential_lf_refused "$credential_name" 2>"$ERR"; then
+    no "$credential_name trailing LF refused" 'the credential was silently canonicalized and accepted'
+  elif grep -Fq "msg=\"env var contains control characters\" var=$credential_name" "$ERR"; then
+    ok "$credential_name retains a trailing LF for the named fail-closed refusal"
+  else
+    no "$credential_name trailing LF refused" "wrong refusal: $(head -c 200 "$ERR")"
+  fi
+done
+
 if (
-  LOWBATT_PERCENT=""
-  _run_table "$OPTIONAL_TABLE" 1
-) 2>"$ERR"; then
-  ok 'an unset optional variable is skipped rather than rejected as non-numeric'
+  UPS_DESC="$credential_lf"
+  canonicalize_validated_values
+  [ "$UPS_DESC" = filesecret ]
+  _dispatch_check UPS_DESC "$UPS_DESC" control
+); then
+  ok 'the same trailing LF remains canonicalized for a presentation value'
 else
-  no 'optional empty skipped' "an unset optional var was validated: $(head -c 200 "$ERR")"
+  no 'presentation trailing LF canonicalized' 'UPS_DESC did not strip to filesecret and pass validation'
 fi
 
-# --- 9. ...and validates the ones that ARE set -----------------------------------
-#
-# The isolating pair for case 8: dropping the emptiness test from that condition
-# would skip every optional row, so a set-but-invalid threshold would reach
-# upsmon.conf unchecked.
-if (
-  LOWBATT_PERCENT=250
-  _run_table "$OPTIONAL_TABLE" 1
-) 2>"$ERR"; then
-  no 'optional set value validated' 'a set optional variable was skipped instead of validated'
+empty_nut_word=$(printf '\303\244\303\266')
+: >"$ERR"
+if validate_nut_word API_PASSWORD "$empty_nut_word" 2>"$ERR"; then
+  no 'empty stored NUT word refused' 'a credential with no preserved byte was accepted'
+elif grep -Fq 'msg="env var becomes an empty NUT word after parsing" var=API_PASSWORD' "$ERR"; then
+  ok 'a credential with no preserved byte is refused before it becomes an empty stored word'
 else
-  grep -q 'must be 0-100' "$ERR" \
-    && ok 'a SET optional variable is validated (the skip is emptiness-only)' \
-    || no 'optional set value validated' "failed for another reason: $(head -c 200 "$ERR")"
+  no 'empty stored NUT word refused' "wrong refusal: $(head -c 200 "$ERR")"
+fi
+
+nut_word_501=$(head -c 501 /dev/zero | tr '\0' A)
+nut_word_502="${nut_word_501}A"
+if ! validate_nut_word API_PASSWORD "$nut_word_501" 2>"$ERR"; then
+  no 'bundled NUT client password boundary accepted' "501 bytes were refused: $(head -c 200 "$ERR")"
+elif validate_nut_word API_PASSWORD "$nut_word_502" 2>"$ERR"; then
+  no 'bundled NUT client password overflow refused' '502 bytes were accepted'
+elif grep -Fq 'limit=501' "$ERR"; then
+  ok 'the bundled NUT client password boundary accepts 501 bytes and refuses 502'
+else
+  no 'bundled NUT client password overflow refused' "wrong refusal: $(head -c 200 "$ERR")"
+fi
+
+# --- 12. every credential-row check refuses without disclosing the value -------
+credential_table=$(awk '
+  /^[[:space:]]+_check(_optional)? (API_PASSWORD|ADMIN_PASSWORD) / {
+    printf "%s:", $2
+    for (i = 4; i <= NF; i++) {
+      printf "%s%s", (i == 4 ? "" : ","), $i
+    }
+    print ""
+  }
+' "$ENTRYPOINT")
+if [ "$(printf '%s\n' "$credential_table" | grep -c .)" -ne 2 ]; then
+  printf 'harness error: could not extract both credential validation rows\n' >&2
+  exit 1
+fi
+
+credential_probe_value() {
+  case "$1" in
+    control) printf 'LeakMarker\rsuffix' ;;
+    quotes) printf 'LeakMarker"suffix' ;;
+    backslash) printf 'LeakMarker\\suffix' ;;
+    hash) printf 'LeakMarker#suffix' ;;
+    nospace | identifier) printf 'LeakMarker suffix' ;;
+    nut_word) printf '%502s' '' | tr ' ' A ;;
+    brackets) printf 'LeakMarker]suffix' ;;
+    numeric) printf 'LeakMarker' ;;
+    positive | port) printf '0' ;;
+    percent) printf '101' ;;
+    *) return 1 ;;
+  esac
+}
+
+while IFS=: read -r credential_name credential_checks; do
+  IFS=, read -r -a credential_check_list <<<"$credential_checks"
+  for credential_check in "${credential_check_list[@]}"; do
+    if ! credential_value=$(credential_probe_value "$credential_check"); then
+      printf 'harness error: no credential leak probe for validation check %s\n' \
+        "$credential_check" >&2
+      exit 1
+    fi
+    : >"$ERR"
+    if (_dispatch_check "$credential_name" "$credential_value" "$credential_check") 2>"$ERR"; then
+      no "$credential_name $credential_check refusal" 'the malformed credential was accepted'
+    elif grep -Fq "var=$credential_name" "$ERR" \
+      && ! grep -Fq 'value=' "$ERR" \
+      && ! grep -Fq 'LeakMarker' "$ERR"; then
+      ok "$credential_name $credential_check refuses without disclosing the value"
+    else
+      no "$credential_name $credential_check refusal" \
+        "wrong or value-bearing diagnostic: $(head -c 200 "$ERR")"
+    fi
+  done
+done <<<"$credential_table"
+
+# --- 13. the documented and the validated inventories agree ----------------------
+#
+# README.md's environment table is the operator-facing contract; the shipped
+# `_check <NAME>` rows are what actually gets validated. Documenting a new
+# generated variable without adding its validation row, or retiring a row
+# while leaving the variable documented, puts an unchecked value into a NUT
+# config file with every other test green. Read both sides out of the tracked
+# files at run time and compare as sets so reordering either does not matter.
+documented="$WORK/documented-vars"
+validated="$WORK/validated-vars"
+
+# The sed program matches literal Markdown backticks around environment names.
+# shellcheck disable=SC2016
+sed -n 's/^| `\([A-Z][A-Z0-9_]*\)` |.*/\1/p' "$REPO_ROOT/README.md" \
+  | sort -u >"$documented"
+awk '/^[[:space:]]+_check(_optional)? [A-Z][A-Z0-9_]* / { print $2 }' "$ENTRYPOINT" \
+  | sort -u >"$validated"
+
+if [ ! -s "$documented" ] || [ ! -s "$validated" ]; then
+  no 'validation inventory parsed' 'README.md or the shipped validation rows produced an empty inventory'
+elif diff -u "$documented" "$validated" >"$WORK/inventory.diff"; then
+  ok 'every documented environment variable has a shipped validation row, and every row is documented'
+else
+  no 'documented and validated environment inventories match' "$(cat "$WORK/inventory.diff")"
+fi
+
+# --- 13b. published defaults match shipped assignments ---------------------------
+documented_defaults="$WORK/documented-defaults"
+shipped_defaults="$WORK/shipped-defaults"
+documented_default_names="$WORK/documented-default-names"
+shipped_default_names="$WORK/shipped-default-names"
+
+# The sed program matches literal Markdown backticks in the final table cell.
+# shellcheck disable=SC2016
+sed -n 's/^| `\([A-Z][A-Z0-9_]*\)` |.*| `\([^`]*\)` |$/\1=\2/p' \
+  "$REPO_ROOT/README.md" | sort -t= -k1,1 >"$documented_defaults"
+# The sed program matches literal shell parameter expansion in entrypoint.sh.
+# shellcheck disable=SC2016
+sed -n 's/^: "${\([A-Z][A-Z0-9_]*\):=\(.*\)}"$/\1=\2/p' \
+  "$REPO_ROOT/entrypoint.sh" | sort -t= -k1,1 >"$shipped_defaults"
+
+cut -d= -f1 "$documented_defaults" | sort -u >"$documented_default_names"
+cut -d= -f1 "$shipped_defaults" | sort -u >"$shipped_default_names"
+
+if [ ! -s "$documented_defaults" ] || [ ! -s "$shipped_defaults" ]; then
+  no 'default inventories parsed' 'README.md or entrypoint.sh produced an empty default inventory'
+elif ! diff -u "$documented_default_names" "$shipped_default_names" >"$WORK/default-inventory.diff"; then
+  no 'documented and shipped default inventories match' "$(cat "$WORK/default-inventory.diff")"
+else
+  default_mismatches=$(join -t= -j1 "$documented_defaults" "$shipped_defaults" \
+    -o 0,1.2,2.2 | awk -F= '
+      $2 != $3 {
+        printf "%s: README=%s shipped=%s\n", $1, $2, $3
+      }
+    ')
+  if [ -z "$default_mismatches" ]; then
+    ok 'every literal README default matches its shipped entrypoint assignment'
+  else
+    no 'documented defaults match shipped assignments' "$default_mismatches"
+  fi
 fi
 
 report

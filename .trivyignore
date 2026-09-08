@@ -1,3 +1,6 @@
+# NOTE: CI does not read this file. cplieger/ci's security-scan.yaml
+# overwrites it with the shared entries before any Trivy step, so these
+# bytes reach only an ad-hoc `trivy` run in this working directory.
 # Suppress AVD-DS-0002 (Image user should not be 'root') — NUT requires root at
 # container init for two reasons:
 # 1. upsdrvctl (driver startup) accesses /dev/bus/usb/* via libusb, which

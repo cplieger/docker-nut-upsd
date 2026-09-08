@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # dbus_liveness_probe(): the background loop that re-checks the host-poweroff path
 # while SHUTDOWN_ON_BATTERY_CRITICAL is on, and the sole source of the line
-# alerts.yaml's UPSPowerOffPathBroken matches.
+# alerts/logql.yaml's UPSPowerOffPathBroken matches.
 #
 # The whole point of the probe is that it reports a broken poweroff path BEFORE a
 # real forced shutdown, because during one it can no longer be fixed. That makes
 # its log line a contract: UPSPowerOffPathBroken matches the literal
-# `D-Bus poweroff path unreachable` (copied verbatim from alerts.yaml below), and
-# it matches with count_over_time(...[15m]) > 0 -- so the line must RECUR while the
-# path is broken, not fire once and go quiet. Both properties are asserted here.
+# `D-Bus poweroff path unreachable` (copied verbatim from alerts/logql.yaml below), and
+# it matches while the path is broken, so the line must RECUR rather than fire
+# once and go quiet. Both properties are asserted here.
 #
 # tests/smoke.sh checks that this function is defined, and covers
 # dbus_poweroff_path_ok's negative case; the loop's own state machine and its log
@@ -25,7 +25,7 @@
 #     and sourced at RUNTIME, so shellcheck cannot see the read.
 #   SC2329 - the dbus_poweroff_path_ok and sleep stubs are invoked from that same
 #     runtime-sourced function, so shellcheck cannot see those calls either.
-#   SC2016 - the backtick pattern that reads the matcher out of alerts.yaml must
+#   SC2016 - the backtick pattern that reads the matcher out of alerts/logql.yaml must
 #     stay single-quoted: it matches the LITERAL backticks LogQL wraps a line
 #     filter in, and double quotes would run it as a command substitution.
 # shellcheck disable=SC2015,SC2034,SC2329,SC2016
@@ -73,34 +73,40 @@ count() {
   grep -c "$1" "$LOG"
 }
 
-# --- 1. the matcher alerts.yaml actually uses ------------------------------------
-# The literal is read FROM the rule file, so either side of the contract failing
+# --- 1. the matcher alerts/logql.yaml actually uses ------------------------------------
+# The pattern is read FROM the rule file, so either side of the contract failing
 # fails here: reword the log line and it stops matching; edit the alert expression
-# and the extracted literal changes out from under the emitter.
+# and the extracted pattern changes out from under the emitter. The rule filters on
+# the PARSED msg field (`| logfmt | msg=~"<phrase>.*"`), which is anchored, so the
+# emitted msg VALUE has to start with the phrase -- a line that merely contains it
+# somewhere else would not fire the alert and must not satisfy this assertion.
 # The range ends at the NEXT rule (or EOF) rather than at a `[15m]` literal, so a
 # window change cannot overrun it into a neighbouring rule; and the guard checks the
-# matcher's SHAPE, not just non-emptiness -- an empty matcher would make
-# `grep -F -- ""` match every line, and a wrong-rule matcher would be non-empty but
-# meaningless. This rule filters on the poweroff-path phrase.
+# pattern's SHAPE, not just non-emptiness -- an empty pattern would make
+# `grep -F -- ""` match every line, and a wrong-rule pattern would be non-empty but
+# meaningless.
 M_DBUS=$(awk '
   /- alert: UPSPowerOffPathBroken$/ { inrule = 1; next }
   inrule && /- alert: / { exit }
   inrule { print }
-' "$REPO_ROOT/alerts.yaml" | grep -o '`[^`]*`' | tr -d '`' | head -1)
+' "$REPO_ROOT/alerts/logql.yaml" | sed -n 's/.*| logfmt | msg=~"\([^"]*\)".*/\1/p' | head -1)
 case "$M_DBUS" in
   *poweroff*) ;;
   *)
-    printf 'harness error: extracted matcher %s from alerts.yaml is not the poweroff-path filter\n' \
+    printf 'harness error: extracted matcher %s from alerts/logql.yaml is not the poweroff-path msg filter\n' \
       "${M_DBUS:-<empty>}" >&2
     exit 1
     ;;
 esac
+# The rule's trailing `.*` is what lets the msg carry more than the phrase; strip it
+# to get the prefix the field must open with.
+M_DBUS_PHRASE=${M_DBUS%.\*}
 run_probe 1 broken
-grep -qF -- "$M_DBUS" "$LOG" \
+grep -qF -- "msg=\"$M_DBUS_PHRASE" "$LOG" \
   && grep -q 'level=error' "$LOG" \
   && grep -q 'socket=/run/dbus/system_bus_socket' "$LOG" \
-  && ok "a broken poweroff path logs level=error carrying '$M_DBUS' (read from alerts.yaml), naming the socket" \
-  || no 'UPSPowerOffPathBroken matcher' "alerts.yaml wants '$M_DBUS', log: $(head -c 300 "$LOG")"
+  && ok "a broken poweroff path logs level=error whose msg opens with '$M_DBUS_PHRASE' (read from alerts/logql.yaml), naming the socket" \
+  || no 'UPSPowerOffPathBroken matcher' "alerts/logql.yaml wants msg=\"$M_DBUS_PHRASE, log: $(head -c 300 "$LOG")"
 
 # --- 2. the line RECURS while broken --------------------------------------------
 #
@@ -108,9 +114,9 @@ grep -qF -- "$M_DBUS" "$LOG" \
 # transition would let the alert resolve itself while the path is still broken.
 # Three broken ticks must produce three lines.
 run_probe 3 broken
-[ "$(count 'D-Bus poweroff path unreachable')" -eq 3 ] \
+[ "$(count "$M_DBUS_PHRASE")" -eq 3 ] \
   && ok 'the error line repeats on every failed probe (keeps the 15m alert firing)' \
-  || no 'recurring error line' "expected 3 lines, got $(count 'D-Bus poweroff path unreachable')"
+  || no 'recurring error line' "expected 3 lines, got $(count "$M_DBUS_PHRASE")"
 
 # --- 3. recovery is reported ONCE ------------------------------------------------
 #
@@ -118,7 +124,7 @@ run_probe 3 broken
 # afterwards. Without the _dbus_broken latch the healthy loop would log a recovery
 # line every interval forever.
 run_probe 3 recovering
-[ "$(count 'D-Bus poweroff path unreachable')" -eq 1 ] \
+[ "$(count "$M_DBUS_PHRASE")" -eq 1 ] \
   && [ "$(count 'level=info msg="D-Bus poweroff path recovered"')" -eq 1 ] \
   && ok 'recovery logs one info line across two healthy probes, after one error line' \
   || no 'recovery logged once' "log: $(tr '\n' '|' <"$LOG")"
@@ -144,8 +150,9 @@ if (
   no 'missing DBUS_PROBE_INTERVAL' 'the probe started with no interval configured'
 else
   grep -q 'DBUS_PROBE_INTERVAL' "$LOG" \
+    && [ "$(count 'D-Bus poweroff path unreachable')" -eq 0 ] \
     && ok 'the probe refuses to start without DBUS_PROBE_INTERVAL rather than spinning' \
-    || no 'missing DBUS_PROBE_INTERVAL' "aborted without naming the variable: $(head -c 200 "$LOG")"
+    || no 'missing DBUS_PROBE_INTERVAL' "did not fail cleanly at the required-variable guard: $(head -c 200 "$LOG")"
 fi
 
 report

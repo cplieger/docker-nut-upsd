@@ -6,7 +6,6 @@ services:
     restart: unless-stopped
 
     environment:
-      TZ: "Europe/Paris"
       UPS_NAME: "ups"
       UPS_DESC: "My UPS"
       UPS_DRIVER: "usbhid-ups"  # see NUT hardware compatibility list

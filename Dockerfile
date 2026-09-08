@@ -4,11 +4,12 @@ FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6ee
 
 SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
 
-RUN apk add --no-cache automake build-base clang libtool lld patch perl pkgconf \
-        libusb-compat-dev openssl-dev linux-headers
+RUN apk add --no-cache build-base clang gpgv patch perl pkgconf \
+        libusb-dev openssl-dev linux-headers
 
 # renovate: datasource=github-releases depName=stephane/libmodbus
 ARG LIBMODBUS_VERSION=v3.2.0
+# No publisher signature or checksum assets: https://github.com/stephane/libmodbus/releases
 # repin: dep=stephane/libmodbus url=https://github.com/stephane/libmodbus/releases/download/{version}/libmodbus-{version_nov}.tar.gz
 ARG LIBMODBUS_SHA256=72239f319b9b8483e3d393c5a60865d734fcff18a8abbb2486e389834a2f6ef1
 WORKDIR /build/libmodbus
@@ -16,9 +17,11 @@ WORKDIR /build/libmodbus
 # mis-detects on Alpine/musl: `struct termios2` is present (via <asm/termbits.h>)
 # so HAVE_STRUCT_TERMIOS2 gets set, but TCGETS2/TCSETS2 are not usable from
 # <sys/ioctl.h> on musl, so modbus-rtu.c fails to compile. Force the type check
-# off to build the portable classic-termios path (as 3.1.x did). Modbus support
-# is unaffected: NUT's modbus drivers run at standard baud rates, so only the
-# termios2 custom-baud RTU path is lost. Remove once upstream libmodbus builds
+# off to build the portable classic-termios path (as 3.1.x did). Cost: the three
+# drivers taking an operator baud rate (apc_modbus, generic_modbus,
+# adelsystem_cbi) get B9600 for any rate the classic set cannot express, e.g.
+# 14400, and libmodbus says so only at debug -- the README warns the operator
+# (termios2 arrived in stephane/libmodbus#761). Remove once upstream builds
 # cleanly on musl.
 RUN wget -qO libmodbus.tar.gz \
       "https://github.com/stephane/libmodbus/releases/download/${LIBMODBUS_VERSION}/libmodbus-${LIBMODBUS_VERSION#v}.tar.gz" \
@@ -33,20 +36,23 @@ RUN wget -qO libmodbus.tar.gz \
 
 # renovate: datasource=github-tags depName=net-snmp/net-snmp
 ARG NETSNMP_VERSION=v5.9.5.2
-# GitHub-generated tag archive, same class the fleet
-# already gates for darkhttpd.
-# repin: dep=net-snmp/net-snmp url=https://github.com/net-snmp/net-snmp/archive/refs/tags/{version}.tar.gz
-ARG NETSNMP_SHA256=dc67748f382f7c0d2c17b62aabb1445724d80bb20a09081b7f010c9c86b84d45
+# repin: dep=net-snmp/net-snmp url=https://downloads.sourceforge.net/net-snmp/net-snmp-{version_nov}.tar.gz
+ARG NETSNMP_SHA256=16707719f833184a4b72835dac359ae188123b06b5e42817c00790d7dc1384bf
 WORKDIR /build/netsnmp
-# The conditional netsnmp.pc fallback below writes literal ${prefix}/${libdir}
-# for pkg-config to expand at consume time, NOT the shell — hence the
-# single-quoted printf format string. SC2016 is a false positive here.
-# hadolint ignore=SC2016
+# configure generates netsnmp.pc (ac_config_files), but INSTALL_PKGCONFIG is a
+# top-level target and this build runs only `make -C snmplib install`, so
+# install it here: NUT's --with-snmp detects net-snmp through it.
+# Release key 6E6718AEF1EB5C65C32D1B2A356BC0B552D53CAB is cross-checked
+# against net-snmp.org's published key, the SourceForge signature, and Ubuntu's keyserver.
+COPY netsnmp-release.gpg /usr/local/share/netsnmp-release.gpg
 RUN wget -qO netsnmp.tar.gz \
-      "https://github.com/net-snmp/net-snmp/archive/refs/tags/${NETSNMP_VERSION}.tar.gz" \
+      "https://downloads.sourceforge.net/net-snmp/net-snmp-${NETSNMP_VERSION#v}.tar.gz" \
+    && wget -qO netsnmp.tar.gz.asc \
+      "https://downloads.sourceforge.net/net-snmp/net-snmp-${NETSNMP_VERSION#v}.tar.gz.asc" \
     && printf '%s  %s\n' "${NETSNMP_SHA256}" netsnmp.tar.gz | sha256sum -c - \
+    && gpgv --keyring /usr/local/share/netsnmp-release.gpg netsnmp.tar.gz.asc netsnmp.tar.gz \
     && tar xz --strip-components=1 -f netsnmp.tar.gz \
-    && rm netsnmp.tar.gz \
+    && rm netsnmp.tar.gz netsnmp.tar.gz.asc \
     && ./configure --prefix=/usr --disable-static \
        --build="$(uname -m)-linux-musl" \
        CC=clang \
@@ -57,96 +63,66 @@ RUN wget -qO netsnmp.tar.gz \
     && make -j"$(nproc)" -C snmplib \
     && make -C snmplib install \
     && cp -r include/net-snmp /usr/include/ \
-    && if [ ! -f /usr/lib/pkgconfig/netsnmp.pc ]; then \
-         mkdir -p /usr/lib/pkgconfig \
-         && printf 'prefix=/usr\nexec_prefix=${prefix}\nlibdir=${exec_prefix}/lib\nincludedir=${prefix}/include\n\nName: netsnmp\nDescription: Net-SNMP library\nVersion: %s\nLibs: -L${libdir} -lnetsnmp\nLibs.private: -lssl -lcrypto\nCflags: -I${includedir}\n' \
-           "${NETSNMP_VERSION#v}" \
-           > /usr/lib/pkgconfig/netsnmp.pc; \
-       fi
+    && install -D -m 644 netsnmp.pc /usr/lib/pkgconfig/netsnmp.pc
 
 # renovate: datasource=github-releases depName=networkupstools/nut
 ARG NUT_VERSION=v2.8.5
-# The repin task below recomputes this on bump; cross-check the result
-# against the upstream nut-<X.Y.Z>.tar.gz.sha256 release asset.
+# The signature authenticates the publisher; the same-channel sha pin preserves transport integrity.
+# Release subkey BFA06D7C653B64C11DFDAF0442061031267D11B1 belongs to primary
+# B83459F776B90224988F36C0DE0184DA7043DCF7, cross-checked against the tarball's
+# docs/security.txt, keys.openpgp.org, and the maintainer's GitHub-verified key.
+# Refresh nut-release.gpg on key rotation using the procedure in docs/security.txt.
 # repin: dep=networkupstools/nut url=https://github.com/networkupstools/nut/releases/download/{version}/nut-{version_nov}.tar.gz
 ARG NUT_SHA256=18bf32e59eb764b13da3c4fa70384926d7fa584cb31d2fe7f137a570633eeec1
 WORKDIR /build/nut
-# Three checked-in backports of upstream fixes this pinned release predates
-# (the patch headers carry the full reasoning). All apply strictly (--fuzz=0)
-# so source drift on a version bump fails the build loudly instead of silently
-# shipping unpatched binaries, and all are removed with NUT_VERSION >= v2.8.6:
-#   - CVE-2026-54161 / GHSA-mjgp-j4gm-6qg5: v2.8.5 ships upsmon/upssched
-#     invoking NOTIFYCMD/CMDSCRIPT via system() with server-controlled text
-#     interpolated into the shell command.
-#   - libusb rdlens out-of-bounds read (upstream PR #3550, no CVE assigned):
-#     nut_libusb_open() bounds its candidate report-descriptor loop by
-#     sizeof() instead of element count, so it reads 24 bytes of stack past
-#     the array when a wedged UPS fails both descriptor reads and segfaults
-#     the driver. The regression was first released in v2.8.5, and the
-#     trigger state is the one the comms watchdog restarts the driver into.
-#   - libusb teardown deadlock on reconnect (upstream #598, no CVE assigned):
-#     v2.8.5 pairs libusb_init/libusb_exit per open/close, so every reconnect
-#     tears the default context down and waits for URBs that a device reset
-#     or an unexpected disconnect orphaned and that never drain. The driver
-#     hangs and the UPS goes unmonitored. Affects every USB driver in this
-#     image, since the defect is in the shared libusb-1.0 path.
+# Checked-in backports of fixes this pinned release predates; each patch
+# header carries the reasoning. --fuzz=0 so source drift on a version bump
+# fails the build instead of silently shipping unpatched binaries. They all go
+# at NUT_VERSION >= v2.8.6 — removal checklist in CONTRIBUTING.
 COPY patches/cve-2026-54161-notifycmd-execvp.patch \
-     patches/libusb-rdlens-oob-read.patch \
      patches/libusb-exit-reconnect-deadlock.patch \
+     patches/libusb-rdlens-oob-read.patch \
+     patches/richcomm-libusb-context-reopen.patch \
      /build/patches/
+COPY nut-release.gpg /usr/local/share/nut-release.gpg
 RUN wget -qO nut.tar.gz \
       "https://github.com/networkupstools/nut/releases/download/${NUT_VERSION}/nut-${NUT_VERSION#v}.tar.gz" \
+    && wget -qO nut.tar.gz.sig \
+      "https://github.com/networkupstools/nut/releases/download/${NUT_VERSION}/nut-${NUT_VERSION#v}.tar.gz.sig" \
+    && gpgv --keyring /usr/local/share/nut-release.gpg nut.tar.gz.sig nut.tar.gz \
     && printf '%s  %s\n' "${NUT_SHA256}" nut.tar.gz | sha256sum -c - \
     && tar xz --strip-components=1 -f nut.tar.gz \
-    && rm nut.tar.gz \
+    && rm nut.tar.gz nut.tar.gz.sig \
     && patch -p1 --fuzz=0 -i /build/patches/cve-2026-54161-notifycmd-execvp.patch \
-    && patch -p1 --fuzz=0 -i /build/patches/libusb-rdlens-oob-read.patch \
     && patch -p1 --fuzz=0 -i /build/patches/libusb-exit-reconnect-deadlock.patch \
+    && patch -p1 --fuzz=0 -i /build/patches/libusb-rdlens-oob-read.patch \
+    && patch -p1 --fuzz=0 -i /build/patches/richcomm-libusb-context-reopen.patch \
     && PKG_CONFIG_LIBDIR="/usr/lib/pkgconfig" \
        LIBS="-lssl -lcrypto" \
-       ac_cv_func_setpgrp_void=yes \
-       ac_cv_func_memcmp_working=yes \
-       ac_cv_func_mmap_fixed_mapped=yes \
        ./configure --prefix=/usr --sysconfdir=/etc/nut \
        --with-statepath=/var/run/nut \
        --with-drvpath=/usr/lib/nut \
        --with-user=nut --with-group=nut \
        CC=clang CXX=clang++ \
-       --with-usb --with-snmp --with-modbus \
+       --with-usb=libusb-1.0 --with-snmp --with-modbus \
        --with-ssl=openssl \
        --disable-shared --enable-static \
        --without-cgi --without-doc --without-avahi \
        --without-ipmi --without-neon --without-powerman \
        --without-freeipmi --without-wrap \
     && make -j"$(nproc)" \
-    && mkdir -p /out/usr/sbin /out/usr/bin /out/usr/lib/nut /out/usr/share/nut \
+    && mkdir -p /out/usr/sbin /out/usr/bin /out/usr/lib/nut /out/usr/share \
     && find server -name upsd -type f -executable -exec cp {} /out/usr/sbin/ \; \
     && find clients -name upsc -type f -executable -exec cp {} /out/usr/bin/ \; \
     && find clients -name upsmon -type f -executable -exec cp {} /out/usr/sbin/ \; \
     && find drivers -name upsdrvctl -type f -executable -exec cp {} /out/usr/sbin/ \; \
-    && find drivers -maxdepth 1 -type f -executable ! -name "*.la" \
+    && find drivers -maxdepth 1 -type f -executable \
        ! -name upsdrvctl -exec cp {} /out/usr/lib/nut/ \; \
-    && cp data/driver.list /out/usr/share/nut/ \
     && cp data/cmdvartab /out/usr/share/ \
-    && cp /usr/lib/libmodbus.so* /out/usr/lib/ \
-    && cp /usr/lib/libnetsnmp.so* /out/usr/lib/
+    && cp -d /usr/lib/libmodbus.so* /out/usr/lib/ \
+    && cp -d /usr/lib/libnetsnmp.so* /out/usr/lib/
 
-# ---------------------------------------------------------------------------
-# Embedded SBOM fragment. Syft inventories the final image from Alpine's APK
-# database only, so the three source-built payloads (NUT, libmodbus,
-# net-snmp) are invisible to the signed release SBOM and to vulnerability
-# scanners. Generate a CycloneDX fragment from the same Renovate-tracked
-# version ARGs the builds use — a Renovate bump keeps the SBOM correct with
-# zero extra maintenance — and ship it in the runtime image where Syft's
-# *.cdx.json cataloger picks it up (see the COPY in the runtime stage).
-# The VEX entry ships in-image and documents the CVE-2026-54161 backport
-# applied above for anyone scanning the embedded fragment; the SIGNED
-# release SBOM (Syft's SPDX 2.3 output) carries the component inventory
-# only — Syft does not propagate CycloneDX vulnerability analysis into
-# that output, so the resolved state reaches the registry through the
-# OpenVEX document at vex/cve-2026-54161.openvex.json instead, which the
-# release pipeline attests alongside the image.
-# Remove the entry together with the patch at NUT_VERSION >= v2.8.6.
+# Syft sees source builds only through an embedded CycloneDX fragment.
 RUN cat > /out/nut-upsd.cdx.json <<EOF
 {
   "bomFormat": "CycloneDX",
@@ -177,60 +153,138 @@ RUN cat > /out/nut-upsd.cdx.json <<EOF
       "purl": "pkg:github/net-snmp/net-snmp@${NETSNMP_VERSION}",
       "cpe": "cpe:2.3:a:net-snmp:net-snmp:${NETSNMP_VERSION#v}:*:*:*:*:*:*:*"
     }
-  ],
-  "vulnerabilities": [
-    {
-      "id": "CVE-2026-54161",
-      "analysis": {
-        "state": "resolved",
-        "detail": "Built with the checked-in backport patches/cve-2026-54161-notifycmd-execvp.patch (upstream ecf98e7542e4ae2b62b211622ee26989274b2220) applied at build time; remove this entry with the patch at NUT_VERSION >= v2.8.6."
-      },
-      "affects": [
-        { "ref": "pkg:github/networkupstools/nut@${NUT_VERSION}" }
-      ]
-    }
   ]
 }
 EOF
 
+FROM builder AS source-checks
+SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
+COPY validate.sh entrypoint.sh generate-config.sh /tmp/source-checks/
+RUN <<'CHECKS'
+set -eu
+
+make_list() {
+  awk -v macro="$1" '
+    $1 == macro && $2 == "=" {
+      in_list = 1
+      sub(/^[^=]*=[[:space:]]*/, "")
+    }
+    in_list {
+      continued = ($0 ~ /\\[[:space:]]*$/)
+      gsub(/\\/, "")
+      print
+      if (!continued) exit
+    }
+  ' drivers/Makefile.am | tr '[:space:]' '\n' | sed '/^$/d' | sort
+}
+
+source_usb=$(make_list USB_LIBUSB_DRIVERLIST)
+local_usb=$(sed -n '/^[[:space:]]*usbhid-ups[[:space:]]*|/{s/^[[:space:]]*//;s/)[[:space:]]*$//;p;q;}' /tmp/source-checks/validate.sh \
+  | tr '|' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;/^$/d' | sort)
+[ "$source_usb" = "$local_usb" ] || {
+  printf '%s\n' 'source check failed: validate.sh USB driver census differs from drivers/Makefile.am USB_LIBUSB_DRIVERLIST' >&2
+  exit 1
+}
+
+source_snmp=$(make_list SNMP_DRIVERLIST)
+local_snmp=$(sed -n '/^[[:space:]]*snmp-ups[[:space:]]*|/{s/^[[:space:]]*//;s/)[[:space:]]*$//;p;q;}' /tmp/source-checks/validate.sh \
+  | tr '|' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;/^$/d' \
+  | grep -v '^apcupsd-ups$' | sort)
+[ "$source_snmp" = "$local_snmp" ] || {
+  printf '%s\n' 'source check failed: validate.sh SNMP driver census differs from drivers/Makefile.am SNMP_DRIVERLIST' >&2
+  exit 1
+}
+
+source_default() {
+  awk -v var="$1" '
+    $0 ~ var "[[:space:]]*=" {
+      line = $0
+      sub(".*" var "[[:space:]]*=[[:space:]]*", "", line)
+      sub(/[^0-9].*/, "", line)
+      if (line != "") {
+        print line
+        exit
+      }
+    }
+  ' clients/upsmon.c
+}
+
+for spec in \
+  POLLFREQ:pollfreq \
+  POLLFREQALERT:pollfreqalert \
+  DEADTIME:deadtime \
+  FINALDELAY:finaldelay \
+  HOSTSYNC:hostsync \
+  NOCOMMWARNTIME:nocommwarntime \
+  RBWARNTIME:rbwarntime; do
+  shell_var=${spec%%:*}
+  source_var=${spec#*:}
+  source_value=$(source_default "$source_var")
+  expected=$(printf ": \"\${%s:=%s}\"" "$shell_var" "$source_value")
+  grep -Fqx "$expected" /tmp/source-checks/entrypoint.sh || {
+    printf 'source check failed: entrypoint.sh %s default differs from clients/upsmon.c %s\n' "$shell_var" "$source_var" >&2
+    exit 1
+  }
+done
+
+for spec in \
+  OFFDURATION:offdurationtime \
+  OBLBDURATION:oblbdurationtime \
+  ALARMCRITICAL:alarmcritical; do
+  directive=${spec%%:*}
+  source_var=${spec#*:}
+  source_value=$(source_default "$source_var")
+  grep -Fqx "$directive $source_value" /tmp/source-checks/generate-config.sh || {
+    printf 'source check failed: generate-config.sh %s pin differs from clients/upsmon.c %s; re-read the deliberate pin checklist in CONTRIBUTING.md\n' "$directive" "$source_var" >&2
+    exit 1
+  }
+done
+
+grep -Fq 'retrying harder' drivers/upsdrvctl.c || {
+  printf '%s\n' 'source check failed: drivers/upsdrvctl.c SIGKILL-escalation phrase changed; lifecycle.sh restart_ups_driver would stop reporting a wedged driver stop as anything but a clean one' >&2
+  exit 1
+}
+
+touch /source-checks-passed
+CHECKS
+
 FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS runtime
 
-# apk upgrade: the pinned base ships some packages (e.g. libssl3) at a stale,
-# CVE-affected revision; upgrading floats them forward on each rebuild.
-# PKG_REFRESH busts the cache for this layer. Without it BuildKit restores the
-# layer verbatim on every rebuild, so the `apk upgrade` below floats nothing
-# forward after the first build and the image keeps shipping the packages that
-# were current then. The central release/CI/scan builds pass today's UTC date.
-# The `echo` is load-bearing: BuildKit keys a RUN on the build args it actually
-# CONSUMES, so a merely-declared ARG would change nothing.
+# The `echo` is load-bearing: BuildKit keys a RUN on the args it CONSUMES, so
+# dropping it leaves the upgrade on a cached layer and the image ships stale
+# packages, silently.
 ARG PKG_REFRESH=static
 RUN echo "OS package refresh: ${PKG_REFRESH}" \
     && apk upgrade --no-cache \
     && apk add --no-cache \
         dbus \
-        libusb-compat \
+        libusb \
         openssl \
-        tzdata \
+        # util-linux-misc provides `wall`: the shipped upsmon popen()s it in
+        # doshutdown() and for every notify type keeping NUT's default WALL bit, so
+        # without it /bin/sh writes `wall: not found` onto upsmon's stderr mid-outage.
+        # https://github.com/networkupstools/nut/blob/v2.8.5/clients/upsmon.c#L968
         util-linux-misc \
+    # apk's install_if pulls dbus-daemon-launch-helper in with dbus
+    # (APKINDEX `i:dbus`): setuid root, group messagebus, for autospawning a
+    # service off a bus this image never runs. `test -u` fails the build if a
+    # base bump stops shipping it, so this line cannot become a lie.
+    && test -u /usr/libexec/dbus-daemon-launch-helper \
+    && rm /usr/libexec/dbus-daemon-launch-helper \
     && addgroup -S nut \
     && adduser -S -G nut -h /var/run/nut -s /sbin/nologin nut \
     && install -d -m 770 -o nut -g nut /var/run/nut \
     && install -d -m 700 -o root -g root /var/run/nut-secrets \
     && install -d -m 750 -o root -g nut /etc/nut
 
-COPY --from=builder /out/usr/lib/libmodbus* /usr/lib/
-COPY --from=builder /out/usr/lib/libnetsnmp* /usr/lib/
+COPY --from=builder /out/usr/lib/libmodbus* /out/usr/lib/libnetsnmp* /usr/lib/
 COPY --from=builder /out/usr/sbin/upsd \
      /out/usr/sbin/upsmon \
      /out/usr/sbin/upsdrvctl /usr/sbin/
 COPY --from=builder /out/usr/bin/upsc /usr/bin/
 COPY --from=builder /out/usr/lib/nut/ /usr/lib/nut/
-COPY --from=builder /out/usr/share/nut/ /usr/share/nut/
 COPY --from=builder /out/usr/share/cmdvartab /usr/share/cmdvartab
-# CycloneDX SBOM fragment for the source-built components (generated in the
-# builder stage from the Renovate-tracked version ARGs). Placed where Syft's
-# *.cdx.json cataloger inventories it, so SBOMs and scanners see NUT,
-# libmodbus, and net-snmp alongside the APK packages.
+# Placed where Syft's *.cdx.json cataloger inventories it.
 COPY --from=builder /out/nut-upsd.cdx.json /usr/share/sbom/nut-upsd.cdx.json
 
 # NUT_DEBUG_SYSLOG=stderr keeps upsd and the UPS driver logging to stderr after
@@ -240,64 +294,43 @@ COPY --from=builder /out/nut-upsd.cdx.json /usr/share/sbom/nut-upsd.cdx.json
 # the datagrams. "Data for UPS [x] is stale - check driver" is one of them.
 # https://github.com/networkupstools/nut/blob/v2.8.5/docs/man/nut.conf.txt
 ENV NUT_QUIET_INIT_UPSNOTIFY=true \
-    NUT_QUIET_INIT_SSL=true \
     NUT_DEBUG_SYSLOG=stderr
-COPY --chmod=755 entrypoint.sh /usr/local/bin/entrypoint.sh
-COPY --chmod=755 validate.sh /usr/local/bin/validate.sh
-COPY --chmod=755 generate-config.sh /usr/local/bin/generate-config.sh
-COPY --chmod=755 lifecycle.sh /usr/local/bin/lifecycle.sh
-COPY --chmod=755 password.sh /usr/local/bin/password.sh
-COPY --chmod=755 nut-notify.sh /usr/local/bin/nut-notify.sh
-COPY --chmod=755 nut-shutdown.sh /usr/local/bin/nut-shutdown.sh
-COPY --chmod=755 nut-shutdown-noop.sh /usr/local/bin/nut-shutdown-noop.sh
+COPY --chmod=755 entrypoint.sh validate.sh generate-config.sh lifecycle.sh \
+     secrets.sh nut-notify.sh nut-shutdown.sh nut-shutdown-noop.sh \
+     /usr/local/bin/
 EXPOSE 3493
 
-# ---------------------------------------------------------------------------
-# Test stage — runs the build-time smoke test (NUT binaries run; the
-# entrypoint's env -> config generation and input-validation guards behave).
-# A failure here fails the centralized `ci / validate` docker build gate,
-# because the final stage below depends on this stage's marker.
-# ---------------------------------------------------------------------------
+# The /tests-passed marker below is the only graph edge that makes a
+# default-target build execute tests/smoke.sh, so a smoke failure fails the build.
 FROM runtime AS test
-COPY tests/ /tmp/tests/
-# The OpenVEX doc is static while the embedded fragment is ARG-generated;
-# copied in so smoke.sh section 8 can assert their nut versions agree.
-COPY vex/ /tmp/vex/
+COPY --from=builder /build/nut/clients/upsmon.c /tmp/nut-source/clients/upsmon.c
+COPY alerts/logql.yaml /tmp/alerts/logql.yaml
+COPY tests/smoke.sh /tmp/tests/smoke.sh
 RUN sh /tmp/tests/smoke.sh && touch /tests-passed
 
-# ---------------------------------------------------------------------------
-# Final stage — the runtime image. Must remain last so the CI build gate
-# (which builds the default target) produces it; the marker COPY forces the
-# test stage to build and pass first.
-# ---------------------------------------------------------------------------
+# Must remain the LAST stage: the CI build gate builds the default target.
 FROM runtime AS final
 COPY --from=test /tests-passed /tests-passed
+COPY --from=source-checks /source-checks-passed /source-checks-passed
 
-# Note: this image runs as root by design — NUT needs root at init for USB
-# device access (upsdrvctl) and to chown the runtime directories. The upsd
-# daemon drops to user "nut" internally via the build-time configure flags
-# (--with-user=nut --with-group=nut). AVD-DS-0002 is suppressed via
-# .trivyignore at the repo root; see the rationale there.
-# Probe upsd at its configured listen address (upsd_probe_host, lifecycle.sh).
-# stderr is NOT discarded: upsc's error is the only signal in the docker health
-# log distinguishing "Data stale" (driver lost the device) from "Connection
-# refused" (upsd down) from silence (timeout fired). Env is canonicalized via
-# $(printf '%s' ...) — dockerd execs this probe with the RAW container env,
-# not the entrypoint's canonicalize_validated_values copy, so a trailing-LF
-# UPS_NAME/API_PORT/API_ADDRESS that boots fine would otherwise fail every probe.
-# Canonicalize FIRST, default SECOND (mirroring the entrypoint's order): an
-# LF-only value is non-empty raw, so defaulting from the raw value would pick
-# the LF over the documented default and probe an empty name/address/port.
-# DL3025 wants JSON notation, which cannot run this: the probe sources
-# lifecycle.sh for upsd_probe_host, substitutes three env vars and pipes upsc
-# into grep. Exec form supports none of that, and this image wraps NUT with a
-# shell entrypoint, so it will never be shell-less -- the distroless case the
-# rule guards does not arise here.
+# No USER: root is required at container init (see .trivyignore).
+
+# Probe upsd where it listens (upsd_probe_host, lifecycle.sh); upsc's stderr is
+# kept because it separates "Data stale", "Connection refused" and a timeout in
+# the health log. Canonicalize FIRST, default SECOND: dockerd execs this probe
+# with the RAW env, dodging the := defaults (entrypoint.sh's canonicalize note).
+# --start-period must cover entrypoint.sh's two start_nut_daemon bounds and
+# lifecycle.sh's PIDFILE_POLL_INTERVAL x PIDFILE_POLL_MAX; the
+# tests/shell/entrypoint_supervision_test.sh assertion keeps deliberate slack.
+
+# DL3025: this probe sources lifecycle.sh and expands three env vars, which
+# exec form cannot do; this image wraps NUT with a shell entrypoint, so it can
+# never become shell-less.
 # hadolint ignore=DL3025
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=15s \
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 --start-period=135s \
     CMD . /usr/local/bin/lifecycle.sh; \
         UPS_NAME=$(printf '%s' "${UPS_NAME:-}"); : "${UPS_NAME:=ups}"; \
         API_PORT=$(printf '%s' "${API_PORT:-}"); : "${API_PORT:=3493}"; \
         API_ADDRESS=$(printf '%s' "${API_ADDRESS:-}"); : "${API_ADDRESS:=0.0.0.0}"; \
-        timeout 3 upsc "${UPS_NAME}@$(upsd_probe_host):${API_PORT}" | grep -q 'ups.status' || exit 1
+        comms_fresh
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

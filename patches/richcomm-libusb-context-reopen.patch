@@ -1,0 +1,82 @@
+Backport of upstream NUT commit ce2364e2b1e79406248be50b01a031db67c1c9fd
+("drivers: preserve libusb context across USB reopens (richcomm only)").
+No CVE was assigned.
+
+richcomm_usb is one of the three USB drivers in this build that do not go
+through the shared libusb-1.0 layer: it calls libusb_init(NULL) from its
+own usb_device_open() and libusb_exit(NULL) from its own
+usb_device_close(), so patches/libusb-exit-reconnect-deadlock.patch, which
+fixes drivers/libusb1.c, does not reach it. Every reopen therefore drives
+the default context's refcount to zero and waits on libusb's internal
+synchronization for URBs that a device reset or an unexpected disconnect
+orphaned and that never drain — the same teardown deadlock, in this
+driver's own copy of the misuse.
+
+The fix has the same shape as the shared-path one: initialize the context
+once on the first open behind a file-scope flag, stop calling libusb_exit
+from the close path, and release it exactly once at driver cleanup. There
+is no atexit handler and no SIGALRM bound here, unlike the shared-path
+backport: upstream released the context from upsdrv_cleanup() instead, and
+this patch is upstream verbatim.
+
+bcmxcp_usb and nutdrv_atcl_usb carry the same misuse in their own code and
+are unfixed upstream, so no hunks are authored for them here.
+
+Only the drivers/richcomm_usb.c hunks of the upstream commit are included,
+which is the whole commit; it touched no other file.
+
+Remove this patch when NUT_VERSION moves to v2.8.6+, which ships the fix.
+See CONTRIBUTING ("Upstream sources may carry checked-in patches") for the
+removal checklist.
+
+diff --git a/drivers/richcomm_usb.c b/drivers/richcomm_usb.c
+index c20e1b6ea2..ad03c9dec5 100644
+--- a/drivers/richcomm_usb.c
++++ b/drivers/richcomm_usb.c
+@@ -68,6 +68,9 @@ static usb_device_id_t richcomm_usb_id[] = {
+ static usb_dev_handle	*udev = NULL;
+ static USBDevice_t	usbdevice;
+ static unsigned int	comm_failures = 0;
++#if WITH_LIBUSB_1_0
++static int		libusb_inited = 0;
++#endif
+ 
+ /* Forward decls */
+ static int instcmd(const char *cmdname, const char *extra);
+@@ -305,7 +308,6 @@ static int usb_device_close(usb_dev_handle *handle)
+ 
+ #if WITH_LIBUSB_1_0
+ 		libusb_close(handle);
+-		libusb_exit(NULL);
+ #else
+ 		ret = usb_close(handle);
+ #endif
+@@ -332,9 +334,11 @@ static int usb_device_open(usb_dev_handle **handlep, USBDevice_t *device, USBDev
+ 
+ 	/* libusb base init */
+ #if WITH_LIBUSB_1_0
+-	if (libusb_init(NULL) < 0) {
+-		libusb_exit(NULL);
+-		fatal_with_errno(EXIT_FAILURE, "Failed to init libusb 1.0");
++	if (!libusb_inited) {
++		if (libusb_init(NULL) < 0) {
++			fatal_with_errno(EXIT_FAILURE, "Failed to init libusb 1.0");
++		}
++		libusb_inited = 1;
+ 	}
+ #else  /* => WITH_LIBUSB_0_1 */
+ 	usb_init();
+@@ -636,6 +640,13 @@ void upsdrv_cleanup(void)
+ 	free(usbdevice.Product);
+ 	free(usbdevice.Serial);
+ 	free(usbdevice.Bus);
++
++#if WITH_LIBUSB_1_0
++	if (libusb_inited) {
++		libusb_exit(NULL);
++		libusb_inited = 0;
++	}
++#endif
+ }
+ 
+ void upsdrv_initinfo(void)

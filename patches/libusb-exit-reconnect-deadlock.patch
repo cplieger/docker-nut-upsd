@@ -1,7 +1,6 @@
 Backport of upstream NUT commit bfbba15928aa6a91b3e4b8943e0cad16199d9d48
 (NUT issues #598, #993, #2453) for a teardown deadlock that can hang a USB
-driver indefinitely on any reconnect. No CVE was assigned, so this patch
-has no VEX entry and no SBOM analysis entry.
+driver indefinitely on any reconnect. No CVE was assigned.
 
 v2.8.5 calls libusb_init(NULL) on every nut_libusb_open() and
 libusb_exit(NULL) on every nut_libusb_close(), so the default context's
@@ -18,9 +17,18 @@ the shutdown-on-critical path both stop working, and the container's
 comms watchdog is what eventually kills and restarts the driver, so the
 symptom is a repeating stale-data window rather than a clean reconnect.
 A deployment that passes the USB bus with a static `devices:` mapping
-instead of a live bind gets no recovery at all. This image ships every
-NUT USB driver, and the bug is in the shared libusb-1.0 code path, so
-the exposure is every USB device this image can drive, not one vendor.
+instead of a live bind loses that recovery as soon as the UPS
+re-enumerates, since the frozen node set never shows the new node. All nine
+libusb drivers
+this image ships carry the same libusb_init/libusb_exit misuse, so the
+exposure is not one vendor's device. This patch closes it for the five
+that reach the shared libusb-1.0 layer (usbhid-ups, tripplite_usb,
+blazer_usb, riello_usb, powervar_cx_usb) plus nutdrv_qx in USB mode. The
+three drivers that call libusb_init/libusb_exit from their own code are
+not reached by it: richcomm_usb has its own backport in
+patches/richcomm-libusb-context-reopen.patch, while bcmxcp_usb and
+nutdrv_atcl_usb are unfixed upstream, so v2.8.6 does not close those two
+either.
 Upstream reproduced it on the 0665:5161 Cypress USB-serial bridge family
 (Salicru SPS, Ippon, ViewPower, Voltronic Power).
 
@@ -37,22 +45,12 @@ this version: common/common.c background() has the parent call
 _exit(EXIT_SUCCESS), which does not run atexit handlers, so only the
 surviving child ever tears the context down.
 
-Deliberately NOT taken: the companion commit a4813f868 / 9eb4ed46, which
+Deliberately NOT taken: the companion commit 9eb4ed46, which
 escalates a persistent LIBUSB_ERROR_OVERFLOW in nutdrv_qx to a USB reset.
 That change increases how often a reset happens, which is what opens this
 deadlock window in the first place, and it is specific to one device
 family. Taking the deadlock fix without the extra resets is the
 conservative half of the pair.
-
-Verification signal after deploy: the driver banner reports the USB
-communication driver version, so a patched image logs
-"USB communication driver (libusb 1.0) 0.54" where v2.8.5 logs 0.53, and
-upsc reports the same value in driver.version.internal's sibling fields.
-
-Upstream currency: since this commit landed on master (2026-05-24) the
-only other change to drivers/libusb1.c is the rdlens bounds fix carried
-by patches/libusb-rdlens-oob-read.patch, so there are no follow-up
-corrections to fold in.
 
 Only the drivers/libusb1.c hunks of the upstream commit are included,
 which is the whole commit; it touched no other file. libusb0.c has a
@@ -60,10 +58,8 @@ different structure upstream and is not part of this change, and this
 image compiles the libusb-1.0 backend anyway.
 
 Remove this patch when NUT_VERSION moves to v2.8.6+, which ships the fix.
-Removal spans three coupled sites: this file, the Dockerfile COPY/apply
-step, and the README's "Dependency CVE posture" paragraph that names the
-carried backports. See CONTRIBUTING ("Upstream sources may carry
-checked-in patches").
+See CONTRIBUTING ("Upstream sources may carry checked-in patches") for the
+removal checklist.
 
 diff --git a/drivers/libusb1.c b/drivers/libusb1.c
 index 955ada9..b02da58 100644

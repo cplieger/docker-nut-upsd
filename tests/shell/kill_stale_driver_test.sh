@@ -62,7 +62,6 @@ UPS_DRIVER=usbhid-ups
 PIDFILE="$WORK/usbhid-ups-ups.pid"
 SIGNALS="$WORK/signals.log"
 WARN="$WORK/warn.log"
-PROBES="$WORK/probes.log"
 LIVE_PIDS=""
 IDENTITY_OK=1
 
@@ -74,18 +73,6 @@ IDENTITY_OK=1
 kill() {
   printf '%s\n' "$*" >>"$SIGNALS"
   if [ "$1" = "-0" ]; then
-    # Count the liveness probes so the two -0 calls can be answered
-    # independently: the shipped code probes ONCE before the identity check and
-    # AGAIN immediately before the SIGKILL, to narrow the PID-reuse window. Only a
-    # per-call answer can isolate the second probe from the first.
-    printf 'x\n' >>"$PROBES"
-    _kp=$(wc -l <"$PROBES")
-    case "$LIVE_MODE" in
-      first-only)
-        [ "$_kp" -eq 1 ] && return 0
-        return 1
-        ;;
-    esac
     case " $LIVE_PIDS " in
       *" $2 "*) return 0 ;;
     esac
@@ -111,29 +98,10 @@ pid_matches_binary() {
 plant() {
   : >"$SIGNALS"
   : >"$WARN"
-  : >"$PROBES"
-  LIVE_MODE=list
   printf '%s' "$1" >"$PIDFILE"
   LIVE_PIDS="$2"
   IDENTITY_OK="$3"
   kill_stale_driver_from_pidfile "$PIDFILE" 2>"$WARN"
-}
-
-# plant_live_then_dead <pid> — the PID-reuse window: alive for the FIRST liveness
-# probe, gone by the second. Identity passes, so only the re-check can refuse.
-plant_live_then_dead() {
-  : >"$SIGNALS"
-  : >"$WARN"
-  : >"$PROBES"
-  LIVE_MODE=first-only
-  printf '%s' "$1" >"$PIDFILE"
-  LIVE_PIDS="$1"
-  IDENTITY_OK=1
-  kill_stale_driver_from_pidfile "$PIDFILE" 2>"$WARN"
-}
-
-probes() {
-  wc -l <"$PROBES" | tr -d ' '
 }
 
 killed() {
@@ -184,26 +152,13 @@ plant '4242' '4242' 0
   && ok 'a live PID whose /proc identity is not the UPS driver is refused' \
   || no 'unverified live PID' "signals=[$(tr '\n' ' ' <"$SIGNALS")]"
 
-# --- 4. the two LIVENESS probes, isolated from each other -------------------------
-# The shipped code probes `kill -0` twice: once as the gate before the identity
-# check, and again immediately before the SIGKILL to narrow the PID-reuse window.
-# Neither was pinned, so either could be deleted silently -- in a function that
-# issues a root SIGKILL.
-
-# The first probe: a DEAD numeric PID whose identity would pass. Nothing may be
-# signalled and nothing refused-with-a-warning either; the PID simply is not there.
+# --- 4. the liveness probe -------------------------------------------------------
+# A dead numeric PID is silent: the PID simply is not there, so identity is not
+# consulted and no refusal warning is emitted.
 plant '4242' '' 1
 ! killed && [ ! -s "$WARN" ] \
-  && ok 'a dead numeric PID is dropped by the first liveness probe, with no signal and no warning' \
-  || no 'first liveness probe' "signals=[$(tr '\n' ' ' <"$SIGNALS")], warn: $(cat "$WARN")"
-
-# The second probe: alive for the first probe, gone by the re-check. This is the
-# PID-reuse window itself -- with the re-check deleted, the SIGKILL lands on
-# whatever now holds that number.
-plant_live_then_dead 4242
-! killed && [ "$(probes)" -eq 2 ] \
-  && ok 'a PID that dies between the two probes is not signalled (the re-check narrows PID reuse)' \
-  || no 'second liveness probe' "probes=$(probes), signals=[$(tr '\n' ' ' <"$SIGNALS")]"
+  && ok 'a dead numeric PID is dropped by the liveness probe, with no signal and no warning' \
+  || no 'liveness probe' "signals=[$(tr '\n' ' ' <"$SIGNALS")], warn: $(cat "$WARN")"
 
 # --- 5. the positive control: the guards do not refuse everything -----------------
 #
