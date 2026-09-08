@@ -178,14 +178,17 @@ new generated file should respect that same override hook.
   comparison and the `ups_on_batt` cadence. Two alert matchers key directly on
   upstream prose: `UPSHostSyncExpired` matches upsmon's host-sync diagnostic,
   and `UPSNotifyExecFailed` matches the execvp failure diagnostic introduced by
-  the CVE backport. An upstream reword silently breaks either matcher, and the
-  second matcher loses its patch-application drift signal when the backport is
-  dropped. The criticality pin also couples `_emit_upsmon_conf`, the
-  `UPSHardwareFault` and `UPSProtectionUnavailable` annotations, the
-  `SHUTDOWN_ON_BATTERY_CRITICAL` row in the README, and the criticality cases in
-  `tests/shell/alert_state_window_contract_test.sh`; the `OVERDURATION` absence
-  is deliberate. At v2.8.6, re-verify every citation and both matchers before
-  removing the checked-in patches.
+  the CVE backport. An upstream reword of the host-sync diagnostic fails the
+  build: `tests/smoke.sh` reads `UPSHostSyncExpired`'s own line filter out of
+  `alerts/logql.yaml` and greps the pinned `clients/upsmon.c` for that string,
+  so edit either side and the test stage refuses. The execvp matcher has no
+  such binding and breaks silently, and it also loses its patch-application
+  drift signal when the backport is dropped. The criticality pin also couples
+  `_emit_upsmon_conf`, the `UPSHardwareFault` and `UPSProtectionUnavailable`
+  annotations, the `SHUTDOWN_ON_BATTERY_CRITICAL` row in the README, and the
+  criticality cases in `tests/shell/alert_state_window_contract_test.sh`; the
+  `OVERDURATION` absence is deliberate. At v2.8.6, re-verify every citation and
+  both matchers before removing the checked-in patches.
 - **USB re-enumeration is expected, not exceptional.** Many UPSes reset
   their USB link periodically (the driver runs fine, then goes "Data
   stale"). The `comms_watchdog` in `lifecycle.sh` recovers from this by
@@ -226,11 +229,8 @@ new generated file should respect that same override hook.
   operator-mounted `/etc/nut/upsd.pem` is copied at every boot to
   `/etc/nut/upsd-mounted.pem`. Never chown/chmod the mount in place: on
   a rw bind mount that mutates the HOST file (handing the private key
-  to whatever host group the container's `nut` GID maps to), and it is
-  also why `upsd.pem` is excluded from the entrypoint's blanket
-  `/etc/nut` chown/chmod sweep (a read-only mount would additionally
-  EROFS the sweep and abort boot under `set -e`). Keep all these pieces
-  aligned when touching the TLS path.
+  to whatever host group the container's `nut` GID maps to). Keep all
+  these pieces aligned when touching the TLS path.
 - **`chgrp` on the USB bus is best-effort.** Both the startup and the
   watchdog `chgrp -R nut /dev/bus/usb` are guarded (warn-only). With the
   generated configuration, the group re-assert makes a new `root:root`
@@ -267,7 +267,8 @@ The scripts and Dockerfile are linted in CI; run the same tools before
 pushing:
 
 ```sh
-shellcheck -x *.sh tests/*.sh
+shellcheck -x *.sh tests/*.sh tests/shell/*.sh
+shfmt -d -i 2 -ci -bn *.sh tests/*.sh tests/shell/*.sh
 hadolint Dockerfile
 docker build -t nut-upsd-test .
 ```
