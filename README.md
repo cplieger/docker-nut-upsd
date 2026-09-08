@@ -7,6 +7,7 @@
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/cplieger/docker-nut-upsd/badge)](https://scorecard.dev/viewer/?uri=github.com/cplieger/docker-nut-upsd)
 [![SBOM](https://img.shields.io/badge/SBOM-SPDX-1D4ED8)](https://github.com/cplieger/docker-nut-upsd/releases)
 
+<!-- hub-overview BEGIN -->
 Monitor your UPS and let networked machines shut down gracefully during power outages.
 
 ## What it does
@@ -30,6 +31,8 @@ The container runs the Network UPS Tools (NUT) upsd daemon in Alpine Linux. The 
   - `upsmon.conf.user`: keep the `NOTIFYCMD` line and the `EXEC` notify flags (see Alerting)
 - Configurable low-battery thresholds
 - Clean signal handling: SIGTERM gracefully stops all NUT services
+
+<!-- hub-overview END -->
 
 ## Quick start
 
