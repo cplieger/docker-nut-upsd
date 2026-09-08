@@ -166,21 +166,25 @@ done
   && ok 'every NUT event the alert rules match carries EXEC in the generated upsmon.conf' \
   || no 'NOTIFYFLAG routing' "alerts/logql.yaml matches these events but $GENERATOR does not route them to NOTIFYCMD:$_unrouted"
 
-# --- 1c. every routed event is matched or named as deliberately unalerted --------
-# The reverse of 1b fails silently: an EXEC-routed event with no rule is
-# invisible elsewhere. Read both sets at run time and accept an unmatched event
-# only when the header names it; no inventory count or exception list is pinned.
-routed_events=$(sed -n 's/^NOTIFYFLAG \([A-Z][A-Z0-9]*\) .*EXEC.*$/\1/p' "$GENERATOR" | sort -u)
+# --- 1c. the header's silence list IS the residue, in both directions ------------
+# The reverse of 1b in BOTH directions, and it fails silently either way: a rule
+# ADDED for an event the header declares deliberately unalerted, or a whole rule
+# DELETED for an event the header happens to mention elsewhere. The silence list is
+# read out of the except-clause the header publishes and required to EQUAL
+# routed-minus-matched, so no count and no exception list is pinned.
+routed_events=$(sed -n 's/^NOTIFYFLAG \([A-Z][A-Z0-9_]*\) .*EXEC.*$/\1/p' "$GENERATOR" | sort -u)
 matched_events=$(sed -n 's/.*| logfmt | event=~*"\([^"]*\)".*/\1/p' "$ALERTS" | tr '|' '\n' | sort -u)
 header_text=$(awk '/^groups:/ { exit } { print }' "$ALERTS")
-_unexcused=""
-for _ev in $(comm -23 <(printf '%s\n' "$routed_events") <(printf '%s\n' "$matched_events")); do
-  printf '%s\n' "$header_text" | grep -qw -- "$_ev" || _unexcused="$_unexcused $_ev"
-done
-[ -n "$routed_events" ] && [ -z "$_unexcused" ] \
-  && ok 'every routed event is matched by an alert rule or named in the header as deliberately unalerted' \
-  || no 'routed alert coverage' \
-    "routed=$(printf '%s' "$routed_events" | tr '\n' ' ')| unexcused and unmatched:$_unexcused"
+silence_events=$(printf '%s\n' "$header_text" | sed 's/^# *//' | tr '\n' ' ' \
+  | sed -n 's/.*has a rule below except \([^.]*\)\..*/\1/p' \
+  | tr ',' ' ' | sed 's/ and / /g' | tr ' ' '\n' \
+  | grep -E '^[A-Z][A-Z0-9_]*$' | sort -u)
+_residue=$(comm -23 <(printf '%s\n' "$routed_events") \
+  <(printf '%s\n' "$matched_events") | sort -u)
+[ -n "$silence_events" ] && [ "$silence_events" = "$_residue" ] \
+  && ok 'the events the header names as deliberately unalerted are exactly the routed events with no rule' \
+  || no 'header silence list' \
+    "header=$(printf '%s' "$silence_events" | tr '\n' ' ')| routed-minus-matched=$(printf '%s' "$_residue" | tr '\n' ' ')"
 
 # --- 2. the record fields the logfmt parser and the matchers both depend on --------
 #

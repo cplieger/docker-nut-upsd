@@ -2,10 +2,10 @@
 # The alert rules' consumer label against compose.yaml's container_name.
 #
 # WHY THIS IS A CONTRACT: every rule in alerts/logql.yaml selects its log stream with
-# {container="<name>"} and groups by that label, and the only place the name is
-# published is the shipped compose example. Rename it on one side, change a
-# sum-by label, or add a rule with no selector at all, and the rules keep parsing,
-# keep evaluating, and match nothing.
+# {container="<name>"}, every rule that uses `sum by` groups by that label, and the
+# only place the name is published is the shipped compose example. Rename it on one
+# side, change a sum-by label, or add a rule with no selector at all, and the rules
+# keep parsing, keep evaluating, and match nothing.
 #
 # The expected value is READ from compose.yaml rather than spelled a second time
 # here, so renaming both sides together stays green -- which it should.

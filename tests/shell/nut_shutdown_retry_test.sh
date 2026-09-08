@@ -109,7 +109,7 @@ container_error_pattern=$(awk '
   inrule && /- alert: / { exit }
   inrule { print }
 ' "$REPO_ROOT/alerts/logql.yaml" \
-  | sed -n 's/.*|~ `\([^`]*\)`.*/\1/p' \
+  | sed -n "s/.*|~ \`\([^\`]*\)\`.*/\1/p" \
   | head -1)
 initial_record=$(head -n 1 "$ERR")
 if [ -n "$container_error_pattern" ] \
@@ -351,9 +351,9 @@ for _settle_case in pending refuted unreadable; do
       if [ "$RUN_RC" -eq 0 ] \
         && [ ! -s "$RM_CALLS" ] \
         && [ ! -s "$INHIBITOR_CALLS" ] \
-        && [ "$_settle_alert_matches" -eq 0 ] \
-        && grep -qF 'D-Bus poweroff requests failed but logind reports a pending poweroff; host poweroff NOT refuted' "$ERR"; then
-        ok 'a pending settle state after exhausted PowerOff failures avoids critical-alert routing and cleanup'
+        && [ "$_settle_alert_matches" -eq 1 ] \
+        && grep -qxF 'level=error msg="D-Bus poweroff failed after 3 attempts; logind reports a pending shutdown-class action, which may be a reboot or halt rather than this poweroff" detail="D-Bus refused request" settle="method return    variant boolean true"' "$ERR"; then
+        ok 'a pending settle state after exhausted PowerOff failures reports the failure, keeps killpower and queries no inhibitors'
       else
         no 'failed-PowerOff pending settle state' "$(write_settle_observables | tr '\n' ' ')"
       fi

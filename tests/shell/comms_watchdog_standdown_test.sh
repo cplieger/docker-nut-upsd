@@ -44,8 +44,8 @@ ENTRYPOINT="$REPO_ROOT/validate.sh"
 load_function strip_leading_zeros
 ENTRYPOINT="$REPO_ROOT/entrypoint.sh"
 CANONICALIZE_WATCHDOG=$(extract_range \
-  '^COMMS_CHECK_INTERVAL=\$(strip_leading_zeros "\$COMMS_CHECK_INTERVAL")$' \
-  '^DBUS_PROBE_INTERVAL=\$(strip_leading_zeros "\$DBUS_PROBE_INTERVAL")$' \
+  '^COMMS_CHECK_INTERVAL=[$](strip_leading_zeros "[$]COMMS_CHECK_INTERVAL")$' \
+  '^DBUS_PROBE_INTERVAL=[$](strip_leading_zeros "[$]DBUS_PROBE_INTERVAL")$' \
   "$WORK/canonicalize-watchdog.sh") || exit 1
 ENTRYPOINT="$SUBJECT"
 
@@ -54,6 +54,7 @@ COMMS_RECOVERY_TIMEOUT=090
 COMMS_FAST_RETRIES=01
 COMMS_BACKOFF_FACTOR=08
 DBUS_PROBE_INTERVAL=0300
+# shellcheck source=/dev/null
 . "$CANONICALIZE_WATCHDOG"
 PADDED_CALLS="$WORK/padded-restarts"
 : >"$PADDED_CALLS"
@@ -80,6 +81,19 @@ PADDED_EXPECTED='1 104
   && ok 'zero-padded watchdog timings remain decimal through the backoff threshold' \
   || no 'zero-padded watchdog arithmetic' \
     "values=$COMMS_CHECK_INTERVAL,$COMMS_RECOVERY_TIMEOUT,$COMMS_FAST_RETRIES,$COMMS_BACKOFF_FACTOR,$DBUS_PROBE_INTERVAL calls=$(tr '\n' '|' <"$PADDED_CALLS") err=$(cat "$WORK/padded-err")"
+
+ARITH_CONSUMERS="$WORK/arith-consumers"
+grep -oE '[$][(][(][^)]*' "$SUBJECT" \
+  | grep -oE '(COMMS|DBUS)_[A-Z0-9_]+' | sort -u >"$ARITH_CONSUMERS"
+_uncanonicalized=""
+while IFS= read -r _canon_var; do
+  grep -Fq "$_canon_var=\$(strip_leading_zeros" "$CANONICALIZE_WATCHDOG" \
+    || _uncanonicalized="$_uncanonicalized $_canon_var"
+done <"$ARITH_CONSUMERS"
+[ -s "$ARITH_CONSUMERS" ] && [ -z "$_uncanonicalized" ] \
+  && ok 'every watchdog variable lifecycle.sh reads with shell arithmetic is canonicalized at startup' \
+  || no 'watchdog arithmetic canonicalization' \
+    "consumers=$(tr '\n' ' ' <"$ARITH_CONSUMERS")| uncanonicalized=$_uncanonicalized"
 
 load_function driver_pidfile
 load_function watchdog_epoch
@@ -189,7 +203,7 @@ container_error_rule=$(awk -v want='- alert: UPSContainerError' '
   inrule { print }
 ' "$ALERTS")
 container_error_level=$(printf '%s\n' "$container_error_rule" \
-  | sed -n 's/.*|~ `\^level=\([a-z][a-z]*\) `.*/\1/p' | head -1)
+  | sed -n "s/.*|~ \`\^level=\([a-z][a-z]*\) \`.*/\1/p" | head -1)
 if [ -z "$container_error_level" ]; then
   printf 'harness error: UPSContainerError has no anchored level matcher in %s\n' "$ALERTS" >&2
   exit 1
@@ -244,6 +258,27 @@ TX_EXPECTED=$(printf '%s\n' \
   && [ ! -e "$TX_CAPTURE" ] \
   && ok 'a recovery attempt performs bounded stop, verified stale cleanup, bounded start, diagnosis, and capture cleanup in order' \
   || no 'complete driver restart transaction' "status=$TX_STATUS trace=$(tr '\n' '|' <"$TX_TRACE") err=$(tr '\n' '|' <"$TX_ERR")"
+
+: >"$TX_TRACE"
+: >"$TX_ERR"
+TX_STOP_RC=0
+TX_STOP_OUT='Stopping UPS driver failed, retrying harder'
+TX_START_RC=0
+TX_START_OUT=""
+SHUTDOWN_ON_BATTERY_CRITICAL=false
+restart_ups_driver 1 2>"$TX_ERR"
+escalated_warning=$(grep -c 'level=warn msg="comms watchdog driver stop escalated to SIGKILL upstream" ups=ups detail="Stopping UPS driver failed, retrying harder"' "$TX_ERR")
+
+: >"$TX_TRACE"
+: >"$TX_ERR"
+TX_STOP_OUT='Stopping UPS driver cleanly'
+restart_ups_driver 1 2>"$TX_ERR"
+clean_warning=$(grep -c 'driver stop escalated to SIGKILL upstream' "$TX_ERR" || true)
+
+[ "$escalated_warning" -eq 1 ] && [ "$clean_warning" -eq 0 ] \
+  && ok 'a successful upstream SIGKILL escalation is classified separately from a clean stop' \
+  || no 'upstream SIGKILL escalation classifier' \
+    "escalated=$escalated_warning clean=$clean_warning err=$(tr '\n' '|' <"$TX_ERR")"
 
 : >"$TX_TRACE"
 : >"$TX_ERR"

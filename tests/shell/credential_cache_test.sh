@@ -283,28 +283,95 @@ load_function _install_nut_config
 INSTALL_SRC="$WORK/install-staging"
 INSTALL_DST="$WORK/install-destination"
 CHOWN_ARGS="$WORK/chown.args"
-printf 'staged bytes\n' >"$INSTALL_SRC"
-printf 'old bytes\n' >"$INSTALL_DST"
-: >"$ERR"
+CHMOD_ARGS="$WORK/chmod.args"
 # shellcheck disable=SC2329
 chown() {
   printf '%s\n' "$*" >"$CHOWN_ARGS"
-  printf 'simulated chown failure\n' >&2
-  return 1
+  if [ "$_inst_case" = chown ]; then
+    printf 'simulated chown failure\n' >&2
+    return 1
+  fi
+  return 0
 }
-INSTALL_CAUSE=
-if _install_nut_config "$INSTALL_SRC" "$INSTALL_DST" INSTALL_CAUSE 2>"$ERR"; then
-  no 'staged install refuses owner failure before rename' 'returned success after chown failed'
+# shellcheck disable=SC2329
+chmod() {
+  printf '%s\n' "$*" >"$CHMOD_ARGS"
+  if [ "$_inst_case" = chmod ]; then
+    printf 'simulated chmod failure\n' >&2
+    return 1
+  fi
+  return 0
+}
+for _inst_case in chown chmod; do
+  printf 'staged bytes\n' >"$INSTALL_SRC"
+  printf 'old bytes\n' >"$INSTALL_DST"
+  : >"$CHOWN_ARGS"
+  : >"$CHMOD_ARGS"
+  : >"$ERR"
+  case "$_inst_case" in
+    chown)
+      _inst_args_file="$CHOWN_ARGS"
+      _inst_expected_args="root:nut $INSTALL_SRC"
+      ;;
+    chmod)
+      _inst_args_file="$CHMOD_ARGS"
+      _inst_expected_args="640 $INSTALL_SRC"
+      ;;
+  esac
+  INSTALL_CAUSE=
+  if _install_nut_config "$INSTALL_SRC" "$INSTALL_DST" INSTALL_CAUSE 2>"$ERR"; then
+    no "staged install refuses $_inst_case failure before rename" "returned success after $_inst_case failed"
+  else
+    [ "$(cat "$INSTALL_DST")" = 'old bytes' ] \
+      && [ "$(cat "$INSTALL_SRC")" = 'staged bytes' ] \
+      && [ "$(cat "$_inst_args_file")" = "$_inst_expected_args" ] \
+      && [ -n "$INSTALL_CAUSE" ] \
+      && printf '%s' "$INSTALL_CAUSE" | grep -Fq "simulated $_inst_case failure" \
+      && [ ! -s "$ERR" ] \
+      && ok "staged install refuses $_inst_case failure before rename" \
+      || no "staged install refuses $_inst_case failure before rename" "dst=[$(cat "$INSTALL_DST")] log=[$(head -c 200 "$ERR")]"
+  fi
+done
+unset -f chown chmod
+
+CACHE="$WORK/missing-parent/admin_password"
+if resolve \
+  && [ "${#PW}" -eq "$PASSWORD_LENGTH" ] \
+  && grep -Eq 'level=warn msg="generated ADMIN_PASSWORD but failed to cache; a new value will be generated on next restart" path=.* err="[^"]+"$' "$ERR"; then
+  ok 'a cache mktemp failure returns its cause in the structured warning'
 else
-  [ "$(cat "$INSTALL_DST")" = 'old bytes' ] \
-    && [ "$(cat "$INSTALL_SRC")" = 'staged bytes' ] \
-    && [ "$(cat "$CHOWN_ARGS")" = "root:nut $INSTALL_SRC" ] \
-    && [ -n "$INSTALL_CAUSE" ] \
-    && printf '%s' "$INSTALL_CAUSE" | grep -Fq 'simulated chown failure' \
-    && [ ! -s "$ERR" ] \
-    && ok 'staged install refuses owner failure before rename' \
-    || no 'staged install refuses owner failure before rename' "dst=[$(cat "$INSTALL_DST")] log=[$(head -c 200 "$ERR")]"
+  no 'cache mktemp failure cause' "value_len=${#PW} log=[$(head -c 200 "$ERR")]"
 fi
-unset -f chown
+
+CACHE="$WORK/admin_password"
+WRITE_TARGET="$WORK/cache-write-target"
+mkdir "$WRITE_TARGET"
+# Invoked by the extracted credential generator.
+# shellcheck disable=SC2329
+mktemp() {
+  printf '%s\n' "$WRITE_TARGET"
+}
+if resolve \
+  && [ "${#PW}" -eq "$PASSWORD_LENGTH" ] \
+  && grep -Eq 'level=warn msg="generated ADMIN_PASSWORD but failed to cache; a new value will be generated on next restart" path=.* err="[^"]+"$' "$ERR"; then
+  ok 'a cache staging-write failure returns its cause in the structured warning'
+else
+  no 'cache staging-write failure cause' "value_len=${#PW} log=[$(head -c 200 "$ERR")]"
+fi
+unset -f mktemp
+
+RENAME_SRC="$WORK/missing-staging"
+RENAME_DST="$WORK/rename-destination"
+printf 'old bytes\n' >"$RENAME_DST"
+RENAME_CAUSE=
+if _replace_file "$RENAME_SRC" "$RENAME_DST" RENAME_CAUSE; then
+  no 'failed atomic rename' 'returned success after mv failed'
+else
+  [ "$(cat "$RENAME_DST")" = 'old bytes' ] \
+    && [ -n "$RENAME_CAUSE" ] \
+    && printf '%s' "$RENAME_CAUSE" | grep -Fq "$RENAME_SRC" \
+    && ok 'a failed atomic rename preserves the destination and returns mv cause' \
+    || no 'failed atomic rename' "dst=[$(cat "$RENAME_DST")] cause=[$RENAME_CAUSE]"
+fi
 
 report

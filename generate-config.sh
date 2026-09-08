@@ -81,6 +81,7 @@ use_user_override() {
     exit 1
   fi
   printf 'level=info msg="using mounted %s.user"\n' "$1" >&2 || :
+  return 0
 }
 
 _stage_generated() {
@@ -103,7 +104,8 @@ _install_generated() {
 
 _staged_write_failed() {
   rm -f "$_sg_tmp" || :
-  printf 'level=error msg="failed to write generated config; aborting" file=%s\n' "$1" >&2
+  printf 'level=error msg="failed to write generated config; aborting" file=%s err="%s"\n' \
+    "$1" "$(log_value "$2")" >&2
   exit 1
 }
 
@@ -127,55 +129,59 @@ UPSEOF
   # hardware).
   if [ -n "$_batt_overrides" ]; then
     printf '    ignorelb\n' || return 1
-  fi
-
-  # Battery override directives — explicit per-variable to avoid eval.
-  if [ -n "${LOWBATT_PERCENT:-}" ]; then
-    printf '    override.battery.charge.low = %s\n' "$LOWBATT_PERCENT" || return 1
-  fi
-  if [ -n "${LOWBATT_RUNTIME:-}" ]; then
-    printf '    override.battery.runtime.low = %s\n' "$LOWBATT_RUNTIME" || return 1
+    # Battery override directives — explicit per-variable to avoid eval.
+    if [ -n "${LOWBATT_PERCENT:-}" ]; then
+      printf '    override.battery.charge.low = %s\n' "$LOWBATT_PERCENT" || return 1
+    fi
+    if [ -n "${LOWBATT_RUNTIME:-}" ]; then
+      printf '    override.battery.runtime.low = %s\n' "$LOWBATT_RUNTIME" || return 1
+    fi
   fi
 }
 
 generate_ups_conf() {
   use_user_override ups.conf && return 0
-  _batt_overrides="${LOWBATT_PERCENT:-}${LOWBATT_RUNTIME:-}"
+  _batt_overrides=
+  if [ -n "${LOWBATT_PERCENT:-}" ] && [ "$LOWBATT_PERCENT" -ne 0 ]; then
+    _batt_overrides=1
+  elif [ -n "${LOWBATT_RUNTIME:-}" ] && [ "$LOWBATT_RUNTIME" -ne 0 ]; then
+    _batt_overrides=1
+  fi
   _stage_generated ups.conf
-  _emit_ups_conf >"$_sg_tmp" || _staged_write_failed ups.conf
+  _sg_write_err=$(_emit_ups_conf 2>&1 >"$_sg_tmp") || _staged_write_failed ups.conf "$_sg_write_err"
   _install_generated ups.conf
 
-  if [ -n "$_batt_overrides" ]; then
-    _low_pct_log="${LOWBATT_PERCENT:-unset}"
-    _low_rt_log="${LOWBATT_RUNTIME:-unset}"
-    if [ -n "${LOWBATT_PERCENT:-}" ] && [ "$LOWBATT_PERCENT" -eq 0 ]; then
-      _low_pct_log=DISABLED
-    fi
-    if [ -n "${LOWBATT_RUNTIME:-}" ] && [ "$LOWBATT_RUNTIME" -eq 0 ]; then
-      _low_rt_log=DISABLED
-    fi
+  _low_pct_log="${LOWBATT_PERCENT:-unset}"
+  _low_rt_log="${LOWBATT_RUNTIME:-unset}"
+  if [ -n "${LOWBATT_PERCENT:-}" ] && [ "$LOWBATT_PERCENT" -eq 0 ]; then
+    _low_pct_log=DISABLED
+  fi
+  if [ -n "${LOWBATT_RUNTIME:-}" ] && [ "$LOWBATT_RUNTIME" -eq 0 ]; then
+    _low_rt_log=DISABLED
+  fi
 
-    if [ "$_low_pct_log" = DISABLED ]; then
-      if [ -n "${LOWBATT_RUNTIME:-}" ]; then
-        printf 'level=warn msg="battery percentage threshold disabled; low battery uses the runtime threshold" low_pct=%s low_rt=%s\n' \
-          "$_low_pct_log" "$_low_rt_log" >&2
-      else
-        printf 'level=warn msg="battery percentage threshold disabled; low battery depends on the UPS reporting battery.runtime and battery.runtime.low" low_pct=%s low_rt=%s\n' \
-          "$_low_pct_log" "$_low_rt_log" >&2
-      fi
-    elif [ "$_low_rt_log" = DISABLED ]; then
-      if [ -n "${LOWBATT_PERCENT:-}" ]; then
-        printf 'level=warn msg="battery runtime threshold disabled; low battery uses the percentage threshold" low_pct=%s low_rt=%s\n' \
-          "$_low_pct_log" "$_low_rt_log" >&2
-      else
-        printf 'level=warn msg="battery runtime threshold disabled; low battery depends on the UPS reporting battery.charge and battery.charge.low" low_pct=%s low_rt=%s\n' \
-          "$_low_pct_log" "$_low_rt_log" >&2
-      fi
+  if [ "$_low_pct_log" = DISABLED ] && [ "$_low_rt_log" != DISABLED ]; then
+    if [ -n "${LOWBATT_RUNTIME:-}" ]; then
+      printf 'level=warn msg="battery percentage threshold disabled; low battery uses the runtime threshold" low_pct=%s low_rt=%s\n' \
+        "$_low_pct_log" "$_low_rt_log" >&2
     else
-      printf 'level=info msg="battery thresholds overridden (ignorelb active)" low_pct=%s low_rt=%s\n' \
+      printf 'level=warn msg="battery percentage threshold disabled; it is the only threshold supplied, so no override is generated and low battery uses the UPS hardware default" low_pct=%s low_rt=%s\n' \
         "$_low_pct_log" "$_low_rt_log" >&2
     fi
-  else
+  elif [ "$_low_rt_log" = DISABLED ] && [ "$_low_pct_log" != DISABLED ]; then
+    if [ -n "${LOWBATT_PERCENT:-}" ]; then
+      printf 'level=warn msg="battery runtime threshold disabled; low battery uses the percentage threshold" low_pct=%s low_rt=%s\n' \
+        "$_low_pct_log" "$_low_rt_log" >&2
+    else
+      printf 'level=warn msg="battery runtime threshold disabled; it is the only threshold supplied, so no override is generated and low battery uses the UPS hardware default" low_pct=%s low_rt=%s\n' \
+        "$_low_pct_log" "$_low_rt_log" >&2
+    fi
+  elif [ -n "$_batt_overrides" ]; then
+    printf 'level=info msg="battery thresholds overridden (ignorelb active)" low_pct=%s low_rt=%s\n' \
+      "$_low_pct_log" "$_low_rt_log" >&2
+  fi
+
+  if [ -z "$_batt_overrides" ]; then
     printf 'level=info msg="no battery threshold overrides; using UPS hardware defaults"\n' >&2
   fi
 }
@@ -202,7 +208,7 @@ UPSDEOF
 generate_upsd_conf() {
   use_user_override upsd.conf && return 0
   _stage_generated upsd.conf
-  _emit_upsd_conf >"$_sg_tmp" || _staged_write_failed upsd.conf
+  _sg_write_err=$(_emit_upsd_conf 2>&1 >"$_sg_tmp") || _staged_write_failed upsd.conf "$_sg_write_err"
   _install_generated upsd.conf
 }
 
@@ -236,9 +242,6 @@ USERSEOF
     upsmon secondary
 USERSEOF
   else
-    # Legacy fallback — see the credential-topology block above.
-    printf 'level=warn msg="upsmon.conf.user mounted without upsd.users.user; generated upsd.users keeps the API user as upsmon primary (cross-file credential contract with a mounted override). Your mounted upsmon.conf must MONITOR with this user and password, or upsd refuses the login and with it the forced-shutdown request, and networked clients fall back to their own HOSTSYNC timeout" user=%s\n' \
-      "$API_USER" >&2
     cat <<USERSEOF || return 1
 
 [$API_USER]
@@ -250,8 +253,13 @@ USERSEOF
 
 generate_upsd_users() {
   use_user_override upsd.users && return 0
+  if ! local_upsmon_credential_active; then
+    # Legacy fallback — see the credential-topology block above.
+    printf 'level=warn msg="upsmon.conf.user mounted without upsd.users.user; generated upsd.users keeps the API user as upsmon primary (cross-file credential contract with a mounted override). Your mounted upsmon.conf must MONITOR with this user and password, or upsd refuses the login and with it the forced-shutdown request, and networked clients fall back to their own HOSTSYNC timeout" user=%s\n' \
+      "$API_USER" >&2
+  fi
   _stage_generated upsd.users
-  _emit_upsd_users >"$_sg_tmp" || _staged_write_failed upsd.users
+  _sg_write_err=$(_emit_upsd_users 2>&1 >"$_sg_tmp") || _staged_write_failed upsd.users "$_sg_write_err"
   _install_generated upsd.users
 }
 
@@ -321,7 +329,7 @@ generate_upsmon_conf() {
     _mon_password="$API_PASSWORD"
   fi
   _stage_generated upsmon.conf
-  _emit_upsmon_conf >"$_sg_tmp" || _staged_write_failed upsmon.conf
+  _sg_write_err=$(_emit_upsmon_conf 2>&1 >"$_sg_tmp") || _staged_write_failed upsmon.conf "$_sg_write_err"
   _install_generated upsmon.conf
 }
 

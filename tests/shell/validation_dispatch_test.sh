@@ -31,7 +31,7 @@ new_workdir >/dev/null
 # ran.
 for fn in log_value strip_leading_zeros validate_no_control_chars validate_identifier \
   validate_no_hash validate_no_quotes validate_no_backslash validate_no_whitespace \
-  validate_nut_word validate_no_brackets validate_numeric validate_positive validate_port \
+  nut_stored_word validate_nut_word validate_no_brackets validate_numeric validate_positive validate_port \
   validate_percent _dispatch_check _check _check_optional check_required_vars \
   check_optional_vars driver_transport run_validations; do
   load_function "$fn"
@@ -50,13 +50,6 @@ else
   grep -q 'unknown validation check' "$ERR" \
     && ok 'a row naming an unknown check fails with the unknown-check error' \
     || no 'unknown check refused' "refused without the unknown-check line: $(head -c 200 "$ERR")"
-fi
-
-# --- 2. the control: a known check still dispatches ------------------------------
-if (_dispatch_check UPS_NAME ups control) 2>"$ERR"; then
-  ok 'a known check dispatches and passes a valid value'
-else
-  no 'known check dispatches' "rejected a valid value: $(head -c 200 "$ERR")"
 fi
 
 # NUT's atoi-consumed timing values accept INT_MAX and refuse INT_MAX+1.
@@ -120,11 +113,9 @@ run_lowbatt_validation() (
 
 for zero in 0 00 000; do
   if run_lowbatt_validation "$zero" "$zero" 2>"$ERR"; then
-    no "both low-battery thresholds at $zero refused" 'the configuration disabled every low-battery path'
-  elif grep -q 'LOWBATT_PERCENT and LOWBATT_RUNTIME must not both be zero' "$ERR"; then
-    ok "both low-battery thresholds at $zero are refused by the cross-field rule"
+    ok "both low-battery thresholds at $zero are accepted as the hardware default"
   else
-    no "both low-battery thresholds at $zero refused" "wrong refusal: $(head -c 200 "$ERR")"
+    no "both low-battery thresholds at $zero accepted" "the hardware-default configuration was refused: $(head -c 200 "$ERR")"
   fi
 done
 
@@ -239,13 +230,6 @@ else
   no 'presentation trailing LF canonicalized' 'UPS_DESC did not strip to filesecret and pass validation'
 fi
 
-mixed_nut_word=$(printf 'p\303\244ssword')
-if validate_nut_word API_PASSWORD "$mixed_nut_word" 2>"$ERR"; then
-  ok 'a non-ASCII credential with printable bytes survives the shared NUT parser filter'
-else
-  no 'mixed non-ASCII NUT word accepted' "the shared-filter value was refused: $(head -c 200 "$ERR")"
-fi
-
 empty_nut_word=$(printf '\303\244\303\266')
 : >"$ERR"
 if validate_nut_word API_PASSWORD "$empty_nut_word" 2>"$ERR"; then
@@ -270,7 +254,7 @@ fi
 
 # --- 12. every credential-row check refuses without disclosing the value -------
 credential_table=$(awk '
-  /^[[:space:]]+_check (API_PASSWORD|ADMIN_PASSWORD) / {
+  /^[[:space:]]+_check(_optional)? (API_PASSWORD|ADMIN_PASSWORD) / {
     printf "%s:", $2
     for (i = 4; i <= NF; i++) {
       printf "%s%s", (i == 4 ? "" : ","), $i

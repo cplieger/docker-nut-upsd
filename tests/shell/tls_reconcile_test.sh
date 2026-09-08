@@ -75,8 +75,10 @@ API_TLS=true
 TLS_CERT_PATH="$TLS_CERT_RUNTIME"
 if reconcile_tls_working_copies 2>"$ERR"; then
   [ ! -e "$TLS_CERT_MOUNTED_RUNTIME" ] && [ -f "$TLS_CERT_RUNTIME" ] \
-    && ok 'the withdrawn working copy is removed, the selected one kept, status 0' \
-    || no 'clean reconciliation' 'removed the wrong copy, or left the withdrawn one'
+    && grep -Fqx "level=info msg=\"withdrew a TLS working copy this boot did not provision; an upsd.conf.user CERTFILE naming this path will fail at upsd startup\" path=$TLS_CERT_MOUNTED_RUNTIME" "$ERR" \
+    && [ "$(wc -l <"$ERR")" -eq 1 ] \
+    && ok 'the withdrawn working copy is removed and recorded, the selected one kept, status 0' \
+    || no 'clean reconciliation' "removed the wrong copy, left the withdrawn one, or misrecorded the withdrawal: $(cat "$ERR")"
 else
   no 'clean reconciliation' "returned non-zero on removable paths: $(head -c 200 "$ERR")"
 fi
@@ -137,6 +139,39 @@ else
   grep -q "path=$TLS_CERT_RUNTIME" "$ERR" && grep -q "path=$TLS_CERT_MOUNTED_RUNTIME" "$ERR" \
     && ok 'with API_TLS off, BOTH unremovable copies are reported (no bail on the first)' \
     || no 'both paths reported' "only one path was named: $(head -c 300 "$ERR")"
+fi
+
+# --- 6. an already-absent working copy is withdrawn silently ----------------------
+#
+# The presence gate exists so a boot that provisions nothing new does not narrate
+# a removal it never performed. Every earlier case plants both paths first.
+reset_paths
+API_TLS=true
+TLS_CERT_PATH="$TLS_CERT_RUNTIME"
+if reconcile_tls_working_copies 2>"$ERR"; then
+  [ ! -s "$ERR" ] \
+    && ok 'an already-absent TLS working copy produces no withdrawal record' \
+    || no 'absent TLS working copy log' "unexpected stderr: $(cat "$ERR")"
+else
+  no 'absent TLS working copy log' "returned non-zero: $(cat "$ERR")"
+fi
+
+# --- 7. a cleartext boot withdraws both copies without TLS_CERT_PATH ---------------
+#
+# resolve_tls_cert assigns TLS_CERT_PATH only when API_TLS=true. The entrypoint
+# still reconciles working copies on cleartext boots, so both managed paths must
+# be withdrawn without requiring that variable.
+reset_paths
+printf 'stale self-signed key\n' >"$TLS_CERT_RUNTIME"
+printf 'stale mounted key\n' >"$TLS_CERT_MOUNTED_RUNTIME"
+API_TLS=false
+unset TLS_CERT_PATH
+if reconcile_tls_working_copies 2>"$ERR"; then
+  [ ! -e "$TLS_CERT_RUNTIME" ] && [ ! -e "$TLS_CERT_MOUNTED_RUNTIME" ] \
+    && ok 'with API_TLS off and TLS_CERT_PATH never assigned, both managed copies are withdrawn, status 0' \
+    || no 'unset TLS_CERT_PATH reconciliation' 'a managed working copy survived'
+else
+  no 'unset TLS_CERT_PATH reconciliation' "returned non-zero with TLS_CERT_PATH unset: $(head -c 200 "$ERR")"
 fi
 
 report

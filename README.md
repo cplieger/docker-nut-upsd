@@ -69,16 +69,16 @@ services:
 | Variable | Description | Default |
 | --- | --- | --- |
 | `UPS_NAME` | NUT UPS identifier used in config files and queries | `ups` |
-| `UPS_DESC` | Human-readable UPS description shown in NUT clients; this image refuses control bytes, `"`, `\` and `#`; NUT silently discards bytes outside ASCII 0x20-0x7F | `My UPS` |
-| `UPS_DRIVER` | NUT driver for your UPS model (see [NUT HCL](https://networkupstools.org/stable-hcl.html)); this image emits `pollonly` for `usbhid-ups`, so updates use the `POLLFREQ` cadence instead of the driver's interrupt pipe; a mounted `ups.conf.user` opts back in | `usbhid-ups` |
+| `UPS_DESC` | Human-readable UPS description shown in NUT clients; this image refuses control bytes, `"`, `\` and `#`; NUT discards bytes outside ASCII 0x20-0x7F and prints one warning per discarded byte | `My UPS` |
+| `UPS_DRIVER` | NUT driver for your UPS model (see [NUT HCL](https://networkupstools.org/stable-hcl.html)); this image emits `pollonly` for `usbhid-ups`, so the driver polls the UPS instead of reading its USB interrupt pipe (`upsc` reports `driver.flag.pollonly`); omit `pollonly` from a mounted `ups.conf.user` to opt back in | `usbhid-ups` |
 | `UPS_PORT` | UPS port: `auto` (USB), `/dev/*` (serial), or `host[:port]` for network drivers (`snmp-ups`, `apcupsd-ups`); network drivers refuse `auto` and `/dev/*`; USB drivers ignore this value entirely and NUT warns if you set an unusual one; no whitespace, `"`, `\` or `#` | `auto` |
 | `API_USER` | Username for NUT network clients: letters, numbers, `_`, or `-`; 510-byte maximum; declared `upsmon secondary` (see [NUT accounts and roles](#nut-accounts-and-roles)) | `monuser` |
-| `API_PASSWORD` | Password for the NUT API user (entrypoint warns on weak credentials); no `"`, `\` or `#` because NUT config parsing would alter the credential; 501-byte maximum; a value that NUT would store as an empty word is refused | `secret` |
+| `API_PASSWORD` | Password for the NUT API user (entrypoint warns on weak credentials); no `"`, `\` or `#` because NUT config parsing would alter the credential; 501-byte maximum; a value that NUT would store as an empty word is refused. A whitespace-bearing `API_PASSWORD` or `ADMIN_PASSWORD` is accepted with a startup warning, but only a client that quotes the value per the NUT network protocol can authenticate; the bundled NUT clients send `PASSWORD` unquoted | `secret` |
 | `API_ADDRESS` | Listen address for upsd; write IPv6 bare (`::1`), not bracketed; brackets are added internally where NUT needs them; no whitespace, `"`, `\` or `#` | `0.0.0.0` |
 | `API_PORT` | Listen port for upsd | `3493` |
 | `API_TLS` | Offer STARTTLS on the upsd listener; self-signed certificate unless you mount `/etc/nut/upsd.pem` (see [TLS](#tls-starttls)) | `true` |
-| `LOWBATT_PERCENT` | Low-battery percentage (enables `ignorelb`); `0` disables this axis, and `100` asserts low battery below full charge | Hardware default |
-| `LOWBATT_RUNTIME` | Low-battery runtime in seconds (enables `ignorelb`); `0` disables this axis | Hardware default |
+| `LOWBATT_PERCENT` | Low-battery percentage; a non-zero value enables `ignorelb`; `0` disables this axis and leaves the UPS hardware default in effect when it is the only threshold set; `100` asserts low battery below full charge | Hardware default |
+| `LOWBATT_RUNTIME` | Low-battery runtime in seconds; a non-zero value enables `ignorelb`; `0` disables this axis and leaves the UPS hardware default in effect when it is the only threshold set | Hardware default |
 | `POLLFREQ` | Seconds between upsmon's polls of upsd; `1` or more | `5` |
 | `POLLFREQALERT` | Seconds between upsmon's polls of upsd when on battery; `1` or more | `5` |
 | `DEADTIME` | Seconds before declaring UPS stale; this image requires at least the larger of `POLLFREQ` and `POLLFREQALERT`, and upstream advises three times that interval | `15` |
@@ -87,8 +87,8 @@ services:
 | `NOCOMMWARNTIME` | Seconds before warning about lost UPS communication (`0` = warn on every poll) | `300` |
 | `RBWARNTIME` | Seconds between "replace battery" warnings (`0` = warn on every poll) | `43200` |
 | `SHUTDOWN_ON_BATTERY_CRITICAL` | Power off the host via D-Bus when NUT declares the UPS critical. Low battery is the usual trigger; the generated `upsmon.conf` pins `OFFDURATION 30`, `OBLBDURATION 0`, and `ALARMCRITICAL 1` at their NUT v2.8.5 values, so later upstream default changes do not change this image; NUT also has presume-dead arms for CAL, BYPASS, ALARM and OFF | `false` |
-| `DBUS_PROBE_INTERVAL` | Seconds between D-Bus poweroff-path liveness probes when host shutdown is enabled (`0` disables); keep the `UPSPowerOffPathBroken` alert window above this interval because the alert stays active when the error line recurs, not from a latched state | `300` |
-| `ADMIN_PASSWORD` | Password for the NUT admin user (set/FSD actions); auto-generated if unset; no `"`, `\` or `#` because NUT config parsing would alter the credential; 501-byte maximum; a value that NUT would store as an empty word is refused | Random (cached) |
+| `DBUS_PROBE_INTERVAL` | Seconds between D-Bus poweroff-path liveness probes when host shutdown is enabled (`0` disables); keep the `UPSPowerOffPathBroken` alert window above twice this interval because the alert stays active when the error line recurs, not from a latched state | `300` |
+| `ADMIN_PASSWORD` | Password for the NUT admin user (set/FSD actions); auto-generated and cached if unset when this image generates `upsd.users`; a mounted `upsd.users.user` owns that account instead; no `"`, `\` or `#` because NUT config parsing would alter the credential; 501-byte maximum; a value that NUT would store as an empty word is refused | Random (cached when generated) |
 | `COMMS_WATCHDOG` | Enable the comms-recovery watchdog: restarts the UPS driver after sustained stale comms, on any transport (see [USB hotplug & comms recovery](#usb-hotplug--comms-recovery)) | `true` |
 | `COMMS_CHECK_INTERVAL` | Seconds between watchdog comms probes (`0` disables) | `15` |
 | `COMMS_RECOVERY_TIMEOUT` | Seconds of continuous stale comms before the watchdog restarts the driver | `90` |
@@ -97,7 +97,7 @@ services:
 
 `DEADTIME` below the larger poll interval is refused: NUT declares the UPS dead as soon as one poll is late, and with `SHUTDOWN_ON_BATTERY_CRITICAL=true` that powers the host off during a short mains dip.
 
-Setting either `LOWBATT_PERCENT` or `LOWBATT_RUNTIME` enables `ignorelb`. The UPS must report `battery.charge`, or it must report both `battery.runtime` and its own `battery.runtime.low`. The generated `override.battery.charge.low` supplies the percentage threshold. If either axis is `0`, the container starts normally and low-battery detection depends entirely on the surviving axis, the UPS reporting it, and its `.low` companion. If the UPS reports neither usable reading, the driver logs `upsdrvctl start failed or timed out at boot` and exits, so the restart policy repeats the failure.
+A non-zero `LOWBATT_PERCENT` or `LOWBATT_RUNTIME` enables `ignorelb`. When `ignorelb` is active, the UPS must report `battery.charge`, or it must report both `battery.runtime` and its own `battery.runtime.low`. The generated `override.battery.charge.low` supplies the percentage threshold. If one axis is `0` and the other is non-zero, the container starts normally and low-battery detection depends entirely on the surviving axis, the UPS reporting it, and its `.low` companion. A `0` supplied alone or on both axes generates no override; the UPS's own low-battery flag decides, and the driver's `ignorelb` refusal-to-start condition is not reached. If `ignorelb` is active and the UPS reports neither usable reading, the driver logs `upsdrvctl start failed or timed out at boot` and exits, so the restart policy repeats the failure.
 
 When battery power becomes critical, `upsmon` runs the shutdown command and exits. With host shutdown disabled, it logs the forced shutdown and leaves the host running; the example restart policy repeats this cycle until mains power returns.
 

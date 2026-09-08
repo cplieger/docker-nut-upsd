@@ -5,15 +5,13 @@ set -u
 . "$(dirname -- "$0")/lib.sh"
 new_workdir >/dev/null
 
-SUBJECT=$ENTRYPOINT
-ENTRYPOINT="$SUBJECT"
 # End-anchored on the next CODE line, not on a comment: a sed range whose second address
 # never matches prints to EOF, and an over-extraction would source the rest of the boot
 # path (resolve_tls_cert, generate_all_configs, the daemon starts) while still satisfying
 # the isolation guard below. The anchor line itself is stripped, because running it here
 # would normalize an unset COMMS_WATCHDOG under `set -u`.
-raw_block=$(extract_range '^export SHUTDOWN_ON_BATTERY_CRITICAL$' '^COMMS_WATCHDOG=\$(normalize_bool' "$WORK/shutdown-selection-raw.sh") || exit 1
-if ! tail -n 1 "$raw_block" | grep -Fq 'COMMS_WATCHDOG=$(normalize_bool'; then
+raw_block=$(extract_range '^export SHUTDOWN_ON_BATTERY_CRITICAL$' '^COMMS_WATCHDOG=[$](normalize_bool' "$WORK/shutdown-selection-raw.sh") || exit 1
+if ! tail -n 1 "$raw_block" | grep -Fq "COMMS_WATCHDOG=\$(normalize_bool"; then
   printf 'harness error: the shutdown-selection range did not end at the COMMS_WATCHDOG normalization\n' >&2
   exit 1
 fi
@@ -47,11 +45,11 @@ while IFS='|' read -r spelling normalized helper; do
   else
     no "SHUTDOWN_ON_BATTERY_CRITICAL=$spelling selection" "got=$got want=$want"
   fi
-# Three rows, not the full spelling table: validation_dispatch_test.sh:178-196 pins
-# normalize_bool's canonical-output table, and a third home for it would fail two suites
-# for one fact. What is proved here is the COMPOSITION — one non-canonical spelling on
-# each branch (also the only thing that catches a compare-before-normalize reorder), plus
-# the canonical true.
+  # Three rows, not the full spelling table: validation_dispatch_test.sh:178-196 pins
+  # normalize_bool's canonical-output table, and a third home for it would fail two suites
+  # for one fact. What is proved here is the COMPOSITION — one non-canonical spelling on
+  # each branch (also the only thing that catches a compare-before-normalize reorder), plus
+  # the canonical true.
 done <<'CASES'
 On|true|nut-shutdown.sh
 true|true|nut-shutdown.sh

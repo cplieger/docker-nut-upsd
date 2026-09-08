@@ -138,11 +138,19 @@ validate_no_whitespace() {
   esac
 }
 
+# parseconf keeps bytes 0x20-0x7F; this app's control check refuses 0x7F,
+# so this is the credential upsd actually stores.
+nut_stored_word() {
+  printf '%s' "$1" | LC_ALL=C tr -cd '\040-\176'
+}
+
 validate_nut_word() {
-  # upsd and its clients apply the same parseconf byte filter, so mixed
-  # non-ASCII input authenticates as the shared filtered value. Refuse only
-  # the degenerate empty stored word and the length no bundled client can send.
-  if [ -z "$(printf '%s' "$2" | LC_ALL=C tr -cd '\040-\176')" ]; then
+  # Whitespace is the exception to the shared filter: the bundled clients send
+  # PASSWORD unquoted, so spaces split the message before upsd can filter it.
+  # warn_weak_api_password reports that client-specific mismatch at startup.
+  # Refuse only the degenerate empty stored word and the length no bundled
+  # client can send.
+  if [ -z "$(nut_stored_word "$2")" ]; then
     printf 'level=error msg="env var becomes an empty NUT word after parsing" var=%s\n' "$1" >&2
     return 1
   fi
@@ -307,7 +315,7 @@ check_required_vars() {
   _check API_ADDRESS "${API_ADDRESS:-}" control quotes backslash brackets hash nospace
   _check API_PORT "${API_PORT:-}" control port
   _check API_TLS "${API_TLS:-}" control
-  _check ADMIN_PASSWORD "${ADMIN_PASSWORD:-}" control quotes backslash hash nut_word
+  _check_optional ADMIN_PASSWORD "${ADMIN_PASSWORD:-}" control quotes backslash hash nut_word
   _check SHUTDOWN_ON_BATTERY_CRITICAL "${SHUTDOWN_ON_BATTERY_CRITICAL:-}" control
   _check DBUS_PROBE_INTERVAL "${DBUS_PROBE_INTERVAL:-}" control numeric
   _check POLLFREQ "${POLLFREQ:-}" control positive
@@ -372,16 +380,6 @@ canonicalize_validated_values() {
 run_validations() {
   check_required_vars
   check_optional_vars
-
-  # Both zero thresholds arm ignorelb but make its two derived LB paths
-  # unreachable. The UPS's own LB flag is then discarded, so shutdown never
-  # fires on low battery (tier 2: data-loss consequence).
-  if [ -n "${LOWBATT_PERCENT:-}" ] && [ -n "${LOWBATT_RUNTIME:-}" ]; then
-    if [ "$LOWBATT_PERCENT" -eq 0 ] && [ "$LOWBATT_RUNTIME" -eq 0 ]; then
-      printf 'level=error msg="LOWBATT_PERCENT and LOWBATT_RUNTIME must not both be zero; zero disables that axis and ignorelb discards the UPS low-battery flag"\n' >&2
-      exit 1
-    fi
-  fi
 
   # DEADTIME below the larger poll interval arms an irreversible host poweroff:
   # upsmon promotes an on-battery UPS to OB+LB as soon as one poll is late

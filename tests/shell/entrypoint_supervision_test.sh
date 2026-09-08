@@ -295,7 +295,7 @@ upsc() {
 DRIVER
 printf '%s\n' "$healthcheck_command" \
   | sed "s|/usr/local/bin/lifecycle.sh|$REPO_ROOT/lifecycle.sh|" \
-  >>"$WORK/drive-healthcheck-command.sh"
+    >>"$WORK/drive-healthcheck-command.sh"
 
 HEALTHCHECK_SHELL=$(command -v busybox) || {
   printf 'harness error: busybox is required to execute the image healthcheck dialect\n' >&2

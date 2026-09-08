@@ -9,6 +9,7 @@ RUN apk add --no-cache build-base clang gpgv patch perl pkgconf \
 
 # renovate: datasource=github-releases depName=stephane/libmodbus
 ARG LIBMODBUS_VERSION=v3.2.0
+# No publisher signature or checksum assets: https://github.com/stephane/libmodbus/releases
 # repin: dep=stephane/libmodbus url=https://github.com/stephane/libmodbus/releases/download/{version}/libmodbus-{version_nov}.tar.gz
 ARG LIBMODBUS_SHA256=72239f319b9b8483e3d393c5a60865d734fcff18a8abbb2486e389834a2f6ef1
 WORKDIR /build/libmodbus
@@ -157,6 +158,7 @@ RUN cat > /out/nut-upsd.cdx.json <<EOF
 EOF
 
 FROM builder AS source-checks
+SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
 COPY validate.sh entrypoint.sh generate-config.sh /tmp/source-checks/
 RUN <<'CHECKS'
 set -eu
@@ -218,7 +220,7 @@ for spec in \
   shell_var=${spec%%:*}
   source_var=${spec#*:}
   source_value=$(source_default "$source_var")
-  expected=$(printf ': "${%s:=%s}"' "$shell_var" "$source_value")
+  expected=$(printf ": \"\${%s:=%s}\"" "$shell_var" "$source_value")
   grep -Fqx "$expected" /tmp/source-checks/entrypoint.sh || {
     printf 'source check failed: entrypoint.sh %s default differs from clients/upsmon.c %s\n' "$shell_var" "$source_var" >&2
     exit 1
@@ -238,8 +240,8 @@ for spec in \
   }
 done
 
-grep -Fq 'Host sync timer expired, forcing shutdown' clients/upsmon.c || {
-  printf '%s\n' 'source check failed: clients/upsmon.c host-sync phrase changed; alerts/logql.yaml UPSHostSyncExpired would stop matching' >&2
+grep -Fq 'retrying harder' drivers/upsdrvctl.c || {
+  printf '%s\n' 'source check failed: drivers/upsdrvctl.c SIGKILL-escalation phrase changed; lifecycle.sh restart_ups_driver would stop reporting a wedged driver stop as anything but a clean one' >&2
   exit 1
 }
 
@@ -314,14 +316,12 @@ COPY --from=source-checks /source-checks-passed /source-checks-passed
 # No USER: root is required at container init (see .trivyignore).
 
 # Probe upsd where it listens (upsd_probe_host, lifecycle.sh); upsc's stderr is
-# kept, because it separates "Data stale" from "Connection refused" from a
-# timeout in the docker health log. Canonicalize FIRST, default SECOND like the
-# entrypoint: dockerd execs this probe with the RAW container env, where an
-# LF-only value is non-empty, so defaulting from it would probe an empty name,
-# address or port. --start-period covers the nominal 130s boot budget: 90s
-# for the driver, 30s for upsd, and two 5s pidfile polls
-# (PIDFILE_POLL_INTERVAL x PIDFILE_POLL_MAX), with 5s headroom. It is not a
-# worst-case bound because each poll iteration also has a 1s read_pidfile timeout.
+# kept because it separates "Data stale", "Connection refused" and a timeout in
+# the health log. Canonicalize FIRST, default SECOND: dockerd execs this probe
+# with the RAW env, dodging the := defaults (entrypoint.sh's canonicalize note).
+# --start-period must cover entrypoint.sh's two start_nut_daemon bounds and
+# lifecycle.sh's PIDFILE_POLL_INTERVAL x PIDFILE_POLL_MAX; the
+# tests/shell/entrypoint_supervision_test.sh assertion keeps deliberate slack.
 
 # DL3025: this probe sources lifecycle.sh and expands three env vars, which
 # exec form cannot do; this image wraps NUT with a shell entrypoint, so it can

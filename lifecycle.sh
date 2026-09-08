@@ -8,7 +8,10 @@
 
 readonly PIDFILE_POLL_INTERVAL="0.1"
 readonly PIDFILE_POLL_MAX=50 # nominal wait = POLL_MAX x POLL_INTERVAL = 5s
-readonly DBUS_PROBE_REPLY_TIMEOUT_MS=3000 # under the outer timeout 5 at dbus_poweroff_path_ok: past it that bound kills dbus-send first, and detail= carries the shell's bare signal-death line instead of dbus-send's own cause
+# Keep this below the outer timeout 5 at dbus_poweroff_path_ok: past it that
+# bound kills dbus-send first, and detail= carries the shell's bare signal-death
+# line instead of dbus-send's own cause.
+readonly DBUS_PROBE_REPLY_TIMEOUT_MS=3000
 # 3 stop_services commands x 3s = 9s worst case, inside Docker's default 10s
 # stop budget before SIGKILL.
 readonly STOP_CMD_TIMEOUT=3
@@ -120,16 +123,26 @@ wait_for_pidfile() {
             exit 0
           fi
           ;;
-        *) ;; # all-zero PID: `kill -0 0` signals the caller's own process group — refuse
+        *) ;; # an all-zero PID cannot name a process or pass pid_matches_binary
       esac
       sleep "$PIDFILE_POLL_INTERVAL"
       _wf_i=$((_wf_i + 1))
     done
-    printf 'level=error msg="%s did not confirm a live PID for the expected binary in time" path=%s polls=%d interval=%s\n' \
-      "$1" "$2" "$PIDFILE_POLL_MAX" "$PIDFILE_POLL_INTERVAL" >&2
     exit 1
   ) &
-  wait "$!"
+  if wait "$!"; then
+    return 0
+  else
+    _wf_rc=$?
+  fi
+  # A status above 1 is a trapped signal; the teardown trap owns that outcome.
+  case "$_wf_rc" in
+    1)
+      printf 'level=error msg="%s did not confirm a live PID for the expected binary in time" path=%s polls=%d interval=%s\n' \
+        "$1" "$2" "$PIDFILE_POLL_MAX" "$PIDFILE_POLL_INTERVAL" >&2
+      ;;
+  esac
+  return "$_wf_rc"
 }
 
 # ---------------------------------------------------------------------------
@@ -429,10 +442,6 @@ comms_watchdog() {
 # `challenge` is a refusal here because the real call is non-interactive.
 dbus_poweroff_path_ok() {
   _dbus_detail=""
-  [ -S /run/dbus/system_bus_socket ] || {
-    _dbus_detail="socket missing"
-    return 1
-  }
   # dbus-send spawns no fd-holding grandchildren, so this capture cannot wait
   # past the bounded command. The redirect is on the brace group so that past
   # `timeout 5` the reporting shell's signal-death line still lands in detail=.

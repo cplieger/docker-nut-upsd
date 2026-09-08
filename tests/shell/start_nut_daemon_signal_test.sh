@@ -196,14 +196,62 @@ else
     "entrypoint=${entry_bound}s README=${readme_bound}s; both must agree above 75s"
 fi
 
+mkdir -p "$WORK/dev/bus"
+sed "s#\[ ! -d /dev/bus/usb \]#[ ! -d $WORK/dev/bus/usb ]#" "$SUBJECT" \
+  >"$WORK/entrypoint-usb-prerequisite.sh"
+ENTRYPOINT="$WORK/entrypoint-usb-prerequisite.sh"
+USB_PREREQUISITE_BLOCK=$(extract_range \
+  '^if usb_bus_required && \[ ! -d ' '^fi$' \
+  "$WORK/usb-prerequisite-block.sh") || exit 1
+ENTRYPOINT="$SUBJECT"
+
+cat >"$WORK/drive-usb-prerequisite.sh" <<'DRIVER'
+#!/usr/bin/env bash
+set -euf
+. "$VALIDATE"
+. "$USB_PREREQUISITE_BLOCK"
+DRIVER
+chmod +x "$WORK/drive-usb-prerequisite.sh"
+
+while IFS='|' read -r _usb_label _usb_driver _usb_port _usb_want_rc; do
+  : >"$WORK/usb-prerequisite-stderr"
+  if env UPS_DRIVER="$_usb_driver" UPS_PORT="$_usb_port" \
+    VALIDATE="$REPO_ROOT/validate.sh" \
+    USB_PREREQUISITE_BLOCK="$USB_PREREQUISITE_BLOCK" \
+    bash "$WORK/drive-usb-prerequisite.sh" \
+    >"$WORK/usb-prerequisite-stdout" 2>"$WORK/usb-prerequisite-stderr"; then
+    RUN_RC=0
+  else
+    RUN_RC=$?
+  fi
+  if [ "$_usb_want_rc" -eq 1 ]; then
+    [ "$RUN_RC" -eq 1 ] \
+      && grep -Fq '/dev/bus/usb not found' "$WORK/usb-prerequisite-stderr" \
+      && grep -Fq 'bind-mount the host /dev/bus/usb directory' "$WORK/usb-prerequisite-stderr" \
+      && ok "$_usb_label refuses a missing USB bus with the bind-mount diagnostic" \
+      || no "$_usb_label missing USB bus refusal" \
+        "rc=$RUN_RC stderr=$(tr '\n' '|' <"$WORK/usb-prerequisite-stderr")"
+  else
+    [ "$RUN_RC" -eq 0 ] && [ ! -s "$WORK/usb-prerequisite-stderr" ] \
+      && ok "$_usb_label does not require a USB bus" \
+      || no "$_usb_label USB bus exemption" \
+        "rc=$RUN_RC stderr=$(tr '\n' '|' <"$WORK/usb-prerequisite-stderr")"
+  fi
+done <<'CASES'
+USB family|usbhid-ups|auto|1
+network transport|snmp-ups|192.0.2.1|0
+dual-mode auto|apc_modbus|auto|1
+dual-mode USB node|apc_modbus|/dev/bus/usb/001/003|1
+dual-mode serial node|apc_modbus|/dev/ttyUSB0|0
+CASES
+
 USB_GROUP_BLOCK=$(extract_range '^if usb_bus_required; then$' '^# Start NUT services with signal handling$' "$WORK/usb-group-block.sh") || exit 1
 
 cat >"$WORK/drive-usb-group.sh" <<'DRIVER'
 #!/usr/bin/env bash
 set -euf
-usb_bus_required() { [ "$MODE" = usb ]; }
+. "$VALIDATE"
 chgrp() { printf '%s\n' "$*" >>"$CHGRP_CALLS"; }
-log_value() { printf '%s' "$1"; }
 . "$USB_GROUP_BLOCK"
 DRIVER
 chmod +x "$WORK/drive-usb-group.sh"
@@ -211,7 +259,8 @@ chmod +x "$WORK/drive-usb-group.sh"
 run_usb_group() {
   : >"$WORK/chgrp-calls"
   : >"$WORK/usb-group-stderr"
-  if env MODE="$1" UPS_DRIVER="$2" UPS_PORT="$3" \
+  if env UPS_DRIVER="$1" UPS_PORT="$2" \
+    VALIDATE="$REPO_ROOT/validate.sh" \
     CHGRP_CALLS="$WORK/chgrp-calls" USB_GROUP_BLOCK="$USB_GROUP_BLOCK" \
     bash "$WORK/drive-usb-group.sh" \
     >"$WORK/usb-group-stdout" 2>"$WORK/usb-group-stderr"; then
@@ -221,7 +270,7 @@ run_usb_group() {
   fi
 }
 
-run_usb_group usb usbhid-ups auto
+run_usb_group usbhid-ups auto
 [ "$RUN_RC" -eq 0 ] \
   && [ "$(cat "$WORK/chgrp-calls")" = '-R nut /dev/bus/usb' ] \
   && grep -Fqx 'level=info msg="chgrp nut:/dev/bus/usb applied (host device nodes)"' "$WORK/usb-group-stderr" \
@@ -229,7 +278,7 @@ run_usb_group usb usbhid-ups auto
   || no 'startup USB group assignment' \
     "rc=$RUN_RC calls=$(tr '\n' ' ' <"$WORK/chgrp-calls") stderr=$(cat "$WORK/usb-group-stderr")"
 
-run_usb_group non-usb snmp-ups 192.0.2.1
+run_usb_group snmp-ups 192.0.2.1
 [ "$RUN_RC" -eq 0 ] \
   && [ ! -s "$WORK/chgrp-calls" ] \
   && grep -Fqx 'level=info msg="non-USB transport; skipping USB bus group setup" driver=snmp-ups port=192.0.2.1' "$WORK/usb-group-stderr" \

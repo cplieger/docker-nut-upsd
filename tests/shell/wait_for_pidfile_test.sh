@@ -11,8 +11,7 @@
 # pid_matches_binary in isolation, never this gate.
 #
 # As in kill_stale_driver_test.sh, pid_matches_binary is stubbed to SUCCEED in the
-# content-refusal cases so the identity requirement cannot be what refuses them,
-# and `kill -0` answers from a controlled live set rather than the real builtin.
+# content-refusal cases so the identity requirement cannot be what refuses them.
 # PIDFILE_POLL_MAX/PIDFILE_POLL_INTERVAL are file-scope readonly in lifecycle.sh
 # but plain variables once the function is extracted, so the 5s production wait
 # becomes 3 x 0.01s here; they are cadence knobs, not the guards under test.
@@ -42,7 +41,6 @@ PIDFILE_POLL_INTERVAL=0.01
 DRIVER_BINARY=/usr/lib/nut/usbhid-ups
 PIDFILE=/var/run/nut/usbhid-ups-ups.pid
 CONTENT=""
-LIVE_PIDS=""
 IDENTITY_OK=1
 ERR="$WORK/err.log"
 
@@ -56,21 +54,10 @@ pid_matches_binary() {
   [ "$IDENTITY_OK" = 1 ]
 }
 
-kill() {
-  if [ "$1" = "-0" ]; then
-    case " $LIVE_PIDS " in
-      *" $2 "*) return 0 ;;
-    esac
-    return 1
-  fi
-  return 0
-}
-
-# gate <pidfile-content> <live-pids> <identity-ok>: returns the gate's own status.
+# gate <pidfile-content> <identity-ok>: returns the gate's own status.
 gate() {
   CONTENT="$1"
-  LIVE_PIDS="$2"
-  IDENTITY_OK="$3"
+  IDENTITY_OK="$2"
   wait_for_pidfile "usbhid-ups driver" "$PIDFILE" "$DRIVER_BINARY" 2>"$ERR"
 }
 
@@ -82,58 +69,44 @@ timed_out() {
 #
 # Without it, every refusal below would also pass against a gate that rejects
 # everything (and a gate that never returns 0 would hang the boot, not open it).
-gate '4242' '4242' 1 \
+gate '4242' 1 \
   && ok 'a live PID verified as the expected daemon binary opens the gate' \
   || no 'valid pidfile accepted' "the gate refused a live, verified PID: $(head -c 200 "$ERR")"
 
 # --- 2. an all-zero PID is never accepted as daemon-ready ------------------------
 #
-# "0" is numeric, so the non-numeric arm cannot fire; only the all-zero arm keeps
-# `kill -0 0` (which probes the CALLER's process group and would succeed) from
-# reading as a live daemon. Declared live and identity-verified here, so nothing
-# downstream can be what refuses it.
-! gate '0' '0 4242' 1 && timed_out \
-  && ok 'pidfile PID "0" never satisfies the gate (kill -0 0 probes the caller own group)' \
+# The all-zero arm is what refuses "0"; identity is stubbed to succeed here, so
+# nothing downstream can be what refuses it.
+! gate '0' 1 && timed_out \
+  && ok 'pidfile PID "0" never satisfies the gate' \
   || no 'all-zero PID "0"' 'the startup gate accepted an all-zero PID as daemon-ready'
 
-! gate '000' '000 4242' 1 && timed_out \
+! gate '000' 1 && timed_out \
   && ok 'multi-digit all-zero pidfile PID "000" never satisfies the gate' \
   || no 'all-zero PID "000"' 'the startup gate accepted "000" as daemon-ready'
 
 # --- 3. non-numeric content never opens the gate ---------------------------------
 #
-# "-1" is the bait that isolates the non-numeric arm, and it needs BOTH stubs set
-# against it: as root `kill -0 -1` genuinely succeeds (signal 0 to every process
-# this caller may signal), so the liveness probe cannot refuse it, and identity is
-# stubbed to succeed so the /proc check cannot either. With the arm deleted, "-1"
-# reaches the accept path and the gate opens on a pidfile the nut user planted.
-! gate '-1' '-1 4242' 1 && timed_out \
-  && ok 'pidfile PID "-1" is refused by the non-numeric arm even when liveness and identity both pass' \
+# "-1" is the bait that isolates the non-numeric arm: identity is stubbed to
+# succeed so the /proc check cannot be what refuses it.
+! gate '-1' 1 && timed_out \
+  && ok 'pidfile PID "-1" is refused by the non-numeric arm even when identity passes' \
   || no 'non-numeric PID "-1"' 'the startup gate accepted "-1" as daemon-ready'
 
-! gate '' '4242' 1 && timed_out \
+! gate '' 1 && timed_out \
   && ok 'an empty pidfile (absent, or a partial write) times out instead of opening the gate' \
   || no 'empty pidfile' 'the startup gate accepted an empty pidfile'
 
 # --- 4. identity is REQUIRED, not advisory ---------------------------------------
 #
-# A numerically valid, LIVE PID planted by the nut user (upsd, upsmon, PID 1, or
-# any unrelated process) must not satisfy the gate. This is the one case where
+# A numerically valid PID planted by the nut user (upsd, upsmon, PID 1, or any
+# unrelated process) must not satisfy the gate. This is the one case where
 # identity is the guard under test, so it is the only one where the stub fails.
-! gate '4242' '4242' 0 && timed_out \
-  && ok 'a live PID that is NOT the expected binary is refused (planted-PID gate)' \
-  || no 'unverified live PID' 'the startup gate accepted a live PID of the wrong binary'
+! gate '4242' 0 && timed_out \
+  && ok 'a PID that is NOT the expected binary is refused (planted-PID gate)' \
+  || no 'unverified PID' 'the startup gate accepted a PID of the wrong binary'
 
-# --- 5. liveness is required too -------------------------------------------------
-#
-# A stale pidfile from a crashed daemon holds a numeric, non-zero, plausible PID.
-# This fixture stubs identity to succeed, though the shipped pid_matches_binary
-# cannot succeed for a dead PID because both probes require its /proc entry.
-! gate '4242' '' 1 && timed_out \
-  && ok 'a numeric PID that is not alive is refused (stale pidfile from a crashed daemon)' \
-  || no 'dead PID' 'the startup gate accepted a PID that no longer exists'
-
-# --- 6. the expected-binary argument is mandatory --------------------------------
+# --- 5. the expected-binary argument is mandatory --------------------------------
 #
 # The gate cannot verify identity without it, so a call site that forgot it must
 # abort rather than degrade to "any live PID will do".
@@ -147,6 +120,20 @@ fi
 
 # Reload the real identity function after the gate cases that deliberately stub it.
 load_function pid_matches_binary
+# This case precedes the file-scope readlink and head stubs below so it drives /proc.
+absent_pid=4194303
+while [ "$absent_pid" -gt 1 ] && [ -e "/proc/$absent_pid" ]; do
+  absent_pid=$((absent_pid - 1))
+done
+if [ "$absent_pid" -le 1 ]; then
+  printf 'harness error: could not find an absent PID below 4194303\n' >&2
+  exit 1
+fi
+[ ! -e "/proc/$absent_pid" ] \
+  && ! pid_matches_binary "$absent_pid" "$DRIVER_BINARY" \
+  && ok 'pid_matches_binary refuses a PID proven absent from /proc' \
+  || no 'absent PID identity refusal' "pid=$absent_pid"
+
 PROC_PID=4242
 PROC_COMM=""
 PROC_HEAD_RC=0
@@ -212,17 +199,56 @@ run_comm_match /usr/lib/nut/usbhid-ups
   && ok 'the comm fallback refuses an unreadable comm file' \
   || no 'unreadable comm' 'a failed comm read was accepted'
 
-# --- 7. TERM reaches PID 1's trap while the gate is polling ----------------------
+# --- 6. TERM reaches PID 1's trap while the gate is polling ----------------------
 #
-# The poll's sleep is backgrounded and `wait`ed on (lifecycle.sh:111-112) so a
-# SIGTERM during the boot gate reaches the trap immediately; a foreground sleep
-# defers the pending trap until it returns. Nothing else in the suite or in
-# tests/smoke.sh observes that, so deleting the `&` and the `wait` is invisible.
+# The poll loop runs in a background subshell that the function waits on, so a
+# SIGTERM during the boot gate reaches PID 1's trap immediately; a foreground
+# poll would defer the pending trap. Deleting the `&` and `wait` is what this
+# case detects.
 #
 # Every signal here goes through `command kill`, as the earlier cases do with
-# `command head`: the file-scope kill stub answers `-0` from LIVE_PIDS and
-# swallows every other signal, so the driver would never be signalled and would
-# be declared finished before it was.
+# `command head`: this file stubs builtins at file scope, and `head` is stubbed
+# from the comm-fallback section onward.
+WAIT_FOR_PIDFILE=$(extract_function wait_for_pidfile "$WORK/wait-for-pidfile-only.sh") || exit 1
+cat >"$WORK/drive-pidfile-signal-record.sh" <<'DRIVER'
+#!/bin/sh
+set -eu
+PIDFILE_POLL_MAX=2
+PIDFILE_POLL_INTERVAL=0.01
+read_pidfile() { :; }
+sleep() {
+  : >"$READY"
+  command sleep "$1"
+}
+. "$WAIT_FOR_PIDFILE"
+trap 'exit 0' TERM
+wait_for_pidfile "signal record probe" /nonexistent /bin/false >/dev/null
+DRIVER
+
+env WAIT_FOR_PIDFILE="$WAIT_FOR_PIDFILE" READY="$WORK/pidfile-record-ready" \
+  sh "$WORK/drive-pidfile-signal-record.sh" \
+  >"$WORK/pidfile-record-stdout" 2>"$WORK/pidfile-record-stderr" &
+record_driver_pid=$!
+
+record_ready=0
+for _ in $(seq 1 100); do
+  if [ -e "$WORK/pidfile-record-ready" ]; then
+    record_ready=1
+    break
+  fi
+  sleep 0.001
+done
+if [ "$record_ready" -ne 1 ]; then
+  printf 'harness error: signal-record driver never reached its poll sleep\n' >&2
+  exit 1
+fi
+command kill -TERM "$record_driver_pid"
+wait "$record_driver_pid" 2>/dev/null || true
+sleep 1
+! grep -q 'did not confirm a live PID for the expected binary in time' "$WORK/pidfile-record-stderr" \
+  && ok 'an interrupted PID-file poll emits no false timeout record' \
+  || no 'interrupted PID-file poll diagnostic' "stderr=$(tr '\n' '|' <"$WORK/pidfile-record-stderr")"
+
 BUSYBOX=$(command -v busybox) || {
   printf 'harness error: busybox is required to test PID 1 signal timing\n' >&2
   exit 1
@@ -241,7 +267,7 @@ sleep() {
   "$BUSYBOX" sleep 3
 }
 trap 'exit 0' TERM
-wait_for_pidfile "signal latency probe" /nonexistent /bin/false >/dev/null 2>&1
+wait_for_pidfile "signal latency probe" /nonexistent /bin/false >/dev/null
 DRIVER
 
 env SUBJECT="$SUBJECT" READY="$WORK/pidfile-signal-ready" BUSYBOX="$BUSYBOX" \

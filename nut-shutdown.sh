@@ -28,8 +28,10 @@ log_value() {
 }
 
 # clear_killpower: a latched POWERDOWNFLAG keeps restart_ups_driver
-# (lifecycle.sh) stood down for whatever container life remains after a
-# failed poweroff. Root-only path; upsmon's privileged parent runs this as root.
+# (lifecycle.sh) stood down for whatever container life remains after a failed
+# poweroff: the next driver bounce is about 105s away at the defaults, and the
+# stand-down lasts until recreation or entrypoint clears the flag at next boot.
+# Root-only path; upsmon's privileged parent runs this as root.
 clear_killpower() {
   if rm -f /var/run/nut-secrets/killpower; then
     printf 'level=warn msg="cleared killpower flag after failed poweroff so USB comms recovery stays armed"\n' >&2
@@ -76,15 +78,18 @@ done
 
 # A failed request does not refute the action: logind refuses a repeat while one
 # is in flight, so a reply lost after dispatch or a poweroff another client
-# started arrives here with the host already going down. Only a positive
-# PreparingForShutdown diverts; anything else keeps the terminal record, because
-# a wedged bus cannot distinguish an accepted poweroff from one never dispatched.
+# started arrives here with the host already going down. PreparingForShutdown
+# identifies any delayed shutdown-class action, not which action is in flight.
+# A positive reply therefore diverts the killpower clear and inhibitor query,
+# never the failure record. Anything else keeps the terminal record, because a
+# wedged bus cannot distinguish an accepted poweroff from one never dispatched.
 sleep "$DBUS_SETTLE_SLEEP"
 _settle=$(dbus_call org.freedesktop.DBus.Properties.Get \
   string:org.freedesktop.login1.Manager string:PreparingForShutdown) || :
 case "$_settle" in
   *'boolean true'*)
-    printf 'level=warn msg="D-Bus poweroff requests failed but logind reports a pending poweroff; host poweroff NOT refuted" detail="%s"\n' "$(log_value "$_out")" >&2
+    printf 'level=error msg="D-Bus poweroff failed after %d attempts; logind reports a pending shutdown-class action, which may be a reboot or halt rather than this poweroff" detail="%s" settle="%s"\n' \
+      "$DBUS_MAX_ATTEMPTS" "$(log_value "$_out")" "$(log_value "$_settle")" >&2
     exit 0
     ;;
 esac

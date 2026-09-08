@@ -41,7 +41,7 @@ else
     /^[[:space:]]*- alert: UPSHostSyncExpired$/ { inrule = 1; next }
     inrule && /^[[:space:]]*- alert:/ { exit }
     inrule { print }
-  ' "$ALERTS" | sed -n 's/.*|~ `\([^`]*\)` \[[^]]*\].*/\1/p')
+  ' "$ALERTS" | sed -n "s/.*|~ \`\([^\`]*\)\` \[[^]]*\].*/\1/p")
   # Accept either anchoring: the leading caret is optional (see
   # UPSHostSyncExpired's own annotation), the trailing one is the contract.
   case "$hostsync_pattern" in
@@ -307,11 +307,11 @@ if ! (
   LOWBATT_PERCENT=0
   unset LOWBATT_RUNTIME
   generate_ups_conf >/dev/null 2>"$BATT_DEPENDENCY_ERR"
-  grep -q '^    ignorelb$' /etc/nut/ups.conf \
-    && grep -q '^    override\.battery\.charge\.low = 0$' /etc/nut/ups.conf \
-    && grep -Fqx 'level=warn msg="battery percentage threshold disabled; low battery depends on the UPS reporting battery.runtime and battery.runtime.low" low_pct=DISABLED low_rt=unset' "$BATT_DEPENDENCY_ERR"
+  ! grep -q '^    ignorelb$' /etc/nut/ups.conf \
+    && ! grep -q '^    override\.battery\.' /etc/nut/ups.conf \
+    && grep -Fqx 'level=warn msg="battery percentage threshold disabled; it is the only threshold supplied, so no override is generated and low battery uses the UPS hardware default" low_pct=DISABLED low_rt=unset' "$BATT_DEPENDENCY_ERR"
 ); then
-  err "FAIL: a lone disabled percentage threshold did not name the UPS runtime pair it depends on"
+  err "FAIL: a lone disabled percentage threshold generated an override or did not name the UPS hardware default"
   fail=1
 fi
 : >"$BATT_DEPENDENCY_ERR"
@@ -319,11 +319,24 @@ if ! (
   unset LOWBATT_PERCENT
   LOWBATT_RUNTIME=0
   generate_ups_conf >/dev/null 2>"$BATT_DEPENDENCY_ERR"
-  grep -q '^    ignorelb$' /etc/nut/ups.conf \
-    && grep -q '^    override\.battery\.runtime\.low = 0$' /etc/nut/ups.conf \
-    && grep -Fqx 'level=warn msg="battery runtime threshold disabled; low battery depends on the UPS reporting battery.charge and battery.charge.low" low_pct=unset low_rt=DISABLED' "$BATT_DEPENDENCY_ERR"
+  ! grep -q '^    ignorelb$' /etc/nut/ups.conf \
+    && ! grep -q '^    override\.battery\.' /etc/nut/ups.conf \
+    && grep -Fqx 'level=warn msg="battery runtime threshold disabled; it is the only threshold supplied, so no override is generated and low battery uses the UPS hardware default" low_pct=unset low_rt=DISABLED' "$BATT_DEPENDENCY_ERR"
 ); then
-  err "FAIL: a lone disabled runtime threshold did not name the UPS charge pair it depends on"
+  err "FAIL: a lone disabled runtime threshold generated an override or did not name the UPS hardware default"
+  fail=1
+fi
+: >"$BATT_DEPENDENCY_ERR"
+if ! (
+  LOWBATT_PERCENT=0
+  LOWBATT_RUNTIME=0
+  run_validations >/dev/null 2>&1 || exit 1
+  generate_ups_conf >/dev/null 2>"$BATT_DEPENDENCY_ERR"
+  ! grep -q '^    ignorelb$' /etc/nut/ups.conf \
+    && ! grep -q '^    override\.battery\.' /etc/nut/ups.conf \
+    && grep -Fqx 'level=info msg="no battery threshold overrides; using UPS hardware defaults"' "$BATT_DEPENDENCY_ERR"
+); then
+  err "FAIL: two disabled battery thresholds were refused or generated an override"
   fail=1
 fi
 rm -f "$BATT_DEPENDENCY_ERR"
@@ -485,7 +498,7 @@ if ! (
   fail=1
 fi
 rm -f /var/run/nut-secrets/admin_password
-# warn_weak_api_password: each credential warns immediately below the threshold,
+# Credential warnings: each stored word warns immediately below the threshold,
 # not at it, and caller-supplied bytes never enter the warning record.
 WEAK_PASSWORD_ERR=$(mktemp)
 weak_api=$(head -c $((PASSWORD_MIN_LENGTH - 1)) /dev/zero | tr '\0' A)
@@ -510,7 +523,7 @@ fi
 (
   API_PASSWORD="$threshold_api"
   ADMIN_PASSWORD="$weak_admin"
-  warn_weak_api_password
+  warn_weak_admin_password
 ) 2>"$WEAK_PASSWORD_ERR"
 if ! grep -q 'ADMIN_PASSWORD is weak' "$WEAK_PASSWORD_ERR" \
   || grep -q 'API_PASSWORD is weak' "$WEAK_PASSWORD_ERR" \
@@ -523,10 +536,45 @@ fi
 (
   API_PASSWORD="$threshold_api"
   ADMIN_PASSWORD="$threshold_admin"
+  warn_weak_admin_password
   warn_weak_api_password
 ) 2>"$WEAK_PASSWORD_ERR"
 if [ -s "$WEAK_PASSWORD_ERR" ]; then
   err "FAIL: passwords exactly at PASSWORD_MIN_LENGTH emitted a weak-credential warning"
+  fail=1
+fi
+
+filtered_short_api=$(printf '\303\244\303\244\303\244\303\244\303\244\303\244api')
+filtered_short_admin=$(printf '\303\266\303\266\303\266\303\266\303\266\303\266adm')
+: >"$WEAK_PASSWORD_ERR"
+(
+  API_PASSWORD="$filtered_short_api"
+  ADMIN_PASSWORD="$filtered_short_admin"
+  warn_weak_admin_password
+  warn_weak_api_password
+) 2>"$WEAK_PASSWORD_ERR"
+if ! grep -q 'API_PASSWORD is weak' "$WEAK_PASSWORD_ERR" \
+  || ! grep -q 'ADMIN_PASSWORD is weak' "$WEAK_PASSWORD_ERR" \
+  || grep -Fq "$filtered_short_api" "$WEAK_PASSWORD_ERR" \
+  || grep -Fq "$filtered_short_admin" "$WEAK_PASSWORD_ERR"; then
+  err "FAIL: credential strength warnings did not measure the words NUT stores without disclosing them"
+  fail=1
+fi
+
+whitespace_api='long api password'
+whitespace_admin='long admin password'
+: >"$WEAK_PASSWORD_ERR"
+(
+  API_PASSWORD="$whitespace_api"
+  ADMIN_PASSWORD="$whitespace_admin"
+  warn_weak_admin_password
+  warn_weak_api_password
+) 2>"$WEAK_PASSWORD_ERR"
+if ! grep -q 'API_PASSWORD contains whitespace' "$WEAK_PASSWORD_ERR" \
+  || ! grep -q 'ADMIN_PASSWORD contains whitespace' "$WEAK_PASSWORD_ERR" \
+  || grep -Fq "$whitespace_api" "$WEAK_PASSWORD_ERR" \
+  || grep -Fq "$whitespace_admin" "$WEAK_PASSWORD_ERR"; then
+  err "FAIL: whitespace-bearing credentials did not emit secret-free client compatibility warnings"
   fail=1
 fi
 
@@ -550,12 +598,14 @@ override_boot_rc=0
   ADMIN_PASSWORD=""
   if ! user_override_present upsd.users; then
     resolve_admin_password
+    warn_weak_admin_password
   fi
   if local_upsmon_credential_active; then
     resolve_local_upsmon_password
   fi
   withdraw_unused_credential_caches
   warn_weak_api_password
+  run_validations
   generate_all_configs
 ) >/dev/null 2>"$WEAK_PASSWORD_ERR" || override_boot_rc=$?
 if [ "$override_boot_rc" -ne 0 ] \
@@ -628,7 +678,7 @@ fi
 powerdown_owner_count=$(grep -cF 'level=info msg="mounted upsmon.conf.user owns POWERDOWNFLAG;' "$FALLBACK_ERR" || :)
 if [ "$powerdown_owner_count" -ne 1 ] \
   || ! grep -F 'level=info msg="mounted upsmon.conf.user owns POWERDOWNFLAG;' "$FALLBACK_ERR" \
-    | grep -Fq " path=$POWERDOWNFLAG_FILE"; then
+  | grep -Fq " path=$POWERDOWNFLAG_FILE"; then
   err "FAIL: mounted upsmon.conf.user emitted $powerdown_owner_count POWERDOWNFLAG ownership advisories, want exactly one with path=$POWERDOWNFLAG_FILE"
   fail=1
 fi
@@ -892,6 +942,9 @@ rm -f "$STAGE_ERR"
 
 WRITE_ERR=$(mktemp)
 write_rc=0
+# Destination preservation already holds; pin it so staged-write failures cannot regress it.
+printf 'preserved generated destination\n' >/etc/nut/ups.conf
+write_destination_before=$(cat /etc/nut/ups.conf)
 (
   mktemp() {
     printf '/etc/nut/nonexistent-dir/ups.conf.tmp.AAAAAA\n'
@@ -906,6 +959,15 @@ if ! grep -q 'level=error msg="failed to write generated config; aborting" file=
   err "FAIL: generated ups.conf did not report its staged-write failure"
   fail=1
 fi
+if ! grep -Eq 'level=error msg="failed to write generated config; aborting" file=ups.conf err="[^"]+"' "$WRITE_ERR"; then
+  err "FAIL: generated ups.conf staged-write failure did not carry the failing operation's cause"
+  fail=1
+fi
+if [ "$(cat /etc/nut/ups.conf)" != "$write_destination_before" ]; then
+  err "FAIL: generated ups.conf staged-write failure changed the existing destination"
+  fail=1
+fi
+# The nonexistent staging directory cannot leave a staging file, so no leftover assertion is possible here.
 rm -f "$WRITE_ERR"
 
 #    A best-effort success diagnostic must not turn a completed override install
@@ -1222,24 +1284,10 @@ for _section_var in UPS_NAME API_USER; do
   rm -f "$_section_err"
 done
 
-# API_USER must not shadow a reserved generated account: a [$API_USER] section
-# named like one would merge into the reserved stanza and clobber its
-# credential ([admin] = set/FSD authority; [local_upsmon] = the bundled
-# upsmon's `upsmon primary` credential).
-if (
-  API_USER='admin'
-  run_validations
-) >/dev/null 2>&1; then
-  err "FAIL: API_USER=admin was accepted (reserved internal admin account)"
-  fail=1
-fi
-if (
-  API_USER='local_upsmon'
-  run_validations
-) >/dev/null 2>&1; then
-  err "FAIL: API_USER=local_upsmon was accepted (reserved internal monitor account)"
-  fail=1
-fi
+# API_USER must not shadow any fixed account generated in upsd.users. Deriving
+# the reserved set from its section names makes a new fixed stanza fail by name
+# unless validation reserves it ([admin] = set/FSD authority; [local_upsmon] =
+# the bundled upsmon's `upsmon primary` credential).
 FIXED_ACCOUNT_ERR=$(mktemp)
 fixed_account_rc=0
 (
@@ -1787,6 +1835,18 @@ rm -f "$CLOCK_ERR" "$CLOCK_RESTARTS"
 #    Recovery resets both the stale window and the restart budget: stale from
 #    t=15 (attempt 1 at t=105), fresh during t=150-299 (recovery logged),
 #    stale again from t=300 — the next attempt must be numbered 1 again.
+repaired_phrase=$(awk '
+  /^[[:space:]]*- alert: UPSCommsRepaired$/ { inrule = 1; next }
+  inrule && /^[[:space:]]*- alert:/ { exit }
+  inrule { print }
+' "$ALERTS" | sed -n 's/.*| logfmt | msg="\([^"]*\)".*/\1/p' | head -1)
+case "$repaired_phrase" in
+  *'comms recovered'*) ;;
+  *)
+    err "FAIL: could not extract the UPSCommsRepaired message matcher"
+    fail=1
+    ;;
+esac
 WATCHDOG_ERR=$(mktemp)
 RESTART_LOG=$(mktemp)
 # shellcheck disable=SC2329  # the stubs are invoked indirectly by comms_watchdog
@@ -1804,7 +1864,7 @@ RESTART_LOG=$(mktemp)
   }
   comms_watchdog
 ) 2>"$WATCHDOG_ERR"
-if ! grep -q 'comms watchdog UPS comms recovered.*stale_secs=135 restarts=1' "$WATCHDOG_ERR"; then
+if ! grep -q "$repaired_phrase.*stale_secs=135 restarts=1" "$WATCHDOG_ERR"; then
   err "FAIL: watchdog recovery did not report the full 135-second outage and one restart"
   fail=1
 fi
@@ -2360,6 +2420,23 @@ if [ -n "$(ls -A /var/run/nut-secrets/upsd-selfsigned.pem)" ]; then
 fi
 rmdir /var/run/nut-secrets/upsd-selfsigned.pem
 rm -f "$DIRDEST_ERR"
+
+# An absent credential-cache directory must refuse with one structured record
+# and no caller-added diagnostic: every _tls_mktemp caller returns immediately.
+MKTEMP_ERR=$(mktemp)
+rm -f /etc/nut/upsd.pem
+mv /var/run/nut-secrets /var/run/nut-secrets.absent
+if (resolve_tls_cert) 2>"$MKTEMP_ERR"; then
+  err "FAIL: resolve_tls_cert succeeded with the credential-cache directory absent"
+  fail=1
+fi
+mv /var/run/nut-secrets.absent /var/run/nut-secrets
+if ! grep -q '^level=error msg="mktemp failed while provisioning the TLS certificate" prefix=/var/run/nut-secrets/upsd-selfsigned.pem$' "$MKTEMP_ERR" \
+  || [ "$(wc -l <"$MKTEMP_ERR")" -ne 1 ]; then
+  err "FAIL: absent cache directory did not emit one structured mktemp error ($(head -c 300 "$MKTEMP_ERR"))"
+  fail=1
+fi
+rm -f "$MKTEMP_ERR"
 
 # A keygen failure must clean every temp and emit one sanitized structured record.
 KEYGEN_ERR=$(mktemp)

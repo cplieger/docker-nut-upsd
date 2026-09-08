@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# The default Docker target must consume the smoke stage's success marker;
-# otherwise BuildKit can prune that stage and ship an untested image.
+# Every verification stage's success marker must be consumed by the default
+# target, or BuildKit can prune that stage and ship an unverified image.
 set -u
 
 # shellcheck source-path=SCRIPTDIR
@@ -18,17 +18,39 @@ final_stage=$(awk '
   in_stage { print }
 ' "$dockerfile")
 last_stage=$(awk '/^FROM / { stage = $NF } END { print stage }' "$dockerfile")
+marker_pairs=$(awk '
+  /^FROM .* AS / { stage = $NF }
+  /touch \/[A-Za-z0-9_-]+-passed/ {
+    line = $0
+    while (match(line, /touch \/[A-Za-z0-9_-]+-passed/)) {
+      print stage "|" substr(line, RSTART + 6, RLENGTH - 6)
+      line = substr(line, RSTART + RLENGTH)
+    }
+  }
+' "$dockerfile")
+marker_contract_ok=true
+marker_detail=""
+while IFS='|' read -r marker_stage marker_path; do
+  [ -n "$marker_stage" ] && [ -n "$marker_path" ] || continue
+  [ "$marker_stage" = final ] && continue
+  if ! printf '%s\n' "$final_stage" \
+    | grep -Fq "COPY --from=$marker_stage $marker_path $marker_path"; then
+    marker_contract_ok=false
+    marker_detail="${marker_detail}${marker_detail:+, }$marker_stage:$marker_path"
+  fi
+done <<<"$marker_pairs"
 
 if [ -n "$test_stage" ] \
   && [ -n "$final_stage" ] \
+  && [ -n "$marker_pairs" ] \
+  && [ "$marker_contract_ok" = true ] \
   && printf '%s\n' "$test_stage" \
-    | grep -Eq '^[[:space:]]*RUN[[:space:]].*smoke\.sh.*&&[[:space:]]*touch[[:space:]]+/tests-passed' \
-  && printf '%s\n' "$final_stage" \
-    | grep -Eq '^[[:space:]]*COPY[[:space:]]+--from=test[[:space:]]+/tests-passed[[:space:]]+/tests-passed' \
+  | grep -Eq '^[[:space:]]*RUN[[:space:]].*smoke\.sh.*&&[[:space:]]*touch[[:space:]]+/tests-passed' \
   && [ "$last_stage" = final ]; then
-  ok 'default Docker target depends on a successful smoke-test stage'
+  ok 'default Docker target depends on every verification stage success marker'
 else
-  no 'Dockerfile smoke-stage dependency' "last stage=${last_stage:-none}"
+  no 'Dockerfile verification-stage dependencies' \
+    "last stage=${last_stage:-none} unconsumed=${marker_detail:-none}"
 fi
 
 verified_archives=0
@@ -229,7 +251,7 @@ exposed_port=$(awk '
   $1 == "EXPOSE" && $2 ~ /^[0-9][0-9]*$/ { print $2 }
 ' <<<"$runtime_stage")
 entrypoint_port=$(sed -n \
-  's/^: "${API_PORT:=\([0-9][0-9]*\)}"$/\1/p' \
+  's/^: "[$]{API_PORT:=\([0-9][0-9]*\)}"$/\1/p' \
   "$REPO_ROOT/entrypoint.sh")
 
 if [ "$(printf '%s\n' "$exposed_port" | grep -c .)" -eq 1 ] \
@@ -246,6 +268,13 @@ if grep -Eq '^(ENV[[:space:]]+|[[:space:]]+)NUT_DEBUG_SYSLOG=stderr([[:space:]]*
   ok 'runtime image preserves daemon stderr logging'
 else
   no 'runtime daemon stderr logging' 'NUT_DEBUG_SYSLOG=stderr is absent from the runtime stage'
+fi
+
+if grep -Eq '^(ENV[[:space:]]+|[[:space:]]+)NUT_QUIET_INIT_UPSNOTIFY=true([[:space:]]*\\)?[[:space:]]*$' <<<"$runtime_env"; then
+  ok 'runtime image suppresses NUT upsnotify initialization chatter'
+else
+  no 'runtime upsnotify quiet-init' \
+    'NUT_QUIET_INIT_UPSNOTIFY=true is absent from the runtime stage'
 fi
 
 pkg_upgrade_instruction=$(printf '%s\n' "$runtime_stage" | awk '

@@ -12,12 +12,6 @@ DBUS_PROBE_REPLY_TIMEOUT_MS=3000
 CALLS="$WORK/calls"
 REPLY=""
 TIMEOUT_RC=0
-function [ {
-  case "$*" in
-    '-S /run/dbus/system_bus_socket ]') return 0 ;;
-  esac
-  builtin [ "$@"
-}
 timeout() {
   printf '%s\n' "$*" >>"$CALLS"
   printf '%s' "$REPLY"

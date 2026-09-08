@@ -94,8 +94,12 @@ _resolve_cached_password() {
   # mktemp in the root-only dir gives an O_EXCL, unpredictable temp name so
   # a compromised `nut` process cannot plant a symlink at the write target.
   _rcp_err=
-  if _rcp_tmp=$(mktemp "${_rcp_file}.tmp.XXXXXX" 2>/dev/null) \
-    && printf '%s' "$_rcp_pw" >"$_rcp_tmp" \
+  if ! _rcp_tmp=$(mktemp "${_rcp_file}.tmp.XXXXXX" 2>&1); then
+    _rcp_err=$_rcp_tmp
+    _rcp_tmp=
+  fi
+  if [ -n "$_rcp_tmp" ] \
+    && _rcp_err=$(printf '%s' "$_rcp_pw" 2>&1 >"$_rcp_tmp") \
     && _replace_file "$_rcp_tmp" "$_rcp_file" _rcp_err; then
     printf 'level=info msg="generated %s; cached for intra-container restarts" path=%s\n' \
       "$_rcp_label" "$_rcp_file" >&2
@@ -148,15 +152,29 @@ withdraw_unused_credential_caches() {
 # length; ADMIN_PASSWORD has no default (unset auto-generates
 # PASSWORD_LENGTH chars), so its arm fires only on an operator's short value.
 warn_weak_api_password() {
-  if [ "${#API_PASSWORD}" -lt "$PASSWORD_MIN_LENGTH" ]; then
+  _wwp_api=$(nut_stored_word "$API_PASSWORD")
+  if [ "${#_wwp_api}" -lt "$PASSWORD_MIN_LENGTH" ]; then
     printf 'level=warn msg="API_PASSWORD is weak (<%d chars; so is the shipped default). Acceptable on a trusted LAN; rotate it if your NUT client supports custom credentials."\n' \
       "$PASSWORD_MIN_LENGTH" >&2
   fi
-  if ! user_override_present upsd.users \
-    && [ "${#ADMIN_PASSWORD}" -lt "$PASSWORD_MIN_LENGTH" ]; then
-    printf 'level=warn msg="ADMIN_PASSWORD is weak (<%d chars). It guards upsd set/FSD actions unless a mounted upsd.users.user owns those accounts; use a longer value or unset it to auto-generate a strong one."\n' \
+  case "$API_PASSWORD" in
+    *[[:space:]]*)
+      printf 'level=warn msg="API_PASSWORD contains whitespace; the bundled NUT clients send PASSWORD unquoted, so a client that does not quote it will fail to authenticate" var=API_PASSWORD\n' >&2
+      ;;
+  esac
+}
+
+warn_weak_admin_password() {
+  _wwp_admin=$(nut_stored_word "$ADMIN_PASSWORD")
+  if [ "${#_wwp_admin}" -lt "$PASSWORD_MIN_LENGTH" ]; then
+    printf 'level=warn msg="ADMIN_PASSWORD is weak (<%d chars). It guards upsd set/FSD actions; use a longer value or unset it to auto-generate a strong one."\n' \
       "$PASSWORD_MIN_LENGTH" >&2
   fi
+  case "$ADMIN_PASSWORD" in
+    *[[:space:]]*)
+      printf 'level=warn msg="ADMIN_PASSWORD contains whitespace; the bundled NUT clients send PASSWORD unquoted, so a client that does not quote it will fail to authenticate" var=ADMIN_PASSWORD\n' >&2
+      ;;
+  esac
 }
 
 # ---------------------------------------------------------------------------
@@ -338,7 +356,7 @@ resolve_tls_cert() {
 reconcile_tls_working_copies() {
   if [ "$API_TLS" != "true" ]; then
     _rw_stale="$TLS_CERT_MOUNTED_RUNTIME $TLS_CERT_RUNTIME"
-  elif [ "$TLS_CERT_PATH" = "$TLS_CERT_MOUNTED_RUNTIME" ]; then
+  elif [ "${TLS_CERT_PATH:-}" = "$TLS_CERT_MOUNTED_RUNTIME" ]; then
     _rw_stale="$TLS_CERT_RUNTIME"
   else
     _rw_stale="$TLS_CERT_MOUNTED_RUNTIME"

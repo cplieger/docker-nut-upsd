@@ -123,6 +123,7 @@ canonicalize_validated_values
 decide_user_overrides
 if ! user_override_present upsd.users; then
   resolve_admin_password
+  warn_weak_admin_password
 fi
 # The internal upsmon credential only exists when both upsd.users and
 # upsmon.conf are generated (generate-config.sh); with an override mounted for

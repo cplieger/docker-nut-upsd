@@ -14,6 +14,9 @@ SUBJECT="$REPO_ROOT/entrypoint.sh"
 [ "$ENTRYPOINT" = "$REPO_ROOT/entrypoint.sh" ] || SUBJECT="$ENTRYPOINT"
 ENTRYPOINT="$SUBJECT"
 BLOCK=$(extract_range '^stale_nut_pid_paths() {' '^fi$' "$WORK/stale-pid-block.sh") || exit 1
+ENTRYPOINT="$REPO_ROOT/validate.sh"
+LOG_VALUE=$(extract_function log_value "$WORK/log-value.sh") || exit 1
+ENTRYPOINT="$SUBJECT"
 
 REAL_FIND=$(command -v find)
 mkdir -p "$WORK/bin"
@@ -32,10 +35,10 @@ run_block() {
   : >"$WORK/stderr"
   : >"$WORK/find-calls"
   if env PATH="$WORK/bin:$PATH" BLOCK="$BLOCK" PID_ROOT="$1" \
-    REAL_FIND="$REAL_FIND" FIND_CALLS="$WORK/find-calls" \
+    REAL_FIND="$REAL_FIND" FIND_CALLS="$WORK/find-calls" LOG_VALUE="$LOG_VALUE" \
     bash -c '
       set -eu
-      log_value() { printf "%s" "$1"; }
+      . "$LOG_VALUE"
       . "$BLOCK"
     ' >"$WORK/stdout" 2>"$WORK/stderr"; then
     RUN_RC=0
@@ -74,6 +77,24 @@ run_block "$BLOCKED"
   && grep -q 'nonempty.pid' "$WORK/stderr" \
   && ok 'a surviving reserved PID pathname refuses startup and names the survivor' \
   || no 'surviving PID pathname refusal' "rc=$RUN_RC stderr=$(cat "$WORK/stderr")"
+
+LONG_SURVIVORS="$WORK/long-survivors"
+mkdir "$LONG_SURVIVORS"
+for _long_index in 1 2 3 4; do
+  _long_name=$(printf '%0170d.pid' "$_long_index")
+  mkdir "$LONG_SURVIVORS/$_long_name"
+  : >"$LONG_SURVIVORS/$_long_name/child"
+done
+run_block "$LONG_SURVIVORS"
+survivor_record=$(grep -F 'failed to clear a stale NUT PID path; refusing to start' "$WORK/stderr" || :)
+survivor_detail=${survivor_record##* surviving=\"}
+survivor_detail=${survivor_detail%\"}
+[ "$RUN_RC" -eq 1 ] && [ "${#survivor_detail}" -eq 512 ] \
+  && [ "${survivor_detail: -3}" = '...' ] \
+  && [ "$(wc -l <"$WORK/stderr")" -eq 2 ] \
+  && ok 'an overlong stale PID survivor inventory is bounded and visibly truncated' \
+  || no 'overlong stale PID survivor diagnostic' \
+    "rc=$RUN_RC detail_length=${#survivor_detail} detail_suffix=${survivor_detail: -3} stderr=$(tr '\n' '|' <"$WORK/stderr")"
 
 KILLPOWER_BLOCK=$(extract_range '^if \[ -e "\$POWERDOWNFLAG_FILE" \]; then$' '^fi$' "$WORK/killpower-cleanup-block.sh") || exit 1
 

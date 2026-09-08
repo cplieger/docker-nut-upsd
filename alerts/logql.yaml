@@ -207,9 +207,11 @@ groups:
             patches/cve-2026-54161-notifycmd-execvp.patch:154-157 backport logs
             "notify: execvp(<cmd>) failed: <strerror>" from notify(). Every
             event=<TYPE> record this ruleset keys on comes from that handler,
-            so while this persists every event= rule in this group is blind;
-            for ALARM and OTHER
-            (wired EXEC-only) the event is lost outright. This is reachable
+            so while this persists every event= rule in this group is blind.
+            Which events survive as upsmon's own syslog copy is decided by the
+            NOTIFYFLAG rows in the mounted upsmon.conf.user. An operator whose
+            file routes an event only to EXEC loses that event outright, while a
+            SYSLOG+EXEC row keeps upstream's plain-text notice. This is reachable
             only with a mounted upsmon.conf.user whose NOTIFYCMD is wrong or
             not executable; the generated config wires the shipped handler.
             Fix the NOTIFYCMD path or permissions in the mounted file.
@@ -240,6 +242,13 @@ groups:
       # one record means the watchdog bounced the driver and comms came back.
       # This catches the first repair rather than waiting for a second outage;
       # stale_secs and restarts already carry the whole-outage evidence.
+      #
+      # It is also the one rule in the group that does not group its result by
+      # (container): that grouping would keep only the container label, and the
+      # annotation reads stale_secs and restarts off the matched series. The cost
+      # is that two repairs in one window fire separately only when their
+      # stale_secs/restarts differ; two repairs reporting the same values are one
+      # series and collapse into its count.
       #
       # TRANSITION rule (see the file header): lifecycle.sh writes one record
       # when a watchdog-repaired outage recovers and does not repeat it after
@@ -394,8 +403,17 @@ groups:
             nut-upsd ran its SHUTDOWNCMD with host shutdown enabled. Either all
             D-Bus PowerOff attempts failed, or logind accepted the request and
             no longer reported a pending poweroff while the container was still
-            running. The host was still running while the UPS was about to stop
-            supplying it, so treat each load on this UPS as having lost power
+            running. An attempt that failed while logind reported a pending
+            shutdown-class action is included here: PreparingForShutdown is set
+            for any delayed shutdown-class action and cannot identify which one,
+            so a concurrent reboot is reported as a failed poweroff rather than
+            suppressed, with the property reply in settle beside the bus error
+            in detail. That instance is a false positive for this poweroff and
+            clears about fifteen minutes after the record, because the rule
+            counts log entries over a 15-minute range; stopping the container or
+            host does not remove a record Loki has already ingested. The host
+            was still running while the UPS was about to stop supplying it, so
+            treat each load on this UPS as having lost power
             without a clean shutdown. TRANSITION rule (see the file header): the
             line is written once per forced-shutdown attempt, and the example
             restart policy re-enters monitoring. A UPS that stays critical
