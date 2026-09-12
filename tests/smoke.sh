@@ -1517,7 +1517,8 @@ esac
 
 # The three NUT controls share Docker's 10-second stop grace. Drive the real
 # sequence with a fake clock so a widened bound or an added control cannot push
-# upsdrvctl stop past SIGKILL.
+# upsdrvctl stop past SIGKILL. The PID argument stands for a upsmon still
+# running, which is the only case where all three controls are issued.
 STOP_BUDGET_TRACE=$(mktemp)
 STOP_BUDGET_ERR=$(mktemp)
 if ! (
@@ -1541,7 +1542,7 @@ if ! (
     printf 'ok\t%d\t%s\n' "$elapsed" "$*" >>"$STOP_BUDGET_TRACE"
     [ "$1" != "/usr/sbin/upsmon" ]
   }
-  stop_services
+  stop_services 4242
 ) 2>"$STOP_BUDGET_ERR"; then
   err "FAIL: stop_services did not absorb a failed stop control"
   fail=1
@@ -1571,6 +1572,51 @@ if ! grep -Fqx 'level=info msg="stopping NUT services"' "$STOP_BUDGET_ERR" \
   fail=1
 fi
 rm -f "$STOP_BUDGET_TRACE" "$STOP_BUDGET_ERR"
+
+# An empty PID means there is no upsmon left to signal: on the forced-shutdown
+# path upsmon's own exit is what starts the teardown, and a stop control aimed at
+# it can only fail and then warn about it. The stub REFUSES a upsmon control for
+# that reason — the warn line only exists on a failed control, so a stub that
+# succeeded at everything would make the absence check below unfalsifiable.
+STOP_REAPED_TRACE=$(mktemp)
+STOP_REAPED_ERR=$(mktemp)
+if ! (
+  # Invoked indirectly by the extracted stop_nut_cmd path.
+  # shellcheck disable=SC2329
+  timeout() {
+    if [ "${1-}" != "-s" ] || [ "${2-}" != "KILL" ]; then
+      printf 'invalid\t%s\n' "$*" >>"$STOP_REAPED_TRACE"
+      return 0
+    fi
+    case "${3-}" in
+      '' | *[!0-9]*)
+        printf 'invalid\t%s\n' "$*" >>"$STOP_REAPED_TRACE"
+        return 0
+        ;;
+    esac
+    shift 3
+    printf 'ok\t%s\n' "$*" >>"$STOP_REAPED_TRACE"
+    [ "$1" != "/usr/sbin/upsmon" ]
+  }
+  stop_services ""
+) 2>"$STOP_REAPED_ERR"; then
+  err "FAIL: stop_services did not absorb the reaped-upsmon stop sequence"
+  fail=1
+fi
+reaped_sequence=$(awk -F '\t' '$1 == "ok" { print $2 }' "$STOP_REAPED_TRACE")
+if grep -q '^invalid' "$STOP_REAPED_TRACE"; then
+  err "FAIL: a NUT stop control lost timeout -s KILL on the reaped-upsmon path"
+  fail=1
+elif [ "$reaped_sequence" != "/usr/sbin/upsd -c stop
+/usr/sbin/upsdrvctl stop" ]; then
+  err "FAIL: the stop sequence for a reaped upsmon was: ${reaped_sequence:-<none>}"
+  fail=1
+fi
+if grep -Fq 'upsmon stop failed' "$STOP_REAPED_ERR"; then
+  err "FAIL: the stop sequence warned about a upsmon it had nothing to signal"
+  fail=1
+fi
+rm -f "$STOP_REAPED_TRACE" "$STOP_REAPED_ERR"
 
 PIDFILE_WAIT_TRACE=$(mktemp)
 (

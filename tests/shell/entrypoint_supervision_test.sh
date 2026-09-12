@@ -71,7 +71,7 @@ upsd_responsive() {
   [ "$probe_count" -eq 3 ]
 }
 teardown_all() {
-  printf 'teardown\n' >>"$TEARDOWN_LOG"
+  printf 'teardown upsmon=%s\n' "${UPSMON_PID:-}" >>"$TEARDOWN_LOG"
 }
 
 . "$BLOCK"
@@ -133,6 +133,25 @@ run_scenario clean
   && ok 'a zero upsmon status remains zero after teardown' \
   || no 'clean upsmon status propagation' "rc=$RUN_RC stderr=$(cat "$WORK/stderr")"
 
+# Which upsmon teardown is told to stop. The supervisor still holds it while
+# probing upsd, and must hand teardown nothing once it has reaped it: on the FSD
+# path upsmon's own exit is what starts the teardown, so a stop control aimed at
+# it could only fail and then warn about it.
+run_scenario threshold
+live_teardown=$(cat "$WORK/teardown")
+run_scenario clean
+fsd_teardown=$(cat "$WORK/teardown")
+run_scenario child-failure
+failed_teardown=$(cat "$WORK/teardown")
+if [ "$live_teardown" = 'teardown upsmon=4242' ] \
+  && [ "$fsd_teardown" = 'teardown upsmon=' ] \
+  && [ "$failed_teardown" = 'teardown upsmon=' ]; then
+  ok 'teardown keeps a live upsmon to stop and has none to stop after either reap'
+else
+  no 'reaped upsmon handoff to teardown' \
+    "live=[$live_teardown] fsd=[$fsd_teardown] failed=[$failed_teardown]"
+fi
+
 run_scenario child-failure
 child_exit_record=$(grep -F 'msg="upsmon exited unexpectedly"' "$WORK/stderr" || :)
 run_scenario clean
@@ -151,12 +170,13 @@ TEARDOWN=$(extract_function teardown_all "$WORK/teardown_all.sh") || exit 1
 cat >"$WORK/drive-teardown.sh" <<'DRIVER'
 #!/usr/bin/env bash
 set -eu
+UPSMON_PID="$DRIVE_UPSMON_PID"
 WATCHDOG_PID=5151
 DBUS_PROBE_PID=6262
 
 kill() { printf 'kill %s\n' "$1" >>"$EVENTS"; }
 wait() { printf 'wait %s\n' "$1" >>"$EVENTS"; }
-stop_services() { printf 'stop-services\n' >>"$EVENTS"; }
+stop_services() { printf 'stop-services upsmon=%s\n' "${1-unset}" >>"$EVENTS"; }
 
 . "$STOP_BG"
 . "$TEARDOWN"
@@ -164,27 +184,47 @@ teardown_all
 DRIVER
 chmod +x "$WORK/drive-teardown.sh"
 
-: >"$WORK/events"
-: >"$WORK/stderr"
-if env STOP_BG="$STOP_BG" TEARDOWN="$TEARDOWN" EVENTS="$WORK/events" \
-  bash "$WORK/drive-teardown.sh" >"$WORK/stdout" 2>"$WORK/stderr"; then
-  RUN_RC=0
-else
-  RUN_RC=$?
-fi
+run_teardown() {
+  : >"$WORK/events"
+  : >"$WORK/stderr"
+  if env STOP_BG="$STOP_BG" TEARDOWN="$TEARDOWN" EVENTS="$WORK/events" \
+    DRIVE_UPSMON_PID="$1" \
+    bash "$WORK/drive-teardown.sh" >"$WORK/stdout" 2>"$WORK/stderr"; then
+    RUN_RC=0
+  else
+    RUN_RC=$?
+  fi
+}
+
+run_teardown 4242
 
 cat >"$WORK/expected-teardown-events" <<'EXPECTED'
 kill 5151
 wait 5151
 kill 6262
 wait 6262
-stop-services
+stop-services upsmon=4242
 EXPECTED
 
 [ "$RUN_RC" -eq 0 ] \
   && cmp -s "$WORK/expected-teardown-events" "$WORK/events" \
-  && ok 'teardown_all signals and reaps workers before services' \
+  && ok 'teardown_all signals and reaps workers before services, naming the upsmon it supervises' \
   || no 'teardown_all worker lifecycle ordering' "rc=$RUN_RC events=$(tr '\n' ' ' <"$WORK/events") stderr=$(cat "$WORK/stderr")"
+
+run_teardown ''
+
+cat >"$WORK/expected-teardown-reaped" <<'EXPECTED'
+kill 5151
+wait 5151
+kill 6262
+wait 6262
+stop-services upsmon=
+EXPECTED
+
+[ "$RUN_RC" -eq 0 ] \
+  && cmp -s "$WORK/expected-teardown-reaped" "$WORK/events" \
+  && ok 'teardown_all forwards an empty upsmon PID rather than dropping the argument' \
+  || no 'teardown_all reaped upsmon argument' "rc=$RUN_RC events=$(tr '\n' ' ' <"$WORK/events") stderr=$(cat "$WORK/stderr")"
 
 cat >"$WORK/drive-teardown-budget.sh" <<'DRIVER'
 #!/usr/bin/env bash
