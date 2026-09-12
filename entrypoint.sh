@@ -248,6 +248,8 @@ stop_bg_pid() {
   wait "$1" 2>/dev/null || true
 }
 
+# Empty while there is no upsmon to signal; stop_services owns what that means.
+UPSMON_PID=""
 WATCHDOG_PID=""
 DBUS_PROBE_PID=""
 
@@ -259,7 +261,7 @@ teardown_all() {
   set +e
   stop_bg_pid "${WATCHDOG_PID:-}"
   stop_bg_pid "${DBUS_PROBE_PID:-}"
-  stop_services
+  stop_services "${UPSMON_PID:-}"
 }
 
 # shellcheck disable=SC2317,SC2329 # invoked via trap; shellcheck cannot see the call site
@@ -404,6 +406,8 @@ done
 # executed SHUTDOWNCMD (upsmon's privileged parent, clients/upsmon.c runparent).
 rc=0
 wait "$UPSMON_PID" || rc=$?
+# Reaped: the teardown below has no upsmon left to stop.
+UPSMON_PID=""
 if [ "$rc" -eq 0 ]; then
   printf 'level=warn msg="upsmon parent exited after running SHUTDOWNCMD; a forced shutdown (FSD) was executed" rc=0\n' >&2 || :
 else

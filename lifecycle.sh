@@ -74,10 +74,16 @@ stop_nut_cmd() {
 }
 
 # Stop all NUT daemons. Logs warnings on failure but does not exit — callers
-# decide the final exit status.
+# decide the final exit status. $1 is the supervised upsmon's PID, empty when
+# there is none to signal: upsmon is already gone on the forced-shutdown path,
+# where its own exit is what starts this sequence, and was never started on a
+# failed boot. `upsmon -c stop` can only fail then, so issuing it would accuse
+# the daemon whose exit triggered the teardown on the two paths an operator reads.
 stop_services() {
   printf 'level=info msg="stopping NUT services"\n' >&2
-  stop_nut_cmd "upsmon" /usr/sbin/upsmon -c stop
+  if [ -n "${1:-}" ]; then
+    stop_nut_cmd "upsmon" /usr/sbin/upsmon -c stop
+  fi
   stop_nut_cmd "upsd" /usr/sbin/upsd -c stop
   stop_nut_cmd "upsdrvctl" /usr/sbin/upsdrvctl stop
   printf 'level=info msg="NUT service stop sequence completed"\n' >&2
