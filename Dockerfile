@@ -134,7 +134,7 @@ RUN cat > /out/nut-upsd.cdx.json <<EOF
       "type": "application",
       "name": "nut",
       "version": "${NUT_VERSION#v}",
-      "purl": "pkg:github/networkupstools/nut@${NUT_VERSION}",
+      "purl": "pkg:github/networkupstools/nut@${NUT_VERSION}?download_url=https://github.com/networkupstools/nut/releases/download/${NUT_VERSION}/nut-${NUT_VERSION#v}.tar.gz&checksum=sha256:${NUT_SHA256}&patch=cve-2026-54161-notifycmd-execvp.patch,libusb-exit-reconnect-deadlock.patch,libusb-rdlens-oob-read.patch,richcomm-libusb-context-reopen.patch",
       "cpe": "cpe:2.3:a:networkupstools:nut:${NUT_VERSION#v}:*:*:*:*:*:*:*"
     },
     {
@@ -142,15 +142,15 @@ RUN cat > /out/nut-upsd.cdx.json <<EOF
       "type": "library",
       "name": "libmodbus",
       "version": "${LIBMODBUS_VERSION#v}",
-      "purl": "pkg:github/stephane/libmodbus@${LIBMODBUS_VERSION}",
+      "purl": "pkg:github/stephane/libmodbus@${LIBMODBUS_VERSION}?download_url=https://github.com/stephane/libmodbus/releases/download/${LIBMODBUS_VERSION}/libmodbus-${LIBMODBUS_VERSION#v}.tar.gz&checksum=sha256:${LIBMODBUS_SHA256}",
       "cpe": "cpe:2.3:a:libmodbus:libmodbus:${LIBMODBUS_VERSION#v}:*:*:*:*:*:*:*"
     },
     {
-      "bom-ref": "pkg:github/net-snmp/net-snmp@${NETSNMP_VERSION}",
+      "bom-ref": "pkg:generic/net-snmp@${NETSNMP_VERSION#v}",
       "type": "library",
       "name": "net-snmp",
       "version": "${NETSNMP_VERSION#v}",
-      "purl": "pkg:github/net-snmp/net-snmp@${NETSNMP_VERSION}",
+      "purl": "pkg:generic/net-snmp@${NETSNMP_VERSION#v}?download_url=https://downloads.sourceforge.net/net-snmp/net-snmp-${NETSNMP_VERSION#v}.tar.gz&checksum=sha256:${NETSNMP_SHA256}",
       "cpe": "cpe:2.3:a:net-snmp:net-snmp:${NETSNMP_VERSION#v}:*:*:*:*:*:*:*"
     }
   ]
