@@ -169,14 +169,24 @@ sbom_components=$(awk '
 ' "$dockerfile")
 sbom_identity_ok=true
 failed_component=""
+# The purl type and version form are per-component, not uniform: net-snmp's
+# bytes come from SourceForge, so a pkg:github purl would name a host this
+# build never contacts. The qualifier list is what ties a purl to the fetch the
+# build performs, so the spec carries it and the assertion below reads it.
 for spec in \
-  'networkupstools/nut|nut|cpe:2.3:a:networkupstools:nut:' \
-  'stephane/libmodbus|libmodbus|cpe:2.3:a:libmodbus:libmodbus:' \
-  'net-snmp/net-snmp|net-snmp|cpe:2.3:a:net-snmp:net-snmp:'; do
+  'networkupstools/nut|nut|cpe:2.3:a:networkupstools:nut:|pkg:github/networkupstools/nut|tag|download_url checksum patch' \
+  'stephane/libmodbus|libmodbus|cpe:2.3:a:libmodbus:libmodbus:|pkg:github/stephane/libmodbus|tag|download_url checksum' \
+  'net-snmp/net-snmp|net-snmp|cpe:2.3:a:net-snmp:net-snmp:|pkg:generic/net-snmp|stripped|download_url checksum'; do
   dep=${spec%%|*}
   rest=${spec#*|}
   name=${rest%%|*}
-  cpe=${rest#*|}
+  rest=${rest#*|}
+  cpe=${rest%%|*}
+  rest=${rest#*|}
+  purl_name=${rest%%|*}
+  rest=${rest#*|}
+  purl_version_form=${rest%%|*}
+  purl_qualifiers=${rest#*|}
   arg=$(awk -v dep="$dep" '
     /^# renovate:/ && index($0, "depName=" dep) { found = 1; next }
     found && /^ARG [A-Z0-9_]+_VERSION=/ {
@@ -187,18 +197,27 @@ for spec in \
       exit
     }
   ' "$dockerfile")
-  component=$(awk -v dep="$dep" '
-    index($0, "\"bom-ref\": \"pkg:github/" dep "@") { found = 1 }
+  arg_ref="\${$arg}"
+  version_ref="\${$arg#v}"
+  if [ "$purl_version_form" = stripped ]; then
+    purl_ref="$purl_name@$version_ref"
+  else
+    purl_ref="$purl_name@$arg_ref"
+  fi
+  component=$(awk -v ref="$purl_ref" '
+    index($0, "\"bom-ref\": \"" ref "\"") { found = 1 }
     found { print }
     found && /^    }/ { exit }
   ' "$dockerfile")
-  arg_ref="\${$arg}"
-  version_ref="\${$arg#v}"
-  if [ -z "$arg" ] || [ -z "$component" ] \
-    || ! grep -Fq "\"bom-ref\": \"pkg:github/$dep@$arg_ref\"" <<<"$component" \
+  purl_line=$(grep -F "\"purl\": \"$purl_ref?" <<<"$component")
+  qualifiers_ok=true
+  for qualifier in $purl_qualifiers; do
+    grep -Fq "$qualifier=" <<<"$purl_line" || qualifiers_ok=false
+  done
+  if [ -z "$arg" ] || [ -z "$component" ] || [ -z "$purl_line" ] \
+    || [ "$qualifiers_ok" != true ] \
     || ! grep -Fq "\"name\": \"$name\"" <<<"$component" \
     || ! grep -Fq "\"version\": \"$version_ref\"" <<<"$component" \
-    || ! grep -Fq "\"purl\": \"pkg:github/$dep@$arg_ref\"" <<<"$component" \
     || ! grep -Fq "\"cpe\": \"$cpe$version_ref:*:*:*:*:*:*:*\"" <<<"$component"; then
     sbom_identity_ok=false
     failed_component="${failed_component}${failed_component:+, }$name"
