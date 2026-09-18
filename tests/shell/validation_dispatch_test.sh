@@ -337,14 +337,19 @@ shipped_defaults="$WORK/shipped-defaults"
 documented_default_names="$WORK/documented-default-names"
 shipped_default_names="$WORK/shipped-default-names"
 
+# The separator is a detached argument (`-t '='`, never `-t=`) here and in the
+# join below: uutils coreutils, the default sort on ubuntu-26.04 runners, reads
+# the `=` of `-t=` as the flag/value delimiter and gets an EMPTY separator —
+# sort exits 2 ("separator must be exactly one character long"), and join
+# silently emits nothing at exit 0. GNU sort takes either form.
 # The sed program matches literal Markdown backticks in the final table cell.
 # shellcheck disable=SC2016
 sed -n 's/^| `\([A-Z][A-Z0-9_]*\)` |.*| `\([^`]*\)` |$/\1=\2/p' \
-  "$REPO_ROOT/README.md" | sort -t= -k1,1 >"$documented_defaults"
+  "$REPO_ROOT/README.md" | sort -t '=' -k1,1 >"$documented_defaults"
 # The sed program matches literal shell parameter expansion in entrypoint.sh.
 # shellcheck disable=SC2016
 sed -n 's/^: "${\([A-Z][A-Z0-9_]*\):=\(.*\)}"$/\1=\2/p' \
-  "$REPO_ROOT/entrypoint.sh" | sort -t= -k1,1 >"$shipped_defaults"
+  "$REPO_ROOT/entrypoint.sh" | sort -t '=' -k1,1 >"$shipped_defaults"
 
 cut -d= -f1 "$documented_defaults" | sort -u >"$documented_default_names"
 cut -d= -f1 "$shipped_defaults" | sort -u >"$shipped_default_names"
@@ -354,7 +359,7 @@ if [ ! -s "$documented_defaults" ] || [ ! -s "$shipped_defaults" ]; then
 elif ! diff -u "$documented_default_names" "$shipped_default_names" >"$WORK/default-inventory.diff"; then
   no 'documented and shipped default inventories match' "$(cat "$WORK/default-inventory.diff")"
 else
-  default_mismatches=$(join -t= -j1 "$documented_defaults" "$shipped_defaults" \
+  default_mismatches=$(join -t '=' -j1 "$documented_defaults" "$shipped_defaults" \
     -o 0,1.2,2.2 | awk -F= '
       $2 != $3 {
         printf "%s: README=%s shipped=%s\n", $1, $2, $3

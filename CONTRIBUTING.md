@@ -254,7 +254,13 @@ baked ENTRYPOINT or HEALTHCHECK.
 
 Put assertions that need the assembled, running container in the `smoke_verify`
 hook in `tests/image-smoke.conf`, which drives the live container through
-`$SMOKE_CONTAINER`.
+`$SMOKE_CONTAINER`. Today that hook runs the real daemons against a `dummy-ups`
+device file: it drives an outage, a recovery and a forced shutdown through the
+file and requires upsmon's reaction to each, then boots a second container whose
+`UPS_DRIVER` names a binary the image does not ship and requires that boot to end
+non-zero with the entrypoint naming the failed daemon. That negative control is
+what keeps a broken wrapped binary from passing as a healthy image, so keep one
+in the hook whatever else changes there.
 
 Put pure shell logic and cross-file contracts that read both source files in
 `tests/shell/`.
@@ -268,12 +274,17 @@ pushing:
 
 ```sh
 shellcheck -x *.sh tests/*.sh tests/shell/*.sh
-shfmt -d -i 2 -ci -bn *.sh tests/*.sh tests/shell/*.sh
+shellcheck -s sh -e SC2034 tests/image-smoke.conf
+shfmt -d -i 2 -ci -bn *.sh tests/*.sh tests/shell/*.sh tests/image-smoke.conf
 hadolint Dockerfile
 docker build -t nut-upsd-test .
+sh tests/image-smoke.sh nut-upsd-test
 ```
 
-ShellCheck must be clean. `hadolint` reports only DL3018 (unpinned apk),
+The last line is the image smoke test CI runs on every PR; it needs Docker and
+takes a few minutes, most of it the forced-shutdown sequence and its polls. Lint the `.conf`
+directly: reaching it through the harness with `-x` reports nothing about its
+contents. ShellCheck must be clean. `hadolint` reports only DL3018 (unpinned apk),
 which is accepted. Note the in-script `# shellcheck source-path=SCRIPTDIR`
 and targeted `disable` directives: keep them accurate when you move code.
 The `docker build` runs `tests/smoke.sh` in the image's test stage
