@@ -126,7 +126,7 @@ For a serial UPS, set `UPS_PORT` to the device node, such as `/dev/ttyUSB0`, and
 
 ## Healthcheck
 
-The built-in healthcheck runs `upsc` against upsd on its configured listen address (loopback for the default `API_ADDRESS=0.0.0.0`) to verify the NUT driver is communicating with the UPS hardware. It becomes unhealthy when the UPS device is disconnected, the driver failed to start, or upsd is not responding, and recovers once the device is reconnected and the driver re-establishes communication. The [comms watchdog](#usb-hotplug--comms-recovery) actively drives that recovery whenever comms go stale, so the unhealthy window is bounded by `COMMS_RECOVERY_TIMEOUT` rather than lasting until you recreate the container.
+The built-in healthcheck runs `upsc` against upsd on its configured listen address (loopback for the default `API_ADDRESS=0.0.0.0`) to verify the NUT driver is communicating with the UPS hardware. It becomes unhealthy when the UPS device is disconnected, the driver failed to start, or upsd is not responding, and recovers once the device is reconnected and the driver re-establishes communication. The [comms watchdog](#usb-hotplug--comms-recovery) actively drives that recovery whenever comms go stale, so the unhealthy window is bounded by `COMMS_RECOVERY_TIMEOUT` rather than lasting until you recreate the container. Health is a live protocol probe, never a stored result, so a restart starts from the same state as a first boot. Two failures end the container instead of leaving it running unhealthy: a daemon that fails to start exits the container non-zero at boot, and an upsd that stops answering the protocol for about a minute exits it non-zero too, so your restart policy decides in both cases.
 
 ## TLS (STARTTLS)
 
