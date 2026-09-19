@@ -234,5 +234,32 @@ This project was built with AI-assisted tooling using [Claude](https://claude.co
 
 Apache-2.0. See [LICENSE](LICENSE).
 
-`patches/` is an exception. It holds backports of upstream NUT source, so
-those files stay GPL-2.0-or-later. Each patch header names its upstream commit.
+The image carries the license text of every bundled component under
+`/usr/share/licenses/`. The Alpine packages in the image ship no license file
+upstream, so their license texts are kept under `licenses/` in this repository
+and copied in.
+
+The image packages [Network UPS Tools](https://github.com/networkupstools/nut)
+(GPL-2.0-or-later), compiled from the release tarball the Dockerfile fetches at
+the version its `NUT_VERSION` argument pins
+(`https://github.com/networkupstools/nut/releases/download/<version>/nut-<version>.tar.gz`),
+and links [libmodbus](https://github.com/stephane/libmodbus) and
+[Net-SNMP](https://github.com/net-snmp/net-snmp), each compiled the same way
+from the tarball its own version argument pins. Each component's own license
+text is in that tree.
+
+The build applies checked-in backports of upstream NUT source, so those files
+stay GPL-2.0-or-later:
+
+- `patches/cve-2026-54161-notifycmd-execvp.patch` backports upstream commit
+  `ecf98e7542e4ae2b62b211622ee26989274b2220`.
+- `patches/libusb-exit-reconnect-deadlock.patch` backports upstream commit
+  `bfbba15928aa6a91b3e4b8943e0cad16199d9d48`.
+- `patches/libusb-rdlens-oob-read.patch` backports upstream commit
+  `edc06fb39435b892d5daeec53cb4845cb12d1d50`.
+- `patches/richcomm-libusb-context-reopen.patch` backports upstream commit
+  `ce2364e2b1e79406248be50b01a031db67c1c9fd`.
+
+This repository's `Dockerfile` and those patch files are the complete recipe for
+the NUT, libmodbus and Net-SNMP binaries the image ships: the corresponding
+source is the upstream tarball each pin names, with the patches above applied.

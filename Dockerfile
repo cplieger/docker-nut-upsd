@@ -32,7 +32,9 @@ RUN wget -qO libmodbus.tar.gz \
        ./configure --prefix=/usr --disable-static \
        CC=clang \
     && make -j"$(nproc)" \
-    && make install
+    && make install \
+    && mkdir -p /out/usr/share/licenses/libmodbus \
+    && cp COPYING.LESSER /out/usr/share/licenses/libmodbus/
 
 # renovate: datasource=github-tags depName=net-snmp/net-snmp
 ARG NETSNMP_VERSION=v5.9.5.2
@@ -63,7 +65,9 @@ RUN wget -qO netsnmp.tar.gz \
     && make -j"$(nproc)" -C snmplib \
     && make -C snmplib install \
     && cp -r include/net-snmp /usr/include/ \
-    && install -D -m 644 netsnmp.pc /usr/lib/pkgconfig/netsnmp.pc
+    && install -D -m 644 netsnmp.pc /usr/lib/pkgconfig/netsnmp.pc \
+    && mkdir -p /out/usr/share/licenses/net-snmp \
+    && cp COPYING /out/usr/share/licenses/net-snmp/
 
 # renovate: datasource=github-releases depName=networkupstools/nut
 ARG NUT_VERSION=v2.8.5
@@ -120,7 +124,9 @@ RUN wget -qO nut.tar.gz \
        ! -name upsdrvctl -exec cp {} /out/usr/lib/nut/ \; \
     && cp data/cmdvartab /out/usr/share/ \
     && cp -d /usr/lib/libmodbus.so* /out/usr/lib/ \
-    && cp -d /usr/lib/libnetsnmp.so* /out/usr/lib/
+    && cp -d /usr/lib/libnetsnmp.so* /out/usr/lib/ \
+    && mkdir -p /out/usr/share/licenses/nut \
+    && cp COPYING LICENSE-GPL2 LICENSE-GPL3 LICENSE-DCO /out/usr/share/licenses/nut/
 
 # Syft sees source builds only through an embedded CycloneDX fragment.
 RUN cat > /out/nut-upsd.cdx.json <<EOF
@@ -156,6 +162,8 @@ RUN cat > /out/nut-upsd.cdx.json <<EOF
   ]
 }
 EOF
+
+COPY LICENSE NOTICE /out/usr/share/licenses/nut-upsd/
 
 FROM builder AS source-checks
 SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
@@ -284,6 +292,8 @@ COPY --from=builder /out/usr/sbin/upsd \
 COPY --from=builder /out/usr/bin/upsc /usr/bin/
 COPY --from=builder /out/usr/lib/nut/ /usr/lib/nut/
 COPY --from=builder /out/usr/share/cmdvartab /usr/share/cmdvartab
+COPY --from=builder /out/usr/share/licenses /usr/share/licenses
+COPY licenses/ /usr/share/licenses/
 # Placed where Syft's *.cdx.json cataloger inventories it.
 COPY --from=builder /out/nut-upsd.cdx.json /usr/share/sbom/nut-upsd.cdx.json
 
