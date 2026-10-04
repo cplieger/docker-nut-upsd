@@ -111,9 +111,9 @@ Settings are environment variables in `compose.yaml`. The container reads them a
 
 ## Security
 
-Your clients shut down on what this server reports, and anyone who can reach port 3493 can read the UPS status without a password. Keep the port on your own network, and change `API_PASSWORD` from `secret` unless a Synology NAS uses this server. TLS is on by default, with a certificate the container creates. A client that does not check that certificate gets an encrypted connection but cannot tell this server from an impostor. The PEM file inside the container holds the private key, so export only the certificate, as [Security](docs/security.md#tls-starttls) shows.
+Your clients shut down on what this server reports, and anyone who can reach port 3493 can read the UPS status without a password. Keep the port on your own network, and change `API_PASSWORD` from `secret` unless a Synology NAS uses this server. TLS is on by default, with a certificate the container creates. A client that does not check that certificate gets an encrypted connection but cannot tell this server from an impostor. The PEM file inside the container holds the private key, so export only the certificate, as [Security](docs/hardening.md#tls-starttls) shows.
 
-The container starts as root. With the generated configuration, the UPS driver and the server then run as the `nut` user. `upsmon` keeps a root parent process to run the shutdown command. The live USB bind gives the container's `nut` group read and write access to every USB device on the host. Members of a host group with the same group ID get that access too. Host shutdown does not work with Docker user-namespace remapping under systemd-logind's default policy. [Security](docs/security.md) covers TLS certificates, privileges and what the image contains.
+The container starts as root. With the generated configuration, the UPS driver and the server then run as the `nut` user. `upsmon` keeps a root parent process to run the shutdown command. The live USB bind gives the container's `nut` group read and write access to every USB device on the host. Members of a host group with the same group ID get that access too. Host shutdown does not work with Docker user-namespace remapping under systemd-logind's default policy. [Security](docs/hardening.md) covers TLS certificates, privileges and what the image contains.
 
 ## Troubleshooting
 
@@ -133,7 +133,7 @@ docker-nut-upsd has no metrics endpoint and sends no email or push notifications
 
 - [Configuration](docs/configuration.md) lists every setting, for serial, network and custom setups.
 - [How docker-nut-upsd works](docs/how-it-works.md) explains recovery, the healthcheck and planned exits.
-- [Security](docs/security.md) covers TLS, privileges and the image contents.
+- [Security](docs/hardening.md) covers TLS, privileges and the image contents.
 - [Monitoring and alerts](docs/monitoring.md) lists the log lines and alert rules.
 
 ## Credits
