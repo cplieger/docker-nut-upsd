@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The docs/security.md export command must write only the public certificate from the
+# The docs/hardening.md export command must write only the public certificate from the
 # combined certificate-and-private-key PEM that upsd serves.
 # shellcheck disable=SC2015
 set -u
@@ -20,10 +20,10 @@ readme_cmd=$(awk '
   in_tls && /^```sh$/ { in_block=1; next }
   in_block && /^```$/ { in_block=0; next }
   in_block && /docker exec nut-upsd openssl x509 -in/ { print; exit }
-' "$REPO_ROOT/docs/security.md")
+' "$REPO_ROOT/docs/hardening.md")
 
 if [ -z "$readme_cmd" ]; then
-  no 'TLS export command found' 'docs/security.md TLS section has no container-side openssl export command'
+  no 'TLS export command found' 'docs/hardening.md TLS section has no container-side openssl export command'
   report
   exit $?
 fi
