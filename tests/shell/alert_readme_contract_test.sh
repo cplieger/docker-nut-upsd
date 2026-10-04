@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# The README's published alert summary against the alerts/ bundle.
+# docs/monitoring.md's published alert summary against the alerts/ bundle.
 #
-# WHY THIS IS A CONTRACT: the README table is what a reader consults before
+# WHY THIS IS A CONTRACT: the docs/monitoring.md table is what a reader consults before
 # loading the rule file, so an alert added, removed, renamed or re-graded on one
 # side leaves the published inventory lying with nothing to catch it.
 #
 # Reads every file in alerts/ rather than one filename. The folder holds one
-# file per expression language, and the README table publishes the whole
+# file per expression language, and the docs/monitoring.md table publishes the whole
 # bundle, so a rule added in a second language belongs in that table too.
 #
 # Names and severity labels only: the "Fires when" prose is deliberately not
@@ -44,7 +44,7 @@ readme_pairs=$(awk -F '|' '
     next
   }
   in_table { exit }
-' "$REPO_ROOT/README.md" | sort)
+' "$REPO_ROOT/docs/monitoring.md" | sort)
 
 if [ -z "$alert_pairs" ] || [ -z "$readme_pairs" ]; then
   printf 'harness error: could not extract both alert inventories\n' >&2
@@ -52,9 +52,9 @@ if [ -z "$alert_pairs" ] || [ -z "$readme_pairs" ]; then
 fi
 
 if [ "$alert_pairs" = "$readme_pairs" ]; then
-  ok 'README alert names and severities match the alerts/ bundle in both directions'
+  ok 'docs/monitoring.md alert names and severities match the alerts/ bundle in both directions'
 else
-  no 'README alert inventory' "alerts/: $alert_pairs; README.md: $readme_pairs"
+  no 'docs/monitoring.md alert inventory' "alerts/: $alert_pairs; docs/monitoring.md: $readme_pairs"
 fi
 
 report

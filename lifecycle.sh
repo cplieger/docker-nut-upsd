@@ -157,8 +157,9 @@ wait_for_pidfile() {
 # A UPS that resets its own USB link re-enumerates to a new root:root node
 # (networkupstools/nut#1786), and the nut-user driver then sits "Data stale"
 # until the container is recreated. This watchdog keys on sustained stale
-# comms rather than on USB, so it bounces the driver on any transport. README
-# "USB hotplug & comms recovery" owns the operator-facing contract.
+# comms rather than on USB, so it bounces the driver on any transport.
+# docs/how-it-works.md "A UPS that drops off USB" owns the operator-facing
+# contract.
 
 # upsd_probe_host: the host the loopback protocol probes must use. Only the
 # wildcard binds map to loopback; a specific bind is probed where upsd
@@ -374,8 +375,8 @@ restart_ups_driver() {
 # COMMS_BACKOFF_FACTOR-multiplied threshold, so a genuinely-absent UPS stops
 # thrashing host USB perms while staying
 # visible. Each window is monotonic elapsed time since its first stale probe
-# (watchdog_epoch, not summed intervals). README "USB hotplug & comms
-# recovery" sizes it.
+# (watchdog_epoch, not summed intervals). docs/how-it-works.md "Watchdog
+# timing" sizes it.
 comms_watchdog() {
   : "${UPS_NAME:?comms_watchdog requires UPS_NAME}"
   : "${UPS_DRIVER:?comms_watchdog requires UPS_DRIVER}"
@@ -439,7 +440,8 @@ comms_watchdog() {
 # ---------------------------------------------------------------------------
 # With SHUTDOWN_ON_BATTERY_CRITICAL=true the poweroff path (upsmon SHUTDOWNCMD
 # -> nut-shutdown.sh -> D-Bus PowerOff) is otherwise first exercised during a
-# real forced shutdown. README "Alerting" owns the operator-facing contract.
+# real forced shutdown. docs/monitoring.md "Alerting" owns the operator-facing
+# contract.
 
 # dbus_poweroff_path_ok: return 0 when the host D-Bus socket is mounted and
 # logind's own CanPowerOff answers yes — same polkit action as the PowerOff

@@ -307,7 +307,7 @@ done <<<"$credential_table"
 
 # --- 13. the documented and the validated inventories agree ----------------------
 #
-# README.md's environment table is the operator-facing contract; the shipped
+# docs/configuration.md's environment table is the operator-facing contract; the shipped
 # `_check <NAME>` rows are what actually gets validated. Documenting a new
 # generated variable without adding its validation row, or retiring a row
 # while leaving the variable documented, puts an unchecked value into a NUT
@@ -318,13 +318,13 @@ validated="$WORK/validated-vars"
 
 # The sed program matches literal Markdown backticks around environment names.
 # shellcheck disable=SC2016
-sed -n 's/^| `\([A-Z][A-Z0-9_]*\)` |.*/\1/p' "$REPO_ROOT/README.md" \
+sed -n 's/^| `\([A-Z][A-Z0-9_]*\)` |.*/\1/p' "$REPO_ROOT/docs/configuration.md" \
   | sort -u >"$documented"
 awk '/^[[:space:]]+_check(_optional)? [A-Z][A-Z0-9_]* / { print $2 }' "$ENTRYPOINT" \
   | sort -u >"$validated"
 
 if [ ! -s "$documented" ] || [ ! -s "$validated" ]; then
-  no 'validation inventory parsed' 'README.md or the shipped validation rows produced an empty inventory'
+  no 'validation inventory parsed' 'docs/configuration.md or the shipped validation rows produced an empty inventory'
 elif diff -u "$documented" "$validated" >"$WORK/inventory.diff"; then
   ok 'every documented environment variable has a shipped validation row, and every row is documented'
 else
@@ -345,7 +345,7 @@ shipped_default_names="$WORK/shipped-default-names"
 # The sed program matches literal Markdown backticks in the final table cell.
 # shellcheck disable=SC2016
 sed -n 's/^| `\([A-Z][A-Z0-9_]*\)` |.*| `\([^`]*\)` |$/\1=\2/p' \
-  "$REPO_ROOT/README.md" | sort -t '=' -k1,1 >"$documented_defaults"
+  "$REPO_ROOT/docs/configuration.md" | sort -t '=' -k1,1 >"$documented_defaults"
 # The sed program matches literal shell parameter expansion in entrypoint.sh.
 # shellcheck disable=SC2016
 sed -n 's/^: "${\([A-Z][A-Z0-9_]*\):=\(.*\)}"$/\1=\2/p' \
@@ -355,18 +355,18 @@ cut -d= -f1 "$documented_defaults" | sort -u >"$documented_default_names"
 cut -d= -f1 "$shipped_defaults" | sort -u >"$shipped_default_names"
 
 if [ ! -s "$documented_defaults" ] || [ ! -s "$shipped_defaults" ]; then
-  no 'default inventories parsed' 'README.md or entrypoint.sh produced an empty default inventory'
+  no 'default inventories parsed' 'docs/configuration.md or entrypoint.sh produced an empty default inventory'
 elif ! diff -u "$documented_default_names" "$shipped_default_names" >"$WORK/default-inventory.diff"; then
   no 'documented and shipped default inventories match' "$(cat "$WORK/default-inventory.diff")"
 else
   default_mismatches=$(join -t '=' -j1 "$documented_defaults" "$shipped_defaults" \
     -o 0,1.2,2.2 | awk -F= '
       $2 != $3 {
-        printf "%s: README=%s shipped=%s\n", $1, $2, $3
+        printf "%s: docs=%s shipped=%s\n", $1, $2, $3
       }
     ')
   if [ -z "$default_mismatches" ]; then
-    ok 'every literal README default matches its shipped entrypoint assignment'
+    ok 'every literal documented default matches its shipped entrypoint assignment'
   else
     no 'documented defaults match shipped assignments' "$default_mismatches"
   fi

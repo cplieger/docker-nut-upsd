@@ -102,7 +102,7 @@ canonicalize_validated_values
 : "${RBWARNTIME:=43200}"
 
 # USB comms-recovery watchdog cadence (mechanism: lifecycle.sh comms_watchdog;
-# bus prerequisites: README "USB hotplug & comms recovery").
+# bus prerequisites: docs/how-it-works.md "A UPS that drops off USB").
 : "${COMMS_WATCHDOG:=true}"
 : "${COMMS_CHECK_INTERVAL:=15}"
 : "${COMMS_RECOVERY_TIMEOUT:=90}"
@@ -300,7 +300,8 @@ start_nut_daemon() {
 # maxstartdelay (75s). Not redundant with it: at v2.8.5 a maxstartdelay of 0 or
 # below skips the alarm() and then blocks in waitpid() forever
 # (drivers/upsdrvctl.c:879-906), so a mounted ups.conf.user can remove NUT's
-# bound entirely, or raise it past this one (README, custom config override).
+# bound entirely, or raise it past this one (docs/configuration.md, "Your own
+# NUT config files").
 start_nut_daemon "upsdrvctl" 90 /usr/sbin/upsdrvctl start
 # NUT drivers write /var/run/nut/<driver>-<ups>.pid on successful start.
 wait_for_pidfile "UPS driver" "$(driver_pidfile)" "$(driver_binary)" || {

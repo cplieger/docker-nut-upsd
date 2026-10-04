@@ -181,19 +181,19 @@ entry_bound=$(sed -n \
   "$REPO_ROOT/entrypoint.sh")
 readme_bound=$(sed -n \
   "s/.*keep the driver's worst-case start inside \\([0-9][0-9]*\\)s, the outer bound.*/\\1/p" \
-  "$REPO_ROOT/README.md")
+  "$REPO_ROOT/docs/configuration.md")
 
 if [ "$(printf '%s\n' "$entry_bound" | grep -c .)" -ne 1 ] \
   || [ "$(printf '%s\n' "$readme_bound" | grep -c .)" -ne 1 ]; then
-  printf 'harness error: expected one upsdrvctl bound in entrypoint.sh and README.md\n' >&2
+  printf 'harness error: expected one upsdrvctl bound in entrypoint.sh and docs/configuration.md\n' >&2
   exit 1
 fi
 
 if [ "$entry_bound" -eq "$readme_bound" ] && [ "$entry_bound" -gt 75 ]; then
-  ok "upsdrvctl's ${entry_bound}s outer bound matches README.md and exceeds NUT's 75s maxstartdelay default"
+  ok "upsdrvctl's ${entry_bound}s outer bound matches docs/configuration.md and exceeds NUT's 75s maxstartdelay default"
 else
   no 'upsdrvctl startup timeout contract' \
-    "entrypoint=${entry_bound}s README=${readme_bound}s; both must agree above 75s"
+    "entrypoint=${entry_bound}s docs=${readme_bound}s; both must agree above 75s"
 fi
 
 mkdir -p "$WORK/dev/bus"

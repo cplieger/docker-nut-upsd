@@ -1,4 +1,4 @@
-# Example compose for docker-nut-upsd. See the README for all configuration options and hardening.
+# Example compose for docker-nut-upsd. See docs/configuration.md and docs/security.md for all configuration options and hardening.
 services:
   nut-upsd:
     image: ghcr.io/cplieger/docker-nut-upsd:latest
@@ -8,16 +8,16 @@ services:
     environment:
       UPS_NAME: "ups"
       UPS_DESC: "My UPS"
-      UPS_DRIVER: "usbhid-ups"  # see NUT hardware compatibility list
-      UPS_PORT: "auto"  # auto = USB auto-detection
+      UPS_DRIVER: "usbhid-ups"  # the driver the NUT hardware list names for your UPS model
+      UPS_PORT: "auto"  # auto finds a USB UPS. For serial and network UPSes, see docs/configuration.md
       API_USER: "monuser"
-      API_PASSWORD: "secret"  # change this
+      API_PASSWORD: "secret"  # change this unless a Synology NAS uses this server. Your NUT clients log in with it
 
     ports:
       - "3493:3493"
 
-    # USB hotplug: bind the bus LIVE (not via devices:) plus the USB-major cgroup rule, so a
-    # UPS that re-enumerates to a new node stays reachable without a recreate. See README.
+    # Keep both USB lines below. Together they let the driver reach a UPS that
+    # drops off USB and comes back. A devices: mapping cannot do that.
     device_cgroup_rules:
       - "c 189:* rmw"
     volumes:
