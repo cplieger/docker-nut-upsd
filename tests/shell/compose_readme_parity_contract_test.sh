@@ -9,7 +9,8 @@
 # compose_usb_hotplug_contract_test.sh counts the live bind and the cgroup
 # rule). So a compose.yaml-only edit leaves the suite green while the README's
 # Quick start -- the copy a reader is likeliest to paste -- creates a
-# container whose name the README's own Alerting section no longer selects.
+# container whose name the alert rules docs/monitoring.md ships no longer
+# select.
 #
 # Comments are stripped on both sides on purpose: the two copies word their
 # USB-hotplug comment differently, each correct in its own context. Only the

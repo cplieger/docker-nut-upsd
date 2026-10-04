@@ -121,7 +121,7 @@ new generated file should respect that same override hook.
     `patches/` as a GPL-2.0-or-later exception;
   - this checklist.
   Removing the CVE-2026-54161 NOTIFYCMD/execvp backport additionally requires
-  re-reading the [README's Alerting section](README.md#alerting). Re-affirm both
+  re-reading the [alerting section of the monitoring page](docs/monitoring.md#alerting). Re-affirm both
   claims in its `NOTIFYCMD` paragraph against the new pin: NUT executes the
   command directly, and `NOTIFYCMD` must be an executable path with arguments or
   shell snippets wrapped in a script. Upstream master parses `NOTIFYCMD` into an

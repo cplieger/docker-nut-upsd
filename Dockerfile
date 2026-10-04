@@ -20,9 +20,9 @@ WORKDIR /build/libmodbus
 # off to build the portable classic-termios path (as 3.1.x did). Cost: the three
 # drivers taking an operator baud rate (apc_modbus, generic_modbus,
 # adelsystem_cbi) get B9600 for any rate the classic set cannot express, e.g.
-# 14400, and libmodbus says so only at debug -- the README warns the operator
-# (termios2 arrived in stephane/libmodbus#761). Remove once upstream builds
-# cleanly on musl.
+# 14400, and libmodbus says so only at debug -- docs/configuration.md warns
+# the operator (termios2 arrived in stephane/libmodbus#761). Remove once
+# upstream builds cleanly on musl.
 RUN wget -qO libmodbus.tar.gz \
       "https://github.com/stephane/libmodbus/releases/download/${LIBMODBUS_VERSION}/libmodbus-${LIBMODBUS_VERSION#v}.tar.gz" \
     && printf '%s  %s\n' "${LIBMODBUS_SHA256}" libmodbus.tar.gz | sha256sum -c - \

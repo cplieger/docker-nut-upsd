@@ -3,35 +3,33 @@
 [![Image Size](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/docker-nut-upsd/badges/size.json)](https://github.com/cplieger/docker-nut-upsd/pkgs/container/docker-nut-upsd) [![Platforms](https://img.shields.io/badge/platforms-amd64%20%7C%20arm64-blue)](https://github.com/cplieger/docker-nut-upsd/pkgs/container/docker-nut-upsd) [![base: Alpine](https://img.shields.io/badge/base-Alpine-0D597F?logo=alpinelinux)](https://github.com/cplieger/docker-nut-upsd/blob/main/Dockerfile) [![SBOM](https://img.shields.io/badge/SBOM-SPDX-1D4ED8)](https://github.com/cplieger/docker-nut-upsd/releases)
 
 <!-- hub-overview BEGIN -->
-Monitor your UPS and let networked machines shut down gracefully during power outages.
+docker-nut-upsd is a container for Network UPS Tools (NUT), set up from compose settings, with TLS and USB reconnect. It shares the status of the UPS on this machine with your network. It has no web page.
 
 ## What it does
 
-Monitors your UPS (uninterruptible power supply) and exposes its status over the network so other machines can shut down gracefully during a power outage.
+Your NAS, servers and other NUT clients follow one UPS and shut down cleanly when its battery runs low.
 
-The container runs the Network UPS Tools (NUT) upsd daemon in Alpine Linux. The entrypoint script generates all NUT configuration files (`ups.conf`, `upsd.conf`, `upsd.users`, `upsmon.conf`) from environment variables at startup.
+- Sets up NUT from a few compose settings, with no NUT config files to write.
+- Works with USB, serial, Modbus and network (SNMP) UPSes, on `amd64` and `arm64`.
+- Reconnects to a UPS that drops off USB and comes back, without a container restart.
+- Encrypts the connection for clients that support TLS. Clients without TLS still connect.
+- Can also power off this machine on low battery. This is off by default.
 
-- Supports USB HID, Modbus, and SNMP UPS devices
-- Exposes the standard NUT protocol on port 3493 for network clients
-- TLS (NUT STARTTLS) on by default: a self-signed certificate is generated at first boot, or mount your own at `/etc/nut/upsd.pem`; legacy cleartext clients keep working (see [TLS](#tls-starttls))
-- Optional host shutdown via D-Bus when the UPS reaches critical battery (`SHUTDOWN_ON_BATTERY_CRITICAL=true`)
-- Recovers from lost UPS communications without a restart: a built-in comms watchdog restarts the driver after sustained stale data on any transport - USB re-enumeration is the common case (see [USB hotplug & comms recovery](#usb-hotplug--comms-recovery))
-- Custom config override: mount `/etc/nut/{ups.conf,upsd.conf,upsd.users,upsmon.conf}.user` to bypass env-var generation. You then own every directive in that file, including the ones the rest of the image reads:
-  - `ups.conf.user`: keep the section name (`[...]`) equal to `UPS_NAME` and its `driver` directive equal to `UPS_DRIVER`. The healthcheck, generated `upsmon.conf` MONITOR line, and comms watchdog use the section name. NUT names the PID file from the driver directive and section, while the startup gate waits for `/var/run/nut/$UPS_DRIVER-$UPS_NAME.pid`. Either mismatch is fatal at boot: the container logs `UPS driver did not confirm a live PID for the expected binary in time` and exits about five seconds in, so your restart policy brings it straight back to the same state. A mounted `ups.conf.user` also makes `LOWBATT_PERCENT` and `LOWBATT_RUNTIME` inert
-  - `ups.conf.user`: on a serial Modbus driver (`apc_modbus`, `generic_modbus`, `adelsystem_cbi`), keep the baud rate to one libmodbus's classic `_get_termios_speed` table maps — every standard POSIX `B*` rate is there, 110 through 115200 and beyond (9600 is each of those drivers' own default), but a non-standard rate such as 14400 or 28800 is not. libmodbus is built here without termios2 support, which does not compile on Alpine/musl, so `baudrate 14400` or `ser_baud_rate 28800` is accepted, silently opened at 9600, and the driver never reaches the device: what you see is a comms failure, with nothing naming the baud rate
-  - `ups.conf.user`: keep the driver's worst-case start inside 90s, the outer bound the entrypoint puts on `upsdrvctl start`; NUT's own `maxstartdelay` defaults to 75s per driver and `maxretry` to 1 attempt ([ups.conf](https://networkupstools.org/docs/man/ups.conf.html)), so raising either — `maxretry 2` alone allows up to 75 + 5 + 75 = 155s — can push a configuration NUT considers healthy past that bound, and the container logs `upsdrvctl start failed or timed out at boot` and exits, leaving your restart policy to loop it
-  - `upsd.conf.user`: keep `LISTEN` on `API_ADDRESS` and `API_PORT`, where those same probes look; a divergent `LISTEN` fails every one of them against a correctly-serving upsd, the container exits after about a minute of failed probes, and your restart policy brings it back into the same state
-  - `upsmon.conf.user`: keep a `SHUTDOWNCMD` line, or a forced shutdown takes no action on the host even with `SHUTDOWN_ON_BATTERY_CRITICAL=true`; `upsmon` prints `Warning: no shutdown command defined!` once at startup
-  - `upsmon.conf.user`: keep `POWERDOWNFLAG /var/run/nut-secrets/killpower` at that exact path, or the comms watchdog cannot stand down during a real host poweroff. A driver bounce causes a bounded FSD blackout for networked secondaries and skips the HOSTSYNC wait because NUT v2.8.5 reads the secondary-login count as zero after the upsd-side failure. The boot-time stale-flag clear also stops matching
-  - `upsmon.conf.user`: keep the `NOTIFYCMD` line and the `EXEC` notify flags (see Alerting)
-- Configurable low-battery thresholds
-- Clean signal handling: SIGTERM gracefully stops all NUT services
+## Who it is for
 
+docker-nut-upsd is built for a UPS on an always-on Linux machine that runs Docker, shared with every machine on the same power. It checks every setting before it starts and ships alert rules for UPS events. You need a UPS listed on the [NUT hardware list](https://networkupstools.org/stable-hcl.html), connected to that machine by USB, serial or the network.
+
+Two other projects suit a different setup:
+
+- Consider [NUT for Unraid](https://github.com/desertwitch/NUT-unRAID) if your UPS plugs into an Unraid server. The plugin adds NUT to Unraid itself, with a settings frontend and frequent NUT updates.
+- Consider [gpdm/nut-upsd](https://github.com/gpdm/nut/blob/master/nut-upsd/README.md) if you want one container to monitor several UPSes from NUT config files you write.
+
+docker-nut-upsd is free software under the Apache-2.0 license.
 <!-- hub-overview END -->
 
 ## Quick start
 
-Available from both `ghcr.io/cplieger/docker-nut-upsd` and `docker.io/cplieger/docker-nut-upsd`; identical images and tags.
+The image is on GitHub Container Registry and Docker Hub, for `amd64` and `arm64`. This is the [`compose.yaml`](compose.yaml) in this repository.
 
 ```yaml
 services:
@@ -43,186 +41,111 @@ services:
     environment:
       UPS_NAME: "ups"
       UPS_DESC: "My UPS"
-      UPS_DRIVER: "usbhid-ups"  # see NUT hardware compatibility list
-      UPS_PORT: "auto"  # auto = USB; use a device node such as /dev/ttyUSB0 for serial
+      UPS_DRIVER: "usbhid-ups"  # the driver the NUT hardware list names for your UPS model
+      UPS_PORT: "auto"  # auto finds a USB UPS. For serial and network UPSes, see docs/configuration.md
       API_USER: "monuser"
-      API_PASSWORD: "secret"  # change this
+      API_PASSWORD: "secret"  # change this unless a Synology NAS uses this server. Your NUT clients log in with it
 
     ports:
       - "3493:3493"
 
-    # USB hotplug: bind the bus LIVE (not via devices:) plus the USB-major cgroup
-    # rule, so a UPS that re-enumerates to a new node stays reachable without a
-    # recreate. See "USB hotplug & comms recovery" below.
+    # Keep both USB lines below. Together they let the driver reach a UPS that
+    # drops off USB and comes back. A devices: mapping cannot do that.
     device_cgroup_rules:
       - "c 189:* rmw"
     volumes:
       - "/dev/bus/usb:/dev/bus/usb"
 ```
 
+1. Find your UPS model on the [NUT hardware list](https://networkupstools.org/stable-hcl.html) and set `UPS_DRIVER` to the driver it names.
+2. Change `API_PASSWORD` to a password of 12 characters or more. If a Synology NAS will use this server, keep `API_USER`, `API_PASSWORD` and `UPS_NAME` at their defaults instead. The NAS logs in only as `monuser` with `secret`, to a UPS named `ups`.
+3. Run `docker compose up -d`.
+
+Run `docker logs nut-upsd`. You should see `NUT services started; supervising upsmon`. If you see `upsdrvctl start failed or timed out at boot`, the driver could not reach the UPS. Check `UPS_DRIVER` and the USB cable.
+
+## Connecting your other machines
+
+Point each NUT client at this machine on port 3493, with `API_USER` and `API_PASSWORD`. Use the address other devices on your network reach this machine at, such as `192.168.1.10`, not `localhost`.
+
+- In Home Assistant, add the [Network UPS Tools (NUT)](https://www.home-assistant.io/integrations/nut/) integration under **Settings** > **Devices & services**. `API_USER` can read the UPS but cannot run UPS commands, such as a battery test, from Home Assistant.
+- On a Synology NAS, open **Control Panel** > **Hardware & Power** > **UPS**, turn on UPS support, choose **Synology UPS server** and enter this machine's address. The NAS needs the defaults `monuser`, `secret` and `ups`.
+- On a Linux machine that runs NUT's `upsmon`, add this line to `upsmon.conf`:
+
+```text
+MONITOR ups@192.168.1.10:3493 1 monuser your-password secondary
+```
+
+When the battery runs low, this server tells every client to shut down and waits up to `HOSTSYNC` seconds (default 15) for them to log off. One container serves one UPS.
+
 ## Configuration reference
 
-### Environment variables
+Settings are environment variables in `compose.yaml`. The container reads them at each start and writes NUT's config files from them, so recreate it with `docker compose up -d` after a change.
 
 | Variable | Description | Default |
 | --- | --- | --- |
-| `UPS_NAME` | NUT UPS identifier used in config files and queries | `ups` |
-| `UPS_DESC` | Human-readable UPS description shown in NUT clients; this image refuses control bytes, `"`, `\` and `#`; NUT discards bytes outside ASCII 0x20-0x7F and prints one warning per discarded byte | `My UPS` |
-| `UPS_DRIVER` | NUT driver for your UPS model (see [NUT HCL](https://networkupstools.org/stable-hcl.html)); this image emits `pollonly` for `usbhid-ups`, so the driver polls the UPS instead of reading its USB interrupt pipe (`upsc` reports `driver.flag.pollonly`); omit `pollonly` from a mounted `ups.conf.user` to opt back in | `usbhid-ups` |
-| `UPS_PORT` | UPS port: `auto` (USB), `/dev/*` (serial), or `host[:port]` for network drivers (`snmp-ups`, `apcupsd-ups`); network drivers refuse `auto` and `/dev/*`; USB drivers ignore this value entirely and NUT warns if you set an unusual one; no whitespace, `"`, `\` or `#` | `auto` |
-| `API_USER` | Username for NUT network clients: letters, numbers, `_`, or `-`; 510-byte maximum; declared `upsmon secondary` (see [NUT accounts and roles](#nut-accounts-and-roles)) | `monuser` |
-| `API_PASSWORD` | Password for the NUT API user (entrypoint warns on weak credentials); no `"`, `\` or `#` because NUT config parsing would alter the credential; 501-byte maximum; a value that NUT would store as an empty word is refused. A whitespace-bearing `API_PASSWORD` or `ADMIN_PASSWORD` is accepted with a startup warning, but only a client that quotes the value per the NUT network protocol can authenticate; the bundled NUT clients send `PASSWORD` unquoted | `secret` |
-| `API_ADDRESS` | Listen address for upsd; write IPv6 bare (`::1`), not bracketed; brackets are added internally where NUT needs them; no whitespace, `"`, `\` or `#` | `0.0.0.0` |
-| `API_PORT` | Listen port for upsd | `3493` |
-| `API_TLS` | Offer STARTTLS on the upsd listener; self-signed certificate unless you mount `/etc/nut/upsd.pem` (see [TLS](#tls-starttls)) | `true` |
-| `LOWBATT_PERCENT` | Low-battery percentage; a non-zero value enables `ignorelb`; `0` disables this axis and leaves the UPS hardware default in effect when it is the only threshold set; `100` asserts low battery below full charge | Hardware default |
-| `LOWBATT_RUNTIME` | Low-battery runtime in seconds; a non-zero value enables `ignorelb`; `0` disables this axis and leaves the UPS hardware default in effect when it is the only threshold set | Hardware default |
-| `POLLFREQ` | Seconds between upsmon's polls of upsd; `1` or more | `5` |
-| `POLLFREQALERT` | Seconds between upsmon's polls of upsd when on battery; `1` or more | `5` |
-| `DEADTIME` | Seconds before declaring UPS stale; this image requires at least the larger of `POLLFREQ` and `POLLFREQALERT`, and upstream advises three times that interval | `15` |
-| `FINALDELAY` | Seconds between shutdown warning and actual shutdown (`0` = no delay) | `5` |
-| `HOSTSYNC` | Seconds to wait for secondary hosts to disconnect (`0` = do not wait) | `15` |
-| `NOCOMMWARNTIME` | Seconds before warning about lost UPS communication (`0` = warn on every poll) | `300` |
-| `RBWARNTIME` | Seconds between "replace battery" warnings (`0` = warn on every poll) | `43200` |
-| `SHUTDOWN_ON_BATTERY_CRITICAL` | Power off the host via D-Bus when NUT declares the UPS critical. Low battery is the usual trigger; the generated `upsmon.conf` pins `OFFDURATION 30`, `OBLBDURATION 0`, and `ALARMCRITICAL 1` at their NUT v2.8.5 values, so later upstream default changes do not change this image; NUT also has presume-dead arms for CAL, BYPASS, ALARM and OFF | `false` |
-| `DBUS_PROBE_INTERVAL` | Seconds between D-Bus poweroff-path liveness probes when host shutdown is enabled (`0` disables); keep the `UPSPowerOffPathBroken` alert window above twice this interval because the alert stays active when the error line recurs, not from a latched state | `300` |
-| `ADMIN_PASSWORD` | Password for the NUT admin user (set/FSD actions); auto-generated and cached if unset when this image generates `upsd.users`; a mounted `upsd.users.user` owns that account instead; no `"`, `\` or `#` because NUT config parsing would alter the credential; 501-byte maximum; a value that NUT would store as an empty word is refused | Random (cached when generated) |
-| `COMMS_WATCHDOG` | Enable the comms-recovery watchdog: restarts the UPS driver after sustained stale comms, on any transport (see [USB hotplug & comms recovery](#usb-hotplug--comms-recovery)) | `true` |
-| `COMMS_CHECK_INTERVAL` | Seconds between watchdog comms probes (`0` disables) | `15` |
-| `COMMS_RECOVERY_TIMEOUT` | Seconds of continuous stale comms before the watchdog restarts the driver | `90` |
-| `COMMS_FAST_RETRIES` | Fast (stage-1) restart attempts before backing off; see recovery notes below | `3` |
-| `COMMS_BACKOFF_FACTOR` | Stage-2 cadence multiplier on COMMS_RECOVERY_TIMEOUT once fast retries spent | `5` |
+| `UPS_NAME` | Name of the UPS that clients ask for, as in `ups@host` | `ups` |
+| `UPS_DESC` | Description shown in NUT clients. No `"`, `\` or `#` | `My UPS` |
+| `UPS_DRIVER` | NUT driver for your UPS model, from the [NUT hardware list](https://networkupstools.org/stable-hcl.html) | `usbhid-ups` |
+| `UPS_PORT` | `auto` for USB, a device node such as `/dev/ttyUSB0` for serial, or `host[:port]` for a network UPS | `auto` |
+| `API_USER` | User name your NUT clients log in with. Letters, numbers, `_` and `-` | `monuser` |
+| `API_PASSWORD` | Password for `API_USER`. Use 12 characters or more. No `"`, `\` or `#` | `secret` |
+| `ADMIN_PASSWORD` | Password for the `admin` account, which can run UPS commands. Generated and kept when unset | Random (cached when generated) |
+| `API_TLS` | Offer TLS encryption to clients that ask for it | `true` |
+| `LOWBATT_PERCENT` | Battery percentage at which the UPS counts as low. `0` turns this threshold off | Hardware default |
+| `LOWBATT_RUNTIME` | Seconds of runtime left at which the UPS counts as low. `0` turns this threshold off | Hardware default |
+| `SHUTDOWN_ON_BATTERY_CRITICAL` | Power off the machine running this container when the battery is critical | `false` |
+| `COMMS_WATCHDOG` | Restart the UPS driver when the UPS stops answering, such as after it drops off USB | `true` |
 
-`DEADTIME` below the larger poll interval is refused: NUT declares the UPS dead as soon as one poll is late, and with `SHUTDOWN_ON_BATTERY_CRITICAL=true` that powers the host off during a short mains dip.
-
-A non-zero `LOWBATT_PERCENT` or `LOWBATT_RUNTIME` enables `ignorelb`. When `ignorelb` is active, the UPS must report `battery.charge`, or it must report both `battery.runtime` and its own `battery.runtime.low`. The generated `override.battery.charge.low` supplies the percentage threshold. If one axis is `0` and the other is non-zero, the container starts normally and low-battery detection depends entirely on the surviving axis, the UPS reporting it, and its `.low` companion. A `0` supplied alone or on both axes generates no override; the UPS's own low-battery flag decides, and the driver's `ignorelb` refusal-to-start condition is not reached. If `ignorelb` is active and the UPS reports neither usable reading, the driver logs `upsdrvctl start failed or timed out at boot` and exits, so the restart policy repeats the failure.
-
-When battery power becomes critical, `upsmon` runs the shutdown command and exits. With host shutdown disabled, it logs the forced shutdown and leaves the host running; the example restart policy repeats this cycle until mains power returns.
-
-### NUT accounts and roles
-
-The generated `upsd.users` defines three accounts, matching canonical NUT topology (the box that owns the UPS runs the single `upsmon primary`; networked clients are secondaries):
-
-- **`admin`**: upsd `set`/`FSD` actions and instant commands, guarded by `ADMIN_PASSWORD`.
-- **`local_upsmon`**: reserved internal account for the bundled `upsmon`, which holds the one `upsmon primary` slot (the authority to request a forced shutdown for all clients). Its password is auto-generated and cached exactly like `ADMIN_PASSWORD`; it never needs to leave the container. `API_USER` may not take this name (or `admin`).
-- **`API_USER`**: the network-facing client account, declared `upsmon secondary`: remote machines authenticate with it to follow UPS status and shut themselves down, but cannot request a forced shutdown for everyone else.
-
-If you mount exactly one of `upsd.users.user` / `upsmon.conf.user`, the generated half falls back to the shared `API_USER`/`API_PASSWORD` credential pair (logged at `level=warn`); the internal account only spans the two files when both are generated. Your mounted half must grant that pair `upsmon primary`, or `upsd` refuses the bundled `upsmon`'s forced-shutdown request.
-
-### Volumes
+[Configuration](docs/configuration.md) lists all 26 settings and covers serial and network UPSes, low-battery thresholds, host shutdown and your own NUT config files.
 
 | Mount | Description |
 | --- | --- |
-| `/dev/bus/usb` | USB bus, bound live (not `devices:`); required for USB drivers and dual-mode (serial/USB) drivers left at the `auto` default; see hotplug notes |
-| `/run/dbus/system_bus_socket` | Host D-Bus socket (required only if `SHUTDOWN_ON_BATTERY_CRITICAL=true`) |
-| `/etc/nut/{ups.conf,upsd.conf,upsd.users,upsmon.conf}.user` | Custom NUT config overrides; bypasses env-var generation |
-| `/etc/nut/upsd.pem` | Your own TLS certificate + private key (one PEM); replaces the self-signed one. Never modified, so mount it read-only |
+| `/dev/bus/usb` | The USB bus, bound live under `volumes:`. Needed for a USB UPS, and for a serial-or-USB driver with `UPS_PORT` at `auto` |
+| `/run/dbus/system_bus_socket` | Host D-Bus socket. Needed only with `SHUTDOWN_ON_BATTERY_CRITICAL=true` |
+| `/etc/nut/{ups.conf,upsd.conf,upsd.users,upsmon.conf}.user` | Your own NUT config files, replacing the generated ones |
+| `/etc/nut/upsd.pem` | Your own TLS certificate and private key in one PEM file. Never modified, so mount it read-only |
 
-Anything mounted at `/etc/nut` is left exactly as provided (no chown, no chmod). It must already be readable by the `nut` user, and a whole-directory mount must also be traversable.
-
-For a serial UPS, set `UPS_PORT` to the device node, such as `/dev/ttyUSB0`, and grant the node through `devices:` with `- /dev/ttyUSB0:/dev/ttyUSB0` (or the node your UPS presents). Every driver in this image opens the device as `nut`. Give that user access with a host-side node-mode change, or mount an `ups.conf.user` that sets `user = root`. Compose `group_add:` does not work because the driver resets supplementary groups with `initgroups` before it opens the port. If the adapter re-enumerates, use a live bind with a cgroup rule for its device major instead.
-
-> For a USB UPS, pair the live `/dev/bus/usb` bind with `device_cgroup_rules: ["c 189:* rmw"]` (USB major 189). A static `devices:` mapping is **not** sufficient; see [USB hotplug & comms recovery](#usb-hotplug--comms-recovery).
-
-## Healthcheck
-
-The built-in healthcheck runs `upsc` against upsd on its configured listen address (loopback for the default `API_ADDRESS=0.0.0.0`) to verify the NUT driver is communicating with the UPS hardware. It becomes unhealthy when the UPS device is disconnected, the driver failed to start, or upsd is not responding, and recovers once the device is reconnected and the driver re-establishes communication. The [comms watchdog](#usb-hotplug--comms-recovery) actively drives that recovery whenever comms go stale, so the unhealthy window is bounded by `COMMS_RECOVERY_TIMEOUT` rather than lasting until you recreate the container. Health is a live protocol probe, never a stored result, so a restart starts from the same state as a first boot. Two failures end the container instead of leaving it running unhealthy: a daemon that fails to start exits the container non-zero at boot, and an upsd that stops answering the protocol for about a minute exits it non-zero too, so your restart policy decides in both cases.
-
-## TLS (STARTTLS)
-
-upsd offers TLS on its listener by default (`API_TLS=true`) via the NUT protocol's `STARTTLS` command, with `DISABLE_WEAK_SSL` set so only TLS 1.2+ is accepted. STARTTLS is **opportunistic**: a client that sends `STARTTLS` gets an encrypted session; a client that never asks keeps talking cleartext exactly as before, so enabling it breaks no existing client.
-
-The certificate, in order of precedence:
-
-1. **Your own certificate**: mount a single PEM containing the certificate followed by its private key at `/etc/nut/upsd.pem`. The mount itself is never modified (no chown, no chmod, no rewrite), so a `600 root:root` read-only (`:ro`) mount works as-is. At every boot the entrypoint copies it to an internal working copy at `/etc/nut/upsd-mounted.pem` that upsd can read after dropping privileges; a certificate rotated on the host is picked up at the next restart.
-2. **Self-signed fallback**: with nothing mounted, the entrypoint generates an EC P-256 certificate (`CN=nut-upsd`, 825-day validity) at first boot and logs its path and SHA-256 fingerprint. It survives restarts but not a container recreation (a fresh one is minted and logged).
-
-Client-side verification is the client's choice; see the [NUT user manual](https://networkupstools.org/documentation.html) for `upsmon`'s `FORCESSL` / `CERTVERIFY` directives. A verifying client must trust the serving certificate. The provisioned PEM contains the private key and must not leave the container. Export only the certificate with the container's OpenSSL:
-
-```sh
-docker exec nut-upsd openssl x509 -in /etc/nut/upsd-selfsigned.pem -outform PEM > upsd-selfsigned.crt
-docker exec -i nut-upsd openssl x509 -noout -fingerprint -sha256 < upsd-selfsigned.crt
-```
-
-Compare the second command's SHA-256 fingerprint with the fingerprint in the container log. Alternatively, mount your own CA-issued certificate and private key at `/etc/nut/upsd.pem`. Clients that skip verification (the default for `upsc` and `upsmon`) get encryption against passive sniffing but no protection from an active man-in-the-middle.
-
-Set `API_TLS=false` to serve cleartext only: no certificate is provisioned, `STARTTLS` is answered with an error. If you mount `upsd.conf.user`, your file owns the TLS directives entirely (and the `LISTEN` coupling listed under "What it does"). The certificate is still provisioned whenever `API_TLS=true`, but upsd serves it only if your override names it in `CERTFILE`; if `CERTFILE` is absent, upsd serves cleartext without a startup warning. Reference the working copy that boot provisions: `/etc/nut/upsd-mounted.pem` when you mount `/etc/nut/upsd.pem`, otherwise `/etc/nut/upsd-selfsigned.pem`. Exactly one is provisioned per boot (mounted-PEM precedence) and the unselected copy is removed, so an override naming the other path fails at upsd startup instead of serving stale key material.
-
-## USB hotplug & comms recovery
-
-Many USB UPSes drop and re-establish their USB link periodically on their own firmware resets; the CyberPower Elite PFC line is a well-known example ([networkupstools/nut#1786](https://github.com/networkupstools/nut/issues/1786)). Each reset **re-enumerates** the UPS to a new `/dev/bus/usb` node, owned `root:root` by the kernel.
-
-A `devices: - /dev/bus/usb:/dev/bus/usb` mapping is frozen at container start, so it never shows the new node, and the container's cgroup allowlist covers only the minors present at start. Both are fixed in the compose example above: bind the bus **live** with `volumes: - /dev/bus/usb:/dev/bus/usb`, and add `device_cgroup_rules: - "c 189:* rmw"` for any USB-major (189) minor.
-
-With both in place, the **comms watchdog** (on by default) closes the loop: it probes `upsd` every `COMMS_CHECK_INTERVAL` seconds and, after `COMMS_RECOVERY_TIMEOUT` seconds of continuous stale data, re-asserts the `nut` group on the bus and restarts the driver, which re-opens the re-enumerated device cleanly. The watchdog itself keys on stale comms, not on USB, so it also recovers an `snmp-ups` or serial driver whose device stopped answering. Re-asserting the `nut` group on `/dev/bus/usb` is its one USB-specific step and runs only for a driver that needs the bus.
-
-Recovery has two stages. It retries at a fast cadence for the first `COMMS_FAST_RETRIES` attempts. A failed restart logs at `error` on any attempt, and the watchdog escalates its progress line to `error` from the last fast attempt onward. It then retries every `COMMS_RECOVERY_TIMEOUT × COMMS_BACKOFF_FACTOR` seconds, which limits churn while the UPS is absent and still detects its return. A failed first restart logs approximately `COMMS_RECOVERY_TIMEOUT` after comms go stale. The progress-line escalation follows after `COMMS_FAST_RETRIES × (COMMS_RECOVERY_TIMEOUT + COMMS_CHECK_INTERVAL)` plus driver stop/start time. During host poweroff, the watchdog stands down while NUT's `killpower` flag exists. The default recovery timeout also stays above the approximately 60-second upsd supervision limit.
-
-Set `COMMS_WATCHDOG=false` to disable it. It is a no-op while comms are healthy.
-
-## Alerting
-
-nut-upsd has no metrics endpoint; its operational state is in its logs. Its `upsmon` notification handler logs a structured `event="<TYPE>"` line to the container log for each event in the closed set that the generated `upsmon.conf` wires to it (`ONLINE`, `ONBATT`, `LOWBATT`, `FSD`, `SHUTDOWN`, `COMMOK`, `COMMBAD`, `NOCOMM`, `REPLBATT`, `NOPARENT`, `OFF`, `BYPASS`, `OVER`, `CAL`, `ALARM`, `OTHER`). Ship the container's logs to Loki (Grafana Alloy's Docker log discovery does this with no configuration) and evaluate the rules in [`alerts/logql.yaml`](alerts/logql.yaml) with [Loki's ruler](https://grafana.com/docs/loki/latest/alert/); firing alerts deliver through your Alertmanager exactly like Prometheus metric alerts. They cover:
-
-| Alert | Fires when | Severity |
-| --- | --- | --- |
-| `UPSOnBattery` | an `ONBATT` event with no `ONLINE` after it in the window: mains power was lost and the UPS took the load onto its battery | warning |
-| `UPSLowBattery` | a `LOWBATT` event: the UPS raised its low-battery flag (on battery plus low battery starts the shutdown sequence) | critical |
-| `UPSForcedShutdown` | an `FSD`/`SHUTDOWN` event: the shutdown sequence has started | critical |
-| `UPSHostSyncExpired` | `upsmon` logged `Host sync timer expired, forcing shutdown`: a secondary was still logged in when HOSTSYNC ran out, so the primary shut down without it | warning |
-| `UPSNotifyExecFailed` | `upsmon` could not execute `NOTIFYCMD`, so structured UPS event records stopped | warning |
-| `UPSCommsLost` | a `NOCOMM` event: upsmon could not reach the UPS for `NOCOMMWARNTIME` seconds (default 300) | warning |
-| `UPSCommsRepaired` | the container logged `comms watchdog UPS comms recovered`: the watchdog restarted the driver after stale communication and communication came back, with the outage duration and restart count in the record; a recovery without a watchdog driver restart is outside this alert | warning |
-| `UPSHardwareFault` | a `REPLBATT`/`ALARM` event: the UPS reports a worn or missing battery, a fan failure, overheat, or a charger fault | warning |
-| `UPSProtectionDegraded` | a `CAL`/`BYPASS`/`OVER` event: the UPS is calibrating, no longer protects the load, or the load exceeds its rating | warning |
-| `UPSProtectionUnavailable` | a `NOPARENT`/`OFF` event: forced shutdown cannot power off the host, or the UPS is off or asleep | warning |
-| `UPSPowerOffPathBroken` | the D-Bus poweroff-path probe logs `unreachable`: host shutdown is enabled but a forced shutdown could not power off the host right now | warning |
-| `UPSPowerOffFailed` | all D-Bus `PowerOff` calls failed, or an accepted call was later refuted, during a forced shutdown | critical |
-| `UPSContainerError` | the container logs a `level=error` line of its own: a refused environment variable, a daemon start failure, a comms watchdog whose driver restart failed on any attempt or that is still restarting from its last fast retry onward, or a forced-shutdown path line | warning |
-
-The generated `upsmon.conf` sets a `NOTIFYCMD` that writes each configured UPS event to the log, with `EXEC` on the relevant `NOTIFYFLAG`s. If you supply your own config by mounting `upsmon.conf.user`, keep the `NOTIFYCMD` line and the `EXEC` notify flags or these log lines (and the alerts that key on them) will not appear. Note that `NOTIFYCMD` is executed directly, with no shell, receiving the message as `$1` (the CVE-2026-54161 backport, matching NUT v2.8.6 semantics), so its value must be the path to an executable; wrap any shell snippet or command-with-arguments in a small script and point `NOTIFYCMD` at it.
-
-Thresholds, `for:` windows, and the `severity` labels are starting points; adjust the `container` selector to your deployment and route by whatever labels your Alertmanager uses.
+| Port | Description |
+| --- | --- |
+| `3493` | The NUT protocol, for your NUT clients |
 
 ## Security
 
-NUT, libmodbus, and net-snmp are built from pinned upstream sources. Four [checked-in backports](patches/) cover `NOTIFYCMD` command injection, a USB descriptor out-of-bounds read, and two USB reconnect deadlocks. Each patch header names its upstream commit, and all four patches are removed with NUT v2.8.6. The image embeds a CycloneDX fragment for these source-built components so scanners include them in the signed release SBOM.
+Your clients shut down on what this server reports, and anyone who can reach port 3493 can read the UPS status without a password. Keep the port on your own network, and change `API_PASSWORD` from `secret` unless a Synology NAS uses this server. TLS is on by default, with a certificate the container creates. A client that does not check that certificate gets an encrypted connection but cannot tell this server from an impostor. The PEM file inside the container holds the private key, so export only the certificate, as [Security](docs/security.md#tls-starttls) shows.
 
-Accepted scanner findings: Grype reports the unused BusyBox `wget` applet's unfixed CVE-2025-60876; hadolint reports unpinned `apk`; semgrep reports the required root user and two `IFS` save/restore false positives in `validate.sh`. Current results are in the repository's Security tab.
+The container starts as root. With the generated configuration, the UPS driver and the server then run as the `nut` user. `upsmon` keeps a root parent process to run the shutdown command. The live USB bind gives the container's `nut` group read and write access to every USB device on the host. Members of a host group with the same group ID get that access too. Host shutdown does not work with Docker user-namespace remapping under systemd-logind's default policy. [Security](docs/security.md) covers TLS certificates, privileges and what the image contains.
 
-The entrypoint rejects control characters and NUT config delimiters before it writes environment values. Credential fields reject the bytes listed in the configuration table. Password fields also refuse values longer than 501 bytes and values that NUT would store as an empty word.
+## Troubleshooting
 
-The container starts as root for config ownership and USB access, then the NUT daemons drop to the `nut` user. It works with `no-new-privileges`. Host shutdown is disabled by default and requires an explicit D-Bus opt-in.
+The healthcheck asks the server for the UPS status every 30 seconds. Unhealthy means the UPS is unplugged, the driver failed, or the server stopped answering. When the UPS drops off USB, the watchdog restarts the driver after 90 seconds of stale data and the container turns healthy again once the UPS answers. If the server stops answering for about a minute, the container exits and your restart policy starts it again.
 
-NUT clients make shutdown decisions from the status that `upsd` serves. Protect port 3493 with strong API and admin passwords and restrict who can reach it. The listener offers STARTTLS with TLS 1.2 or later by default; see [TLS](#tls-starttls) for certificate verification limits.
+- The log shows `/dev/bus/usb not found`. Put back the two USB lines from the example.
+- The container stops with `env var contains` and a character name. Remove that character from the variable the line names.
+- The container restarts in a loop after the battery ran low with host shutdown off. That repeats until mains power returns, as expected after a forced shutdown.
 
-The live `/dev/bus/usb` bind lets the container retag all host USB nodes to its `nut` GID. If a host group uses that numeric GID, its members get read/write access to those devices. Use a user-namespace remap, or reserve the GID for a dedicated group. A remap also removes the sender's euid-0 poweroff shortcut. With `SHUTDOWN_ON_BATTERY_CRITICAL=true`, logind's default policy then asks for admin authentication that the non-interactive call cannot provide.
+[How docker-nut-upsd works](docs/how-it-works.md) explains the watchdog timing and every planned exit.
 
-## Dependencies
+## Monitoring
 
-All dependencies are updated automatically via [Renovate](https://github.com/renovatebot/renovate) and pinned by digest or version for reproducibility.
+docker-nut-upsd has no metrics endpoint and sends no email or push notifications itself. It logs each UPS event, such as `event="ONBATT"`, and its own errors to the container log. Thirteen Loki alert rules ship in [`alerts/logql.yaml`](alerts/logql.yaml). [Monitoring and alerts](docs/monitoring.md) lists them and shows how to load them.
 
-| Dependency | Source |
-| --- | --- |
-| alpine | [Alpine](https://hub.docker.com/_/alpine) |
-| libmodbus | [GitHub](https://github.com/stephane/libmodbus) |
-| netsnmp | [GitHub](https://github.com/net-snmp/net-snmp) |
-| nut | [GitHub](https://github.com/networkupstools/nut) |
+## Documentation
+
+- [Configuration](docs/configuration.md) lists every setting, for serial, network and custom setups.
+- [How docker-nut-upsd works](docs/how-it-works.md) explains recovery, the healthcheck and planned exits.
+- [Security](docs/security.md) covers TLS, privileges and the image contents.
+- [Monitoring and alerts](docs/monitoring.md) lists the log lines and alert rules.
 
 ## Credits
 
-This project packages [Network UPS Tools (NUT)](https://github.com/networkupstools/nut) (GPL-2.0-or-later) into a container image. All credit for the core functionality goes to the upstream maintainers.
+This project packages [Network UPS Tools (NUT)](https://github.com/networkupstools/nut), licensed GPL-2.0-or-later, into a container image. All credit for the core functionality goes to the upstream maintainers.
 
-- [libmodbus](https://github.com/stephane/libmodbus) (LGPL-2.1) by
-  [@stephane](https://github.com/stephane), the Modbus protocol
-  library used by NUT's `apc_modbus` driver
-- [Net-SNMP](https://github.com/net-snmp/net-snmp), the SNMP
-  library used by NUT's `snmp-ups` driver
+- [libmodbus](https://github.com/stephane/libmodbus), licensed LGPL-2.1, by [@stephane](https://github.com/stephane), is the Modbus library NUT's Modbus drivers use.
+- [Net-SNMP](https://github.com/net-snmp/net-snmp) is the SNMP library NUT's `snmp-ups` driver uses.
 
 ## Contributing
 
-Issues and pull requests are welcome. Please open an issue first for
-larger changes so the approach can be discussed before implementation.
+Issues and pull requests are welcome. Please open an issue first for larger changes, and see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Disclaimer
 
@@ -234,32 +157,15 @@ This project was built with AI-assisted tooling using [Claude](https://claude.co
 
 Apache-2.0. See [LICENSE](LICENSE).
 
-The image carries the license text of every bundled component under
-`/usr/share/licenses/`. The Alpine packages in the image ship no license file
-upstream, so their license texts are kept under `licenses/` in this repository
-and copied in.
+The image carries the license text of every bundled component under `/usr/share/licenses/`. The Alpine packages in the image ship no license file upstream, so their license texts are kept under `licenses/` in this repository and copied in.
 
-The image packages [Network UPS Tools](https://github.com/networkupstools/nut)
-(GPL-2.0-or-later), compiled from the release tarball the Dockerfile fetches at
-the version its `NUT_VERSION` argument pins
-(`https://github.com/networkupstools/nut/releases/download/<version>/nut-<version>.tar.gz`),
-and links [libmodbus](https://github.com/stephane/libmodbus) and
-[Net-SNMP](https://github.com/net-snmp/net-snmp), each compiled the same way
-from the tarball its own version argument pins. Each component's own license
-text is in that tree.
+The image packages [Network UPS Tools](https://github.com/networkupstools/nut) (GPL-2.0-or-later), compiled from the release tarball the Dockerfile fetches at the version its `NUT_VERSION` argument pins (`https://github.com/networkupstools/nut/releases/download/<version>/nut-<version>.tar.gz`), and links [libmodbus](https://github.com/stephane/libmodbus) and [Net-SNMP](https://github.com/net-snmp/net-snmp), each compiled the same way from the tarball its own version argument pins. Each component's own license text is in that tree.
 
-The build applies checked-in backports of upstream NUT source, so those files
-stay GPL-2.0-or-later:
+The build applies checked-in backports of upstream NUT source, so those files stay GPL-2.0-or-later:
 
-- `patches/cve-2026-54161-notifycmd-execvp.patch` backports upstream commit
-  `ecf98e7542e4ae2b62b211622ee26989274b2220`.
-- `patches/libusb-exit-reconnect-deadlock.patch` backports upstream commit
-  `bfbba15928aa6a91b3e4b8943e0cad16199d9d48`.
-- `patches/libusb-rdlens-oob-read.patch` backports upstream commit
-  `edc06fb39435b892d5daeec53cb4845cb12d1d50`.
-- `patches/richcomm-libusb-context-reopen.patch` backports upstream commit
-  `ce2364e2b1e79406248be50b01a031db67c1c9fd`.
+- `patches/cve-2026-54161-notifycmd-execvp.patch` backports upstream commit `ecf98e7542e4ae2b62b211622ee26989274b2220`.
+- `patches/libusb-exit-reconnect-deadlock.patch` backports upstream commit `bfbba15928aa6a91b3e4b8943e0cad16199d9d48`.
+- `patches/libusb-rdlens-oob-read.patch` backports upstream commit `edc06fb39435b892d5daeec53cb4845cb12d1d50`.
+- `patches/richcomm-libusb-context-reopen.patch` backports upstream commit `ce2364e2b1e79406248be50b01a031db67c1c9fd`.
 
-This repository's `Dockerfile` and those patch files are the complete recipe for
-the NUT, libmodbus and Net-SNMP binaries the image ships: the corresponding
-source is the upstream tarball each pin names, with the patches above applied.
+This repository's `Dockerfile` and those patch files are the complete recipe for the NUT, libmodbus and Net-SNMP binaries the image ships: the corresponding source is the upstream tarball each pin names, with the patches above applied.

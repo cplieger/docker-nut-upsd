@@ -89,7 +89,7 @@ groups:
       # clients/upsmon.c ups_on_batt :887) and restores POLLFREQ only once OL
       # is seen (try_restore_pollfreq), so a flicker lands within about
       # POLLFREQ + POLLFREQALERT - raise this window if you raise EITHER; the
-      # env table in README.md is where both defaults are published.
+      # settings table in docs/configuration.md publishes both defaults.
       # It deliberately does NOT try to cover an outage - nothing
       # repeats event=ONBATT - so the alert marks mains loss and resolves 2m
       # later while the UPS may still be carrying the load.
