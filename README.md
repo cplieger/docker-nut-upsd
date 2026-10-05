@@ -145,7 +145,7 @@ This project packages [Network UPS Tools (NUT)](https://github.com/networkupstoo
 
 ## Contributing
 
-Issues and pull requests are welcome. Please open an issue first for larger changes, and see [CONTRIBUTING.md](CONTRIBUTING.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Disclaimer
 
