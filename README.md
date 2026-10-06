@@ -44,7 +44,7 @@ services:
       UPS_DRIVER: "usbhid-ups"  # the driver the NUT hardware list names for your UPS model
       UPS_PORT: "auto"  # auto finds a USB UPS. For serial and network UPSes, see docs/configuration.md
       API_USER: "monuser"
-      API_PASSWORD: "secret"  # change this unless a Synology NAS uses this server. Your NUT clients log in with it
+      API_PASSWORD: "secret"  # your NUT clients log in with it. If no Synology NAS uses this server, change it
 
     ports:
       - "3493:3493"
@@ -127,7 +127,7 @@ The healthcheck asks the server for the UPS status every 30 seconds. Unhealthy m
 
 ## Monitoring
 
-docker-nut-upsd has no metrics endpoint and sends no email or push notifications itself. It logs each UPS event, such as `event="ONBATT"`, and its own errors to the container log. Thirteen Loki alert rules ship in [`alerts/logql.yaml`](alerts/logql.yaml). [Monitoring and alerts](docs/monitoring.md) lists them and shows how to load them.
+docker-nut-upsd reports through its container log. It logs each UPS event, such as `event="ONBATT"`, and its own errors there. Your log stack turns them into alerts, as the [monitoring guide](https://github.com/cplieger/docs/blob/main/docs/monitoring.md) shows. Thirteen Loki alert rules ship in [`alerts/logql.yaml`](alerts/logql.yaml). [Monitoring and alerts](docs/monitoring.md) lists them and shows how to load them.
 
 ## Documentation
 
