@@ -11,7 +11,7 @@ services:
       UPS_DRIVER: "usbhid-ups"  # the driver the NUT hardware list names for your UPS model
       UPS_PORT: "auto"  # auto finds a USB UPS. For serial and network UPSes, see docs/configuration.md
       API_USER: "monuser"
-      API_PASSWORD: "secret"  # change this unless a Synology NAS uses this server. Your NUT clients log in with it
+      API_PASSWORD: "secret"  # your NUT clients log in with it. If no Synology NAS uses this server, change it
 
     ports:
       - "3493:3493"

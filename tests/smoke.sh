@@ -1049,10 +1049,9 @@ generate_all_configs >/dev/null 2>&1
 # between an operator-set variable and the validator its destination needs, so
 # deleting a row or widening a check must fail one named case below. Each case
 # requires the intended validator's OWN message, because a row carries several
-# checks and an outcome-only assertion cannot tell which one refused (shell.md,
-# "where two guards are redundant"). The row functions run directly to keep
-# the cross-field guards out of the way; the classes are value shapes, not
-# check names.
+# checks and an outcome-only assertion cannot tell which one refused. The row
+# functions run directly to keep the cross-field guards out of the way; the
+# classes are value shapes, not check names.
 rejected_table_value() {
   case "$1" in
     control) printf 'bad\rvalue' ;;
