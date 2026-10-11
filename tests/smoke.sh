@@ -38,12 +38,12 @@ if [ ! -r "$ALERTS" ] || [ ! -r "$NUT_UPSMON_SOURCE" ]; then
   fail=1
 else
   hostsync_pattern=$(awk '
-    /^[[:space:]]*- alert: UPSHostSyncExpired$/ { inrule = 1; next }
+    /^[[:space:]]*- alert: NutUpsdHostSyncExpired$/ { inrule = 1; next }
     inrule && /^[[:space:]]*- alert:/ { exit }
     inrule { print }
   ' "$ALERTS" | sed -n "s/.*|~ \`\([^\`]*\)\` \[[^]]*\].*/\1/p")
   # Accept either anchoring: the leading caret is optional (see
-  # UPSHostSyncExpired's own annotation), the trailing one is the contract.
+  # NutUpsdHostSyncExpired's own annotation), the trailing one is the contract.
   case "$hostsync_pattern" in
     *'$')
       hostsync_message=${hostsync_pattern#^}
@@ -55,7 +55,7 @@ else
   esac
   if [ -z "$hostsync_message" ] \
     || ! grep -Fq -- "\"$hostsync_message\"" "$NUT_UPSMON_SOURCE"; then
-    err "FAIL: UPSHostSyncExpired does not match the pinned upsmon diagnostic: pattern=${hostsync_pattern:-<empty>}"
+    err "FAIL: NutUpsdHostSyncExpired does not match the pinned upsmon diagnostic: pattern=${hostsync_pattern:-<empty>}"
     fail=1
   fi
 fi
@@ -1883,14 +1883,14 @@ rm -f "$CLOCK_ERR" "$CLOCK_RESTARTS"
 #    t=15 (attempt 1 at t=105), fresh during t=150-299 (recovery logged),
 #    stale again from t=300 — the next attempt must be numbered 1 again.
 repaired_phrase=$(awk '
-  /^[[:space:]]*- alert: UPSCommsRepaired$/ { inrule = 1; next }
+  /^[[:space:]]*- alert: NutUpsdCommsRepaired$/ { inrule = 1; next }
   inrule && /^[[:space:]]*- alert:/ { exit }
   inrule { print }
 ' "$ALERTS" | sed -n 's/.*| logfmt | msg="\([^"]*\)".*/\1/p' | head -1)
 case "$repaired_phrase" in
   *'comms recovered'*) ;;
   *)
-    err "FAIL: could not extract the UPSCommsRepaired message matcher"
+    err "FAIL: could not extract the NutUpsdCommsRepaired message matcher"
     fail=1
     ;;
 esac

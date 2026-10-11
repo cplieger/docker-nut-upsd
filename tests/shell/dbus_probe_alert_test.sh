@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # dbus_liveness_probe(): the background loop that re-checks the host-poweroff path
 # while SHUTDOWN_ON_BATTERY_CRITICAL is on, and the sole source of the line
-# alerts/logql.yaml's UPSPowerOffPathBroken matches.
+# alerts/logql.yaml's NutUpsdPowerOffPathBroken matches.
 #
 # The whole point of the probe is that it reports a broken poweroff path BEFORE a
 # real forced shutdown, because during one it can no longer be fixed. That makes
-# its log line a contract: UPSPowerOffPathBroken matches the literal
+# its log line a contract: NutUpsdPowerOffPathBroken matches the literal
 # `D-Bus poweroff path unreachable` (copied verbatim from alerts/logql.yaml below), and
 # it matches while the path is broken, so the line must RECUR rather than fire
 # once and go quiet. Both properties are asserted here.
@@ -86,7 +86,7 @@ count() {
 # `grep -F -- ""` match every line, and a wrong-rule pattern would be non-empty but
 # meaningless.
 M_DBUS=$(awk '
-  /- alert: UPSPowerOffPathBroken$/ { inrule = 1; next }
+  /- alert: NutUpsdPowerOffPathBroken$/ { inrule = 1; next }
   inrule && /- alert: / { exit }
   inrule { print }
 ' "$REPO_ROOT/alerts/logql.yaml" | sed -n 's/.*| logfmt | msg=~"\([^"]*\)".*/\1/p' | head -1)
@@ -106,11 +106,11 @@ grep -qF -- "msg=\"$M_DBUS_PHRASE" "$LOG" \
   && grep -q 'level=error' "$LOG" \
   && grep -q 'socket=/run/dbus/system_bus_socket' "$LOG" \
   && ok "a broken poweroff path logs level=error whose msg opens with '$M_DBUS_PHRASE' (read from alerts/logql.yaml), naming the socket" \
-  || no 'UPSPowerOffPathBroken matcher' "alerts/logql.yaml wants msg=\"$M_DBUS_PHRASE, log: $(head -c 300 "$LOG")"
+  || no 'NutUpsdPowerOffPathBroken matcher' "alerts/logql.yaml wants msg=\"$M_DBUS_PHRASE, log: $(head -c 300 "$LOG")"
 
 # --- 2. the line RECURS while broken --------------------------------------------
 #
-# UPSPowerOffPathBroken is count_over_time(...[15m]) > 0, so a single line on the
+# NutUpsdPowerOffPathBroken is count_over_time(...[15m]) > 0, so a single line on the
 # transition would let the alert resolve itself while the path is still broken.
 # Three broken ticks must produce three lines.
 run_probe 3 broken
@@ -135,7 +135,7 @@ run_probe 3 recovering
 # would satisfy cases 1 and 2, and the alert would fire on every healthy container.
 run_probe 3 healthy
 [ ! -s "$LOG" ] \
-  && ok 'a healthy poweroff path logs nothing at all (no false UPSPowerOffPathBroken)' \
+  && ok 'a healthy poweroff path logs nothing at all (no false NutUpsdPowerOffPathBroken)' \
   || no 'healthy path silent' "logged: $(head -c 300 "$LOG")"
 
 # --- 5. the cadence variable is mandatory ----------------------------------------
