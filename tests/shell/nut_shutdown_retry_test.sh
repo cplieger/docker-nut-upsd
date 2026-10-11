@@ -105,7 +105,7 @@ else
 fi
 
 container_error_pattern=$(awk '
-  /- alert: UPSContainerError$/ { inrule = 1; next }
+  /- alert: NutUpsdContainerError$/ { inrule = 1; next }
   inrule && /- alert: / { exit }
   inrule { print }
 ' "$REPO_ROOT/alerts/logql.yaml" \
@@ -115,7 +115,7 @@ initial_record=$(head -n 1 "$ERR")
 if [ -n "$container_error_pattern" ] \
   && [ "$initial_record" = 'level=error msg="UPS forced shutdown triggered; powering off host"' ] \
   && printf '%s\n' "$initial_record" | grep -Eq -- "$container_error_pattern"; then
-  ok 'the forced-shutdown opening record matches UPSContainerError'
+  ok 'the forced-shutdown opening record matches NutUpsdContainerError'
 else
   no 'forced-shutdown opening record' "record=[$initial_record] matcher=[$container_error_pattern]"
 fi
@@ -166,14 +166,14 @@ else
 fi
 
 poweroff_failed_matcher=$(awk '
-  /- alert: UPSPowerOffFailed$/ { inrule = 1; next }
+  /- alert: NutUpsdPowerOffFailed$/ { inrule = 1; next }
   inrule && /- alert: / { exit }
   inrule { print }
 ' "$REPO_ROOT/alerts/logql.yaml" \
   | sed -n 's/.*| logfmt | msg=~"\([^"]*\)".*/\1/p' \
   | head -1)
 if [ -z "$poweroff_failed_matcher" ]; then
-  printf 'harness error: no parsed-msg matcher extracted for UPSPowerOffFailed\n' >&2
+  printf 'harness error: no parsed-msg matcher extracted for NutUpsdPowerOffFailed\n' >&2
   exit 1
 fi
 
@@ -184,9 +184,9 @@ matched_retries=$(grep ' attempt=' "$ERR" \
   | sed -n 's/^level=[^ ]* msg="\([^"]*\)".*/\1/p' \
   | grep -Ec -- "^${poweroff_failed_matcher}$" || :)
 if [ "$matched_messages" -eq 1 ] && [ "$matched_retries" -eq 0 ]; then
-  ok 'UPSPowerOffFailed matcher selects only the terminal failed-poweroff record'
+  ok 'NutUpsdPowerOffFailed matcher selects only the terminal failed-poweroff record'
 else
-  no 'UPSPowerOffFailed matcher contract' "matched=$matched_messages retry_matches=$matched_retries matcher=$poweroff_failed_matcher"
+  no 'NutUpsdPowerOffFailed matcher contract' "matched=$matched_messages retry_matches=$matched_retries matcher=$poweroff_failed_matcher"
 fi
 
 SETTLE_VALUE=false
@@ -204,7 +204,7 @@ if [ "$RUN_RC" -eq 1 ] \
   && grep -qxF "$settle_record" "$ERR" \
   && printf '%s\n' "$settle_message" | grep -Eq -- "^${poweroff_failed_matcher}$" \
   && grep -qF 'cleared killpower flag after failed poweroff so USB comms recovery stays armed' "$ERR"; then
-  ok 'a rejected settle state waits past logind inhibition, clears killpower, and emits the UPSPowerOffFailed record'
+  ok 'a rejected settle state waits past logind inhibition, clears killpower, and emits the NutUpsdPowerOffFailed record'
 else
   no 'settle-state failure' "rc=$RUN_RC dbus=$(wc -l <"$DBUS_CALLS") timeout=$(wc -l <"$TIMEOUT_CALLS") sleep=$settle_sleep rm=$(tr '\n' ' ' <"$RM_CALLS") matcher=$poweroff_failed_matcher; stderr: $(tr '\n' '|' <"$ERR")"
 fi

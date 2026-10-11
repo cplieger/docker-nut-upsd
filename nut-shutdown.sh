@@ -62,7 +62,7 @@ while [ "$attempt" -le "$DBUS_MAX_ATTEMPTS" ]; do
         exit 1
         ;;
     esac
-    # Outside UPSPowerOffFailed's matcher and clear_killpower on purpose: a
+    # Outside NutUpsdPowerOffFailed's matcher and clear_killpower on purpose: a
     # vanished bus is also the ordinary signature of a poweroff in progress,
     # so a critical alert and re-armed driver bounce would both act on a state
     # nothing here can decide.

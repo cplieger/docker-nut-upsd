@@ -197,7 +197,7 @@ log_value() {
 }
 
 ALERTS=${ALERTS:-$REPO_ROOT/alerts/logql.yaml}
-container_error_rule=$(awk -v want='- alert: UPSContainerError' '
+container_error_rule=$(awk -v want='- alert: NutUpsdContainerError' '
   $0 ~ want "$" { inrule = 1; next }
   inrule && /- alert: / { exit }
   inrule { print }
@@ -205,7 +205,7 @@ container_error_rule=$(awk -v want='- alert: UPSContainerError' '
 container_error_level=$(printf '%s\n' "$container_error_rule" \
   | sed -n "s/.*|~ \`\^level=\([a-z][a-z]*\) \`.*/\1/p" | head -1)
 if [ -z "$container_error_level" ]; then
-  printf 'harness error: UPSContainerError has no anchored level matcher in %s\n' "$ALERTS" >&2
+  printf 'harness error: NutUpsdContainerError has no anchored level matcher in %s\n' "$ALERTS" >&2
   exit 1
 fi
 
@@ -220,7 +220,7 @@ escalation_level=$(sed -n '1s/^level=\([^ ]*\).*/\1/p' "$WORK/at-escalation")
 if [ -n "$before_level" ] \
   && [ "$before_level" != "$container_error_level" ] \
   && [ "$escalation_level" = "$container_error_level" ]; then
-  ok 'the last fast retry is the first watchdog attempt matched by UPSContainerError'
+  ok 'the last fast retry is the first watchdog attempt matched by NutUpsdContainerError'
 else
   no 'watchdog escalation boundary' \
     "before=$before_level at=$escalation_level alert-matches=$container_error_level"

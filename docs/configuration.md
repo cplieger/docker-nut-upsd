@@ -101,7 +101,7 @@ Low battery is the usual trigger. The generated `upsmon.conf` sets `OFFDURATION 
 
 When the battery is critical, the monitor runs the shutdown command and exits. With host shutdown off, it logs the forced shutdown and leaves the host running. The container then exits, and the example restart policy starts it again, which repeats until mains power returns.
 
-While host shutdown is on, the container checks every `DBUS_PROBE_INTERVAL` seconds that the host would accept a power-off request, and logs an error when it would not. The `UPSPowerOffPathBroken` alert keys on that line. Keep that alert's window above twice this interval, because the alert stays active only while the error line recurs.
+While host shutdown is on, the container checks every `DBUS_PROBE_INTERVAL` seconds that the host would accept a power-off request, and logs an error when it would not. The `NutUpsdPowerOffPathBroken` alert keys on that line. Keep that alert's window above twice this interval, because the alert stays active only while the error line recurs.
 
 ## Your own NUT config files
 
