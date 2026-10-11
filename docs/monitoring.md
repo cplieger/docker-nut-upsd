@@ -16,21 +16,21 @@ Load the rules in [`alerts/logql.yaml`](../alerts/logql.yaml) into Loki's ruler,
 
 | Alert | Fires when | Severity |
 | --- | --- | --- |
-| `UPSOnBattery` | an `ONBATT` event with no `ONLINE` after it in the window, so mains power was lost and the UPS took the load onto its battery | warning |
-| `UPSLowBattery` | a `LOWBATT` event, so the UPS raised its low-battery flag. On battery with low battery starts the shutdown | critical |
-| `UPSForcedShutdown` | an `FSD` or `SHUTDOWN` event, so the shutdown has started | critical |
-| `UPSHostSyncExpired` | `upsmon` logged `Host sync timer expired, forcing shutdown`. A client was still logged in when `HOSTSYNC` ran out, so the server shut down without it | warning |
-| `UPSNotifyExecFailed` | `upsmon` could not run `NOTIFYCMD`, so the `event=` lines stopped | warning |
-| `UPSCommsLost` | a `NOCOMM` event, so `upsmon` could not reach the UPS for `NOCOMMWARNTIME` seconds (default 300) | warning |
-| `UPSCommsRepaired` | the container logged `comms watchdog UPS comms recovered` after a watchdog driver restart. The line carries the outage length and restart count | warning |
-| `UPSHardwareFault` | a `REPLBATT` or `ALARM` event, so the UPS reports a worn or missing battery, a fan failure, overheating or a charger fault | warning |
-| `UPSProtectionDegraded` | a `CAL`, `BYPASS` or `OVER` event, so the UPS is calibrating, no longer protects the load, or carries more than its rated load | warning |
-| `UPSProtectionUnavailable` | a `NOPARENT` or `OFF` event, so a forced shutdown cannot power off the host, or the UPS is off or asleep | warning |
-| `UPSPowerOffPathBroken` | the D-Bus check logs `unreachable`. Host shutdown is on, but a forced shutdown could not power off the host right now | warning |
-| `UPSPowerOffFailed` | every D-Bus `PowerOff` call failed, or an accepted call was later refuted, during a forced shutdown | critical |
-| `UPSContainerError` | the image logs its own `level=error` line, such as a refused setting, a failed daemon start, a failed watchdog restart or a shutdown error | warning |
+| `NutUpsdOnBattery` | an `ONBATT` event with no `ONLINE` after it in the window, so mains power was lost and the UPS took the load onto its battery | warning |
+| `NutUpsdLowBattery` | a `LOWBATT` event, so the UPS raised its low-battery flag. On battery with low battery starts the shutdown | critical |
+| `NutUpsdForcedShutdown` | an `FSD` or `SHUTDOWN` event, so the shutdown has started | critical |
+| `NutUpsdHostSyncExpired` | `upsmon` logged `Host sync timer expired, forcing shutdown`. A client was still logged in when `HOSTSYNC` ran out, so the server shut down without it | warning |
+| `NutUpsdNotifyExecFailed` | `upsmon` could not run `NOTIFYCMD`, so the `event=` lines stopped | warning |
+| `NutUpsdCommsLost` | a `NOCOMM` event, so `upsmon` could not reach the UPS for `NOCOMMWARNTIME` seconds (default 300) | warning |
+| `NutUpsdCommsRepaired` | the container logged `comms watchdog UPS comms recovered` after a watchdog driver restart. The line carries the outage length and restart count | warning |
+| `NutUpsdHardwareFault` | a `REPLBATT` or `ALARM` event, so the UPS reports a worn or missing battery, a fan failure, overheating or a charger fault | warning |
+| `NutUpsdProtectionDegraded` | a `CAL`, `BYPASS` or `OVER` event, so the UPS is calibrating, no longer protects the load, or carries more than its rated load | warning |
+| `NutUpsdProtectionUnavailable` | a `NOPARENT` or `OFF` event, so a forced shutdown cannot power off the host, or the UPS is off or asleep | warning |
+| `NutUpsdPowerOffPathBroken` | the D-Bus check logs `unreachable`. Host shutdown is on, but a forced shutdown could not power off the host right now | warning |
+| `NutUpsdPowerOffFailed` | every D-Bus `PowerOff` call failed, or an accepted call was later refuted, during a forced shutdown | critical |
+| `NutUpsdContainerError` | the image logs its own `level=error` line, such as a refused setting, a failed daemon start, a failed watchdog restart or a shutdown error | warning |
 
-The rules for `UPSPowerOffPathBroken` and `UPSPowerOffFailed` need `SHUTDOWN_ON_BATTERY_CRITICAL=true`, and `DBUS_PROBE_INTERVAL=0` turns off only the first one. The notes below explain each rule's window and shape.
+The rules for `NutUpsdPowerOffPathBroken` and `NutUpsdPowerOffFailed` need `SHUTDOWN_ON_BATTERY_CRITICAL=true`, and `DBUS_PROBE_INTERVAL=0` turns off only the first one. The notes below explain each rule's window and shape.
 
 The generated `upsmon.conf` sets a `NOTIFYCMD` that logs each event, with `EXEC` on the matching `NOTIFYFLAG` lines. If you mount your own `upsmon.conf.user`, keep the `NOTIFYCMD` line and the `EXEC` flags, or the `event=` lines and the alerts that key on them disappear. NUT runs `NOTIFYCMD` directly, without a shell, and passes the message as `$1`. This comes from the CVE-2026-54161 backport and matches NUT v2.8.6. So the value must be the path to an executable. Wrap a shell snippet or a command with arguments in a small script and point `NOTIFYCMD` at it.
 
@@ -38,31 +38,31 @@ Thresholds, `for:` windows and the `severity` labels are starting points. Change
 
 ### How the rules read the log
 
-The event and message rules read parsed logfmt fields, so a word inside a quoted value cannot match them. `UPSContainerError` reads the start of the line instead, so a `level=error` inside another record's detail cannot fire it. `UPSHostSyncExpired` matches the end of a raw `upsmon` line for the same reason. Its pattern is open at the start, because a `DEBUG_MIN` setting in a mounted `upsmon.conf.user` makes `upsmon` prefix each line with an elapsed time.
+The event and message rules read parsed logfmt fields, so a word inside a quoted value cannot match them. `NutUpsdContainerError` reads the start of the line instead, so a `level=error` inside another record's detail cannot fire it. `NutUpsdHostSyncExpired` matches the end of a raw `upsmon` line for the same reason. Its pattern is open at the start, because a `DEBUG_MIN` setting in a mounted `upsmon.conf.user` makes `upsmon` prefix each line with an elapsed time.
 
 If your log collector already sets a stream label named `event` or `msg`, Loki stores the parsed field as `event_extracted` or `msg_extracted`. The rule filters then read your stream label, so they may match nothing or the wrong records.
 
-The image runs `upsmon` in the foreground, so its own lines reach the log too. They include a `LOG_NOTICE` copy of each event flagged `SYSLOG`, warnings such as `assuming dead` and `Too few UPS(es) are healthy`, and process errors. These lines carry no `level=` prefix and no logfmt fields. `UPSHostSyncExpired` and `UPSNotifyExecFailed` each match one of them. Read the rest in the log.
+The image runs `upsmon` in the foreground, so its own lines reach the log too. They include a `LOG_NOTICE` copy of each event flagged `SYSLOG`, warnings such as `assuming dead` and `Too few UPS(es) are healthy`, and process errors. These lines carry no `level=` prefix and no logfmt fields. `NutUpsdHostSyncExpired` and `NutUpsdNotifyExecFailed` each match one of them. Read the rest in the log.
 
 Three routed events have no rule on purpose:
 
 - `COMMBAD` fires on any move into lost comms, including the unknown state `upsmon` starts each UPS in. Its count cannot separate an outage from a container start. The source is `ups_is_gone` in NUT v2.8.5 `clients/upsmon.c`.
-- `COMMOK` is the upstream recovery notice. `UPSCommsRepaired` alerts on a watchdog repair from the container's own record instead. That record carries the outage length and restart count, and it cannot fire on a cold start.
+- `COMMOK` is the upstream recovery notice. `NutUpsdCommsRepaired` alerts on a watchdog repair from the container's own record instead. That record carries the outage length and restart count, and it cannot fire on a cold start.
 - `OTHER` carries status words that `upsmon` does not classify.
 
 An `event=` line with no alert is one of these three, or a parsed field that lost to a stream label of the same name.
 
 ### Transition and state rules
 
-A state rule stays firing while its condition holds, because its source repeats the line faster than the window. A transition rule marks a change and resolves when its line leaves the window. No window can make a transition rule track a condition, because the window would have to outlast the condition itself. Each rule's own source decides its shape, and the notes below name it. `UPSContainerError` has neither shape, because its sources range from a one-shot boot refusal to the watchdog's repeating escalation.
+A state rule stays firing while its condition holds, because its source repeats the line faster than the window. A transition rule marks a change and resolves when its line leaves the window. No window can make a transition rule track a condition, because the window would have to outlast the condition itself. Each rule's own source decides its shape, and the notes below name it. `NutUpsdContainerError` has neither shape, because its sources range from a one-shot boot refusal to the watchdog's repeating escalation.
 
-The group evaluates every 10 seconds instead of the ruler's 1-minute default. `UPSOnBattery` pairs this with `for: 10s`, so the battery state must hold across one full interval before the alert fires. A brief dip, such as a load surge from a laser printer's fuser on the UPS, clears within one `upsmon` poll and stays silent. A real outage fires in about 10 to 20 seconds.
+The group evaluates every 10 seconds instead of the ruler's 1-minute default. `NutUpsdOnBattery` pairs this with `for: 10s`, so the battery state must hold across one full interval before the alert fires. A brief dip, such as a load surge from a laser printer's fuser on the UPS, clears within one `upsmon` poll and stays silent. A real outage fires in about 10 to 20 seconds.
 
 A 1-minute evaluation could delay that by up to a minute, and the runtime left depends on the load and can be short. The interval applies to every rule in the group. If the extra query load is not worth it for the slower rules, raise it.
 
 ### Notes on each rule
 
-#### UPSOnBattery
+#### NutUpsdOnBattery
 
 This is a transition rule, because `upsmon` logs `ONBATT` once when it loses mains and `ONLINE` once when mains returns. The source is `ups_on_batt` and `ups_on_line` in NUT v2.8.5 `clients/upsmon.c`. The rule keeps the latest of the two in time order. A recovery and a second outage inside one window then fire on the second `ONBATT`. The alert resolves within 2 minutes while the UPS may still carry the load, so read `ups.status` over the NUT protocol to follow the outage.
 
@@ -70,43 +70,43 @@ The `ONBATT` line lands within one `POLLFREQ`. `upsmon` then switches to `POLLFR
 
 How long the battery holds depends on the load and on the battery's size and age. Judge the urgency from the runtime your own UPS reports rather than from a fixed figure.
 
-#### UPSLowBattery
+#### NutUpsdLowBattery
 
 This is a transition rule. NUT notifies on the low-battery flag alone and reports it once, when the flag is raised. The source is `ups_low_batt` in NUT v2.8.5 `clients/upsmon.c`. Check whether the UPS is also on battery and how much runtime the connected load has left.
 
-#### UPSForcedShutdown
+#### NutUpsdForcedShutdown
 
-This is a transition rule. With `SHUTDOWN_ON_BATTERY_CRITICAL=true`, `UPSPowerOffFailed` reports a poweroff attempt that failed or was refuted. It does not report an attempt whose settle state was unreadable, because that record is `level=warn` and no rule matches it. So a silent `UPSPowerOffFailed` does not confirm that the host powered off. `UPSPowerOffPathBroken` watches the same path ahead of time.
+This is a transition rule. With `SHUTDOWN_ON_BATTERY_CRITICAL=true`, `NutUpsdPowerOffFailed` reports a poweroff attempt that failed or was refuted. It does not report an attempt whose settle state was unreadable, because that record is `level=warn` and no rule matches it. So a silent `NutUpsdPowerOffFailed` does not confirm that the host powered off. `NutUpsdPowerOffPathBroken` watches the same path ahead of time.
 
 With the default `false`, `nut-shutdown-noop.sh` logs the event and no host powers off. The privileged `upsmon` parent exits after `SHUTDOWNCMD`, and the container exits with it. The example's `restart: unless-stopped` starts monitoring again, so the alert fires about once per container life. That continues until mains power returns or the UPS stops supplying the load.
 
-#### UPSHostSyncExpired
+#### NutUpsdHostSyncExpired
 
 This is a transition rule, written once per forced-shutdown attempt that timed out. A secondary was still logged in, with `maxlogins > 1`, when `HOSTSYNC` ran out. The alert does not mean that the secondary was hard-powered-off or that its own shutdown failed. The line is a raw `upsmon` diagnostic from line 1377 of NUT v2.8.5 `clients/upsmon.c`.
 
-#### UPSNotifyExecFailed
+#### NutUpsdNotifyExecFailed
 
 This is a transition rule. The image's `patches/cve-2026-54161-notifycmd-execvp.patch` backport logs `notify: execvp(<cmd>) failed: <strerror>` from `notify()`, at lines 154 to 157 of the patch. Every `event=<TYPE>` line comes from that handler, so every `event=` rule is blind while the fault lasts. `upsmon` writes the failure once per event routed to `NOTIFYCMD` and never repeats it, so the alert resolves 15 minutes after the last routed event. On a quiet UPS the gap between events has no bound, so no window can track the fault.
 
 The `NOTIFYFLAG` rows in your mounted `upsmon.conf.user` decide which events survive as the `upsmon` log copy. An event routed only to `EXEC` is lost outright, while a `SYSLOG+EXEC` row keeps the upstream plain-text notice. The fault needs a mounted `upsmon.conf.user` whose `NOTIFYCMD` is wrong or not executable, because the generated config wires the shipped handler.
 
-#### UPSCommsLost
+#### NutUpsdCommsLost
 
 This is a state rule. `upsmon` repeats `NOCOMM` every `NOCOMMWARNTIME` seconds while comms stay down. Keep the 15-minute window above twice your `NOCOMMWARNTIME`, so the alert stays firing between warnings.
 
-#### UPSCommsRepaired
+#### NutUpsdCommsRepaired
 
 This is a transition rule. `lifecycle.sh` writes the record once per watchdog-repaired outage, when comms return, and only after at least one driver restart. So one record means the watchdog restarted the driver and comms came back. The rule alerts on the first repair rather than waiting for a second outage, because `stale_secs` and `restarts` already carry the whole outage. A recovery with `COMMS_WATCHDOG=false`, or one the UPS made without a driver restart, writes no record and is outside this rule.
 
 The alert resolves 6 hours after the record. That is the widest range in the group, and its query cost on a live ruler has not been measured. If the cost matters, shorten it or raise the group interval. The rule does not group by `container`, because the message reads `stale_secs` and `restarts` from the matched series. Two repairs in one window alert separately only when those values differ.
 
-#### UPSHardwareFault
+#### NutUpsdHardwareFault
 
 This is a transition rule, and NUT raises `ALARM` once per change. The detail field names the fault. It can be a worn or missing battery, a fan failure, overheating, a charger failure or a battery voltage out of range. With the generated `ALARMCRITICAL 1`, `upsmon` presumes the UPS dead if comms drop while `ALARM` holds, and that starts the forced shutdown. Treat `ALARM` as urgent rather than as a service reminder.
 
 NUT repeats `REPLBATT` every `RBWARNTIME` seconds, so on the defaults expect the alert again about every 12 hours until the battery is serviced. That is the NUT reminder cadence, not a flap. Read the UPS status and plan the service.
 
-#### UPSProtectionDegraded
+#### NutUpsdProtectionDegraded
 
 This is a transition rule. NUT logs each event once when the flag is raised, so the alert resolves after 15 minutes rather than tracking the state.
 
@@ -116,13 +116,13 @@ While `CAL` holds, `upsmon` presumes the UPS dead as soon as comms are lost, so 
 
 `OVER` means the connected load is above the UPS rating, so reduce the load. It makes the UPS critical only when `OVERDURATION` is set, and the generated `upsmon.conf` leaves it unset. `BYPASS` also switches `upsmon` to `POLLFREQALERT` while it holds, and `OVER` does that only when `OVERDURATION` is set.
 
-#### UPSProtectionUnavailable
+#### NutUpsdProtectionUnavailable
 
 `NOPARENT` means the privileged `upsmon` parent died, so a forced shutdown cannot power off the host. `upsmon` repeats it every 120 seconds while the parent stays dead, so on that event the alert keeps firing. The source is `check_parent` in NUT v2.8.5 `clients/upsmon.c`. `OFF` is raised once when the flag appears, so on that event the alert marks the change and resolves after 15 minutes.
 
 `OFF` means the UPS reports itself administratively off or asleep, so the load is unprotected. Inspect the UPS and restore protection. With the generated `OFFDURATION 30`, once the UPS has reported `OFF` for that long, `upsmon` presumes it dead even while comms are healthy. That counts it out of `MINSUPPLIES` and starts the forced shutdown, as `ups_is_off` and `is_ups_critical` show. A mounted `upsmon.conf.user` with `OFFDURATION -1` turns that off.
 
-#### UPSPowerOffPathBroken
+#### NutUpsdPowerOffPathBroken
 
 This is a state rule. The probe repeats its error every `DBUS_PROBE_INTERVAL` seconds. Keep the window above twice `DBUS_PROBE_INTERVAL`, or the alert flaps between probes. The alert also stays firing for up to one window after the path recovers.
 
@@ -130,7 +130,7 @@ The probe asks logind `CanPowerOff` over the mounted system bus. A good answer p
 
 Read the detail field. A missing socket or a bus error points at `/run/dbus/system_bus_socket` or the host D-Bus daemon. An authorisation answer points at the host's polkit decision for `org.freedesktop.login1.power-off`. A user-namespace remap is a common cause, because the sender loses the euid-0 shortcut. The shipped power-off policy then asks for admin authentication, which a non-interactive call cannot supply.
 
-#### UPSPowerOffFailed
+#### NutUpsdPowerOffFailed
 
 This is a transition rule, written once per forced-shutdown attempt. Either every D-Bus `PowerOff` attempt failed, or logind accepted the request and then stopped reporting a pending poweroff while the container was still running. So the host kept running while the UPS was about to stop supplying it. The example restart policy starts monitoring again, so a UPS that stays critical makes another attempt. The alert then fires about once per container life until mains power returns.
 
@@ -142,7 +142,7 @@ If every attempt failed, the detail field carries the bus or authorisation error
 
 If logind first accepted the request, the detail field carries the `PreparingForShutdown` reply and no inhibitor record follows. The host journal then holds the cause, not `docker logs`.
 
-#### UPSContainerError
+#### NutUpsdContainerError
 
 The rule matches every `level=error` line the image writes from its entrypoint, validation, config generation, credential and TLS setup, and lifecycle helpers. It fires with no `NOTIFYCMD` wired and with host shutdown off. The lines include:
 
@@ -158,6 +158,6 @@ The rule matches every `level=error` line the image writes from its entrypoint, 
 
 An abort exits the container, so the restart policy retries it and the line repeats while the UPS goes unmonitored. The image healthcheck confirms neither kind of abort. A boot refusal exits inside the start period, and a teardown after boot exits before enough probes fail to mark the container unhealthy. The probe interval, retry count and start period are the `HEALTHCHECK` values in the Dockerfile.
 
-The rule is a net under the others and overlaps them. A broken D-Bus poweroff path also fires `UPSPowerOffPathBroken`, and an unconfirmed host poweroff also fires `UPSPowerOffFailed`. A forced-shutdown path record does not fire `UPSForcedShutdown`, because that rule keys on `event=`, which only `nut-notify.sh` writes and this rule's exclusion drops.
+The rule is a net under the others and overlaps them. A broken D-Bus poweroff path also fires `NutUpsdPowerOffPathBroken`, and an unconfirmed host poweroff also fires `NutUpsdPowerOffFailed`. A forced-shutdown path record does not fire `NutUpsdForcedShutdown`, because that rule keys on `event=`, which only `nut-notify.sh` writes and this rule's exclusion drops.
 
 If a mounted `upsmon.conf.user` leaves out `NOTIFYCMD`, this warning is the only alert-firing record of a forced shutdown. That holds only while `SHUTDOWNCMD` is still one of the image's `nut-shutdown` scripts. With any other `SHUTDOWNCMD`, a forced shutdown leaves no alert-firing record here, because the `upsmon` parent-exit record is `level=warn`.

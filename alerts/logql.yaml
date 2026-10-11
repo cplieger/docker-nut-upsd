@@ -9,16 +9,17 @@
 # collector sets. docs/monitoring.md explains each rule's window and shape.
 groups:
   - name: nut-upsd
-    # Evaluate every 10s instead of the ruler's 1m default. With UPSOnBattery's
-    # for: 10s, a mains flicker stays silent and a real outage fires in about
-    # 10 to 20 seconds. The interval applies to every rule in the group.
+    # Evaluate every 10s instead of the ruler's 1m default. With
+    # NutUpsdOnBattery's for: 10s, a mains flicker stays silent and a real
+    # outage fires in about 10 to 20 seconds. The interval applies to every
+    # rule in the group.
     interval: 10s
     rules:
       # ONBATT maps to 1 and ONLINE to 0, and last_over_time keeps the latest
       # value, so the rule fires when the most recent mains event was ONBATT.
       # by (container) keeps both events in one series. Keep the 2m window
       # above POLLFREQ + POLLFREQALERT.
-      - alert: UPSOnBattery
+      - alert: NutUpsdOnBattery
         expr: |
           last_over_time(
             {container="nut-upsd"}
@@ -34,9 +35,9 @@ groups:
           description: >
             The latest mains event was ONBATT, so the UPS lost mains power and
             carries the load on battery. The alert marks that event and
-            resolves within 2 minutes. Check mains power now. UPSLowBattery
-            follows if the battery runs low.
-      - alert: UPSLowBattery
+            resolves within 2 minutes. Check mains power now.
+            NutUpsdLowBattery follows if the battery runs low.
+      - alert: NutUpsdLowBattery
         expr: |
           sum by (container) (count_over_time(
             {container="nut-upsd"} | logfmt | event="LOWBATT" [5m]
@@ -51,7 +52,7 @@ groups:
             flag. Check mains power now. On battery, this starts the shutdown
             sequence. On line power, the UPS probably misreports it, so check
             LOWBATT_PERCENT or ignorelb.
-      - alert: UPSForcedShutdown
+      - alert: NutUpsdForcedShutdown
         expr: |
           sum by (container) (count_over_time(
             {container="nut-upsd"} | logfmt | event=~"FSD|SHUTDOWN" [5m]
@@ -70,7 +71,7 @@ groups:
       # upsmon's raw line has no logfmt fields. The filter is anchored at the
       # end, so the phrase inside another record's quoted detail cannot match.
       # It is open at the start, because DEBUG_MIN prefixes an elapsed time.
-      - alert: UPSHostSyncExpired
+      - alert: NutUpsdHostSyncExpired
         expr: |
           sum by (container) (count_over_time(
             {container="nut-upsd"}
@@ -86,7 +87,7 @@ groups:
             primary stopped waiting and went ahead with its own shutdown. The
             secondary missed its coordinated shutdown deadline and its host is
             at risk. Check the secondary.
-      - alert: UPSNotifyExecFailed
+      - alert: NutUpsdNotifyExecFailed
         expr: |
           sum by (container) (count_over_time(
             {container="nut-upsd"}
@@ -103,7 +104,7 @@ groups:
             upsmon.conf.user, so every event= alert in this group is blind. Fix
             the NOTIFYCMD path or permissions. It fires on each failed exec and
             does not track the fault.
-      - alert: UPSCommsLost
+      - alert: NutUpsdCommsLost
         expr: |
           sum by (container) (count_over_time(
             {container="nut-upsd"} | logfmt | event="NOCOMM" [15m]
@@ -120,7 +121,7 @@ groups:
       # No sum by (container) here, because the annotation reads stale_secs and
       # restarts off the matched series. Two repairs with the same values in
       # one window are one series and alert once.
-      - alert: UPSCommsRepaired
+      - alert: NutUpsdCommsRepaired
         expr: |
           count_over_time({container="nut-upsd"} | logfmt | msg="comms watchdog UPS comms recovered" [6h]) > 0
         for: 0m
@@ -134,7 +135,7 @@ groups:
             stale_secs={{ $labels.stale_secs }} and
             restarts={{ $labels.restarts }}. This catches a repair that ends
             before NOCOMMWARNTIME reports an outage. Check the UPS connection.
-      - alert: UPSHardwareFault
+      - alert: NutUpsdHardwareFault
         expr: |
           sum by (container) (count_over_time(
             {container="nut-upsd"} | logfmt | event=~"REPLBATT|ALARM" [15m]
@@ -150,7 +151,7 @@ groups:
             upstream's default, losing comms during ALARM forces a shutdown.
             REPLBATT repeats every RBWARNTIME seconds (default 43200). Plan
             service.
-      - alert: UPSProtectionDegraded
+      - alert: NutUpsdProtectionDegraded
         expr: |
           sum by (container) (count_over_time(
             {container="nut-upsd"} | logfmt | event=~"BYPASS|OVER|CAL" [15m]
@@ -165,7 +166,7 @@ groups:
             Losing comms during CAL or BYPASS forces a shutdown. Treat BYPASS as
             urgent. OVER counts as critical only when OVERDURATION is
             configured, and the generated upsmon.conf does not set it.
-      - alert: UPSProtectionUnavailable
+      - alert: NutUpsdProtectionUnavailable
         expr: |
           sum by (container) (count_over_time(
             {container="nut-upsd"} | logfmt | event=~"NOPARENT|OFF" [15m]
@@ -180,7 +181,7 @@ groups:
             cannot power off the host. Restart the container. OFF means the UPS
             is off or asleep. With OFFDURATION 30, upstream's default, OFF for
             30 seconds forces a shutdown.
-      - alert: UPSPowerOffPathBroken
+      - alert: NutUpsdPowerOffPathBroken
         expr: |
           sum by (container) (count_over_time(
             {container="nut-upsd"} | logfmt | msg=~"D-Bus poweroff path unreachable.*" [15m]
@@ -195,7 +196,7 @@ groups:
             (default 300), got no logind answer that permits a non-interactive
             poweroff. A forced shutdown would leave the host running. The
             detail field points at the bus socket or the host polkit policy.
-      - alert: UPSPowerOffFailed
+      - alert: NutUpsdPowerOffFailed
         expr: |
           sum by (container) (count_over_time(
             {container="nut-upsd"} | logfmt | msg=~"D-Bus poweroff failed after.*" [15m]
@@ -213,7 +214,7 @@ groups:
       # The rule collects the image's errors by level instead of listing them.
       # It is anchored at line start, so level=error inside another record's
       # detail cannot match. The exclusion drops nut-notify.sh's event lines.
-      - alert: UPSContainerError
+      - alert: NutUpsdContainerError
         expr: |
           sum by (container) (count_over_time(
             {container="nut-upsd"}

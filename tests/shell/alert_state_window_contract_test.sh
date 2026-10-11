@@ -77,11 +77,11 @@ check_published_default() {
   fi
 }
 
-check_pair UPSCommsLost NOCOMMWARNTIME
-check_pair UPSPowerOffPathBroken DBUS_PROBE_INTERVAL
-check_published_default UPSCommsLost NOCOMMWARNTIME
-check_published_default UPSHardwareFault RBWARNTIME
-check_published_default UPSPowerOffPathBroken DBUS_PROBE_INTERVAL
+check_pair NutUpsdCommsLost NOCOMMWARNTIME
+check_pair NutUpsdPowerOffPathBroken DBUS_PROBE_INTERVAL
+check_published_default NutUpsdCommsLost NOCOMMWARNTIME
+check_published_default NutUpsdHardwareFault RBWARNTIME
+check_published_default NutUpsdPowerOffPathBroken DBUS_PROBE_INTERVAL
 
 ENTRYPOINT="$REPO_ROOT/generate-config.sh"
 new_workdir >/dev/null
@@ -105,9 +105,9 @@ generated_upsmon=$(
   _emit_upsmon_conf
 )
 
-protection_claim=$(rule_text UPSProtectionDegraded)
+protection_claim=$(rule_text NutUpsdProtectionDegraded)
 if [ -z "$protection_claim" ]; then
-  printf 'harness error: UPSProtectionDegraded annotation was not found\n' >&2
+  printf 'harness error: NutUpsdProtectionDegraded annotation was not found\n' >&2
   exit 1
 fi
 
@@ -116,15 +116,15 @@ if printf '%s\n' "$generated_upsmon" | grep -q '^MONITOR ups@127\.0\.0\.1:3493 '
   && ! printf '%s\n' "$generated_upsmon" | grep -q '^OVERDURATION\([[:space:]]\|$\)' \
   && printf '%s\n' "$protection_claim" | grep -Fq 'OVERDURATION is configured' \
   && printf '%s\n' "$protection_claim" | grep -Fq 'generated upsmon.conf does not set it.'; then
-  ok 'UPSProtectionDegraded publishes the generated upsmon.conf OVERDURATION absence'
+  ok 'NutUpsdProtectionDegraded publishes the generated upsmon.conf OVERDURATION absence'
 else
-  no 'UPSProtectionDegraded OVERDURATION contract' \
+  no 'NutUpsdProtectionDegraded OVERDURATION contract' \
     'the generated config or the scoped annotation no longer carries the published absence'
 fi
 
-unavailable_claim=$(rule_text UPSProtectionUnavailable)
+unavailable_claim=$(rule_text NutUpsdProtectionUnavailable)
 if [ -z "$unavailable_claim" ]; then
-  printf 'harness error: UPSProtectionUnavailable annotation was not found\n' >&2
+  printf 'harness error: NutUpsdProtectionUnavailable annotation was not found\n' >&2
   exit 1
 fi
 
@@ -137,15 +137,15 @@ if printf '%s\n' "$generated_upsmon" | grep -q '^NOTIFYFLAG OFF ' \
   && printf '%s\n' "$generated_upsmon" | grep -q '^OFFDURATION 30$' \
   && printf '%s\n' "$offduration_tail" | grep -Eq '^ 30([ .,:]|$)' \
   && printf '%s\n' "$offduration_tail" | grep -Eq '(force|forced).*shutdown|shutdown.*(force|forced)'; then
-  ok 'UPSProtectionUnavailable publishes the generated upsmon.conf OFFDURATION pin and forced-shutdown consequence'
+  ok 'NutUpsdProtectionUnavailable publishes the generated upsmon.conf OFFDURATION pin and forced-shutdown consequence'
 else
-  no 'UPSProtectionUnavailable OFFDURATION contract' \
+  no 'NutUpsdProtectionUnavailable OFFDURATION contract' \
     'the generated config or scoped annotation no longer carries the published pinned consequence'
 fi
 
-hardware_claim=$(rule_text UPSHardwareFault)
+hardware_claim=$(rule_text NutUpsdHardwareFault)
 if [ -z "$hardware_claim" ]; then
-  printf 'harness error: UPSHardwareFault annotation was not found\n' >&2
+  printf 'harness error: NutUpsdHardwareFault annotation was not found\n' >&2
   exit 1
 fi
 
@@ -166,16 +166,16 @@ case "$hardware_claim" in
 esac
 
 if [ "$published_alarmcritical" = "$generated_alarmcritical" ]; then
-  ok "UPSHardwareFault publishes the generated upsmon.conf ALARMCRITICAL pin ($generated_alarmcritical)"
+  ok "NutUpsdHardwareFault publishes the generated upsmon.conf ALARMCRITICAL pin ($generated_alarmcritical)"
 else
-  no 'UPSHardwareFault ALARMCRITICAL contract' \
+  no 'NutUpsdHardwareFault ALARMCRITICAL contract' \
     "annotation=$published_alarmcritical generated=$generated_alarmcritical"
 fi
 
 on_battery_annotation=$(awk '
   /^[[:space:]]*#/ { leading = leading $0 ORS; next }
   /^[[:space:]]*$/ { leading = leading ORS; next }
-  /^[[:space:]]*- alert: UPSOnBattery$/ {
+  /^[[:space:]]*- alert: NutUpsdOnBattery$/ {
     printf "%s", leading
     found = 1
     exit
@@ -183,24 +183,24 @@ on_battery_annotation=$(awk '
   { leading = "" }
   END { if (!found) exit 1 }
 ' "$ALERTS") || {
-  printf 'harness error: UPSOnBattery leading annotation not found\n' >&2
+  printf 'harness error: NutUpsdOnBattery leading annotation not found\n' >&2
   exit 1
 }
 
 if printf '%s\n' "$on_battery_annotation" | grep -qw POLLFREQ \
   && printf '%s\n' "$on_battery_annotation" | grep -qw POLLFREQALERT; then
-  ok 'UPSOnBattery sizing annotation names both POLLFREQ and POLLFREQALERT'
+  ok 'NutUpsdOnBattery sizing annotation names both POLLFREQ and POLLFREQALERT'
 else
-  no 'UPSOnBattery cadence annotation' 'both polling knobs must be named'
+  no 'NutUpsdOnBattery cadence annotation' 'both polling knobs must be named'
 fi
 
-on_battery_window=$(rule_window_seconds UPSOnBattery)
+on_battery_window=$(rule_window_seconds NutUpsdOnBattery)
 pollfreq=$(default_seconds POLLFREQ)
 pollfreqalert=$(default_seconds POLLFREQALERT)
 if [ "$on_battery_window" -gt "$((pollfreq + pollfreqalert))" ]; then
-  ok "UPSOnBattery range (${on_battery_window}s) clears the combined default polling gap (${pollfreq}s + ${pollfreqalert}s)"
+  ok "NutUpsdOnBattery range (${on_battery_window}s) clears the combined default polling gap (${pollfreq}s + ${pollfreqalert}s)"
 else
-  no 'UPSOnBattery polling-gap range' "range=${on_battery_window}s; combined default gap=$((pollfreq + pollfreqalert))s"
+  no 'NutUpsdOnBattery polling-gap range' "range=${on_battery_window}s; combined default gap=$((pollfreq + pollfreqalert))s"
 fi
 
 compose_restart=$(awk '$1 == "restart:" { print $2; exit }' "$REPO_ROOT/compose.yaml")
@@ -220,8 +220,8 @@ if [ -z "$readme_restart" ]; then
   exit 1
 fi
 
-forced=$(rule_text UPSForcedShutdown)
-failed=$(rule_text UPSPowerOffFailed)
+forced=$(rule_text NutUpsdForcedShutdown)
+failed=$(rule_text NutUpsdPowerOffFailed)
 if [ -z "$forced" ] || [ -z "$failed" ]; then
   printf 'harness error: forced-shutdown alert annotations were not found\n' >&2
   exit 1
@@ -233,7 +233,7 @@ if [ "$compose_restart" = unless-stopped ] \
   && printf '%s\n' "$forced" | grep -Fq 'once per container life' \
   && printf '%s\n' "$failed" | grep -Fq 'restart policy re-enters monitoring' \
   && printf '%s\n' "$failed" | grep -Fq 'once per container life'; then
-  ok 'compose, README, UPSForcedShutdown and UPSPowerOffFailed share the repeating restart contract'
+  ok 'compose, README, NutUpsdForcedShutdown and NutUpsdPowerOffFailed share the repeating restart contract'
 else
   no 'forced-shutdown restart contract' \
     "compose=$compose_restart README=$readme_restart; an annotation no longer publishes the per-container-life consequence"
