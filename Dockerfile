@@ -1,6 +1,6 @@
 # check=error=true
 
-FROM alpine:3.24.3@sha256:1b7232cda4ca3dc20b5d1247bdc9bfb631f2661d15d323bdd6fccc035ed1a9e7 AS builder
+FROM alpine:3.24.3@sha256:b3413572228e34bd1c9245f5565e6cd127005655e8a7899aef33d8e83255c9e6 AS builder
 
 SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
 
@@ -256,7 +256,7 @@ grep -Fq 'retrying harder' drivers/upsdrvctl.c || {
 touch /source-checks-passed
 CHECKS
 
-FROM alpine:3.24.3@sha256:1b7232cda4ca3dc20b5d1247bdc9bfb631f2661d15d323bdd6fccc035ed1a9e7 AS runtime
+FROM alpine:3.24.3@sha256:b3413572228e34bd1c9245f5565e6cd127005655e8a7899aef33d8e83255c9e6 AS runtime
 
 # The `echo` is load-bearing: BuildKit keys a RUN on the args it CONSUMES, so
 # dropping it leaves the upgrade on a cached layer and the image ships stale
