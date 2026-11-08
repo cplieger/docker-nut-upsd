@@ -32,6 +32,7 @@ new_workdir >/dev/null
 for fn in log_value strip_leading_zeros validate_no_control_chars validate_identifier \
   validate_no_hash validate_no_quotes validate_no_backslash validate_no_whitespace \
   nut_stored_word validate_nut_word validate_no_brackets validate_numeric validate_positive validate_port \
+  validate_port_or_zero \
   validate_percent _dispatch_check _check _check_optional check_required_vars \
   check_optional_vars driver_transport run_validations; do
   load_function "$fn"
@@ -91,6 +92,8 @@ run_lowbatt_validation() (
   API_ADDRESS=0.0.0.0
   API_PORT=3493
   API_TLS=true
+  METRICS_PORT=9199
+  METRICS_ADDRESS=0.0.0.0
   ADMIN_PASSWORD=adminpass
   SHUTDOWN_ON_BATTERY_CRITICAL=false
   DBUS_PROBE_INTERVAL=300

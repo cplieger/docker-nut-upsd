@@ -79,6 +79,14 @@ validate_port() {
   fi
 }
 
+validate_port_or_zero() {
+  validate_numeric "$1" "$2" || return 1
+  if [ "$2" -gt 65535 ]; then
+    printf 'level=error msg="env var must be 0-65535" var=%s value="%s"\n' "$1" "$(log_value "$2")" >&2
+    return 1
+  fi
+}
+
 validate_percent() {
   validate_numeric "$1" "$2" || return 1
   if [ "$2" -gt 100 ]; then
@@ -281,6 +289,7 @@ _dispatch_check() {
     numeric) validate_numeric "$_var" "$_val" ;;
     positive) validate_positive "$_var" "$_val" ;;
     port) validate_port "$_var" "$_val" ;;
+    port_or_zero) validate_port_or_zero "$_var" "$_val" ;;
     percent) validate_percent "$_var" "$_val" ;;
     *)
       printf 'level=error msg="unknown validation check" check=%s var=%s\n' "$_chk_name" "$_var" >&2
@@ -315,6 +324,9 @@ check_required_vars() {
   _check API_ADDRESS "${API_ADDRESS:-}" control quotes backslash brackets hash nospace
   _check API_PORT "${API_PORT:-}" control port
   _check API_TLS "${API_TLS:-}" control
+  _check METRICS_PORT "${METRICS_PORT:-}" control port_or_zero
+  # brackets: metrics_listen_address brackets an IPv6 address itself.
+  _check METRICS_ADDRESS "${METRICS_ADDRESS:-}" control brackets nospace
   _check_optional ADMIN_PASSWORD "${ADMIN_PASSWORD:-}" control quotes backslash hash nut_word
   _check SHUTDOWN_ON_BATTERY_CRITICAL "${SHUTDOWN_ON_BATTERY_CRITICAL:-}" control
   _check DBUS_PROBE_INTERVAL "${DBUS_PROBE_INTERVAL:-}" control numeric
@@ -354,6 +366,8 @@ canonicalize_validated_values() {
   API_ADDRESS=$(printf '%s' "${API_ADDRESS:-}")
   API_PORT=$(printf '%s' "${API_PORT:-}")
   API_TLS=$(printf '%s' "${API_TLS:-}")
+  METRICS_PORT=$(printf '%s' "${METRICS_PORT:-}")
+  METRICS_ADDRESS=$(printf '%s' "${METRICS_ADDRESS:-}")
   SHUTDOWN_ON_BATTERY_CRITICAL=$(printf '%s' "${SHUTDOWN_ON_BATTERY_CRITICAL:-}")
   DBUS_PROBE_INTERVAL=$(printf '%s' "${DBUS_PROBE_INTERVAL:-}")
   POLLFREQ=$(printf '%s' "${POLLFREQ:-}")
@@ -416,6 +430,13 @@ run_validations() {
       esac
       ;;
   esac
+
+  # Equal ports collide on a shared address, the default since METRICS_ADDRESS
+  # follows API_ADDRESS, so the pair is refused. 0 starts no exporter.
+  if [ "$METRICS_PORT" -ne 0 ] && [ "$METRICS_PORT" -eq "$API_PORT" ]; then
+    printf 'level=error msg="METRICS_PORT must differ from API_PORT" metrics_port=%s api_port=%s\n' "$METRICS_PORT" "$API_PORT" >&2
+    exit 1
+  fi
 
   # API_USER must not shadow a reserved generated account: upsd.users defines
   # a hardcoded [admin] and — when both upsd.users and upsmon.conf are

@@ -131,7 +131,7 @@ done
 # 2. Valid env passes validation and generates all four config files.
 export UPS_NAME=ups UPS_DESC="Test UPS" UPS_DRIVER=usbhid-ups UPS_PORT=auto \
   API_USER=monuser API_PASSWORD=secret API_ADDRESS=0.0.0.0 API_PORT=3493 \
-  API_TLS=true \
+  API_TLS=true METRICS_PORT=9199 METRICS_ADDRESS=0.0.0.0 \
   ADMIN_PASSWORD=adminpass LOCAL_UPSMON_PASSWORD=localmonpass \
   SHUTDOWN_CMD=/usr/local/bin/nut-shutdown-noop.sh \
   POLLFREQ=5 POLLFREQALERT=5 DEADTIME=15 FINALDELAY=5 HOSTSYNC=15 \

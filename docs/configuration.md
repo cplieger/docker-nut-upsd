@@ -26,6 +26,8 @@ The container refuses to start when a value would break a NUT config file. It re
 | `COMMS_WATCHDOG` | Restart the UPS driver when the UPS stops answering, such as after it drops off USB | `true` |
 | `API_ADDRESS` | Address the server listens on. Write IPv6 without brackets, such as `::1` | `0.0.0.0` |
 | `API_PORT` | Port the server listens on | `3493` |
+| `METRICS_PORT` | Port the built-in exporter serves Prometheus metrics on. `0` starts no exporter. Must differ from `API_PORT`. Published only if you map it | `9199` |
+| `METRICS_ADDRESS` | Address the exporter listens on, the same as `API_ADDRESS` unless you set it. Write IPv6 without brackets. A value it cannot listen on stops the container at startup | `$API_ADDRESS` |
 | `POLLFREQ` | Seconds between status checks on mains power. `1` or more | `5` |
 | `POLLFREQALERT` | Seconds between status checks on battery. `1` or more | `5` |
 | `DEADTIME` | Seconds without fresh data before the UPS counts as lost | `15` |

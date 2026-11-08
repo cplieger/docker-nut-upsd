@@ -42,6 +42,10 @@ load_function dbus_liveness_probe
 
 DBUS_PROBE_INTERVAL=300
 LOG="$WORK/probe.log"
+STATE_LOG="$WORK/state.log"
+POWEROFF_PATH_STATE=poweroff-path
+# Records the verdict each probe hands the metrics exporter.
+write_wrapper_state() { printf '%s=%s\n' "$1" "$2" >>"$STATE_LOG"; }
 
 # run_probe <ticks> <mode>: run the loop for <ticks> sleeps with the poweroff-path
 # probe answering per <mode> -- broken (always fails), healthy (always succeeds),
@@ -50,6 +54,7 @@ run_probe() {
   _ticks=$1
   _mode=$2
   : >"$LOG"
+  : >"$STATE_LOG"
   (
     TICKS=0
     dbus_poweroff_path_ok() {
@@ -137,6 +142,12 @@ run_probe 3 healthy
 [ ! -s "$LOG" ] \
   && ok 'a healthy poweroff path logs nothing at all (no false NutUpsdPowerOffPathBroken)' \
   || no 'healthy path silent' "logged: $(head -c 300 "$LOG")"
+
+# --- 4b. every probe records its verdict for the metrics exporter --------------
+run_probe 3 recovering
+[ "$(tr '\n' ' ' <"$STATE_LOG")" = 'poweroff-path=0 poweroff-path=1 poweroff-path=1 ' ] \
+  && ok 'each probe records its verdict for the exporter: 0 while broken, 1 once healthy' \
+  || no 'probe verdict record' "records: $(tr '\n' ' ' <"$STATE_LOG")"
 
 # --- 5. the cadence variable is mandatory ----------------------------------------
 #
