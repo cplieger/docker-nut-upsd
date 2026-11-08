@@ -472,24 +472,29 @@ dbus_poweroff_path_ok() {
 
 # dbus_liveness_probe: background loop started by the entrypoint when host
 # shutdown is enabled. Same loop shape as comms_watchdog (`sleep || true` so a
-# signal-interrupted sleep cannot silently end the loop). Logs error on every
-# failed probe while broken (recurring lines keep the Loki alert firing) and
-# info once on recovery.
+# signal-interrupted sleep cannot silently end the loop). While the path is
+# broken it logs one error per probe with broken_for, the seconds since the
+# outage's first failed probe, so a reader sees one outage and its length; the
+# shipped log rule NutUpsdPowerOffPathBroken needs a line inside its range
+# (tests/shell/dbus_probe_alert_test.sh). Recovery logs one info line with the
+# total.
 dbus_liveness_probe() {
   : "${DBUS_PROBE_INTERVAL:?dbus_liveness_probe requires DBUS_PROBE_INTERVAL}"
-  _dbus_broken=0
+  _dbus_broken_since=""
   while true; do
     if dbus_poweroff_path_ok; then
       write_wrapper_state "$POWEROFF_PATH_STATE" 1
-      if [ "$_dbus_broken" -eq 1 ]; then
-        printf 'level=info msg="D-Bus poweroff path recovered"\n' >&2
+      if [ -n "$_dbus_broken_since" ]; then
+        printf 'level=info msg="D-Bus poweroff path recovered" broken_for=%d\n' \
+          "$(($(watchdog_epoch) - _dbus_broken_since))" >&2
       fi
-      _dbus_broken=0
+      _dbus_broken_since=""
     else
       write_wrapper_state "$POWEROFF_PATH_STATE" 0
-      printf 'level=error msg="D-Bus poweroff path unreachable; host poweroff on battery critical would fail" socket=/run/dbus/system_bus_socket detail="%s"\n' \
-        "$(log_value "${_dbus_detail:-}")" >&2
-      _dbus_broken=1
+      _dbus_now=$(watchdog_epoch)
+      : "${_dbus_broken_since:=$_dbus_now}"
+      printf 'level=error msg="D-Bus poweroff path unreachable; host poweroff on battery critical would fail" broken_for=%d socket=/run/dbus/system_bus_socket detail="%s"\n' \
+        "$((_dbus_now - _dbus_broken_since))" "$(log_value "${_dbus_detail:-}")" >&2
     fi
     sleep "$DBUS_PROBE_INTERVAL" || true
   done
