@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"io/fs"
 	"math"
 	"os"
 	"os/exec"
@@ -253,35 +255,41 @@ func TestUpsmonParentAlive(t *testing.T) {
 	upsd := newFakeUpsd(t, "ups")
 	dir := t.TempDir()
 	exp := testExporter(t, upsd, dir)
-	alive := func() float64 { return gather(t, exp)["nut_upsd_upsmon_parent_alive"] }
+	parent := func() (float64, bool) {
+		v, served := gather(t, exp)["nut_upsd_upsmon_parent_alive"]
+		return v, served
+	}
+	wantDead := func(name string) {
+		t.Helper()
+		if got, served := parent(); !served || got != 0 {
+			t.Errorf("%s: upsmon_parent_alive = %v (served %v), want 0", name, got, served)
+		}
+	}
 
-	if got, served := gather(t, exp)["nut_upsd_upsmon_parent_alive"]; served {
+	if got, served := parent(); served {
 		t.Errorf("no PID recorded: upsmon_parent_alive = %v, want no series", got)
 	}
 	writeState(t, dir, upsmonPIDFile, "not-a-pid")
-	if got, served := gather(t, exp)["nut_upsd_upsmon_parent_alive"]; !served || got != 0 {
-		t.Errorf("unreadable PID recorded: upsmon_parent_alive = %v (served %v), want 0", got, served)
-	}
+	wantDead("PID file holds no PID")
+
 	upsmon := startNamed(t, "upsmon")
 	writeState(t, dir, upsmonPIDFile, strconv.Itoa(upsmon.Process.Pid))
 	// The first scrape can land before the child reads as a running upsmon,
 	// seen under -race on a loaded host, so it gets a bounded wait.
 	deadline := time.Now().Add(5 * time.Second)
-	got := alive()
-	for got != 1 && time.Now().Before(deadline) {
+	got, served := parent()
+	for (!served || got != 1) && time.Now().Before(deadline) {
 		time.Sleep(20 * time.Millisecond)
-		got = alive()
+		got, served = parent()
 	}
-	if got != 1 {
+	if !served || got != 1 {
 		stat, err := os.ReadFile("/proc/" + strconv.Itoa(upsmon.Process.Pid) + "/stat")
-		t.Errorf("running upsmon: upsmon_parent_alive = %v, want 1 (stat %q, %v)", got, stat, err)
+		t.Errorf("running upsmon: upsmon_parent_alive = %v (served %v), want 1 (stat %q, %v)", got, served, stat, err)
 	}
 
 	other := startNamed(t, "notupsmon")
 	writeState(t, dir, upsmonPIDFile, strconv.Itoa(other.Process.Pid))
-	if got := alive(); got != 0 {
-		t.Errorf("PID of another program: upsmon_parent_alive = %v, want 0", got)
-	}
+	wantDead("PID of another program")
 
 	writeState(t, dir, upsmonPIDFile, strconv.Itoa(upsmon.Process.Pid))
 	if err := upsmon.Process.Signal(syscall.SIGKILL); err != nil {
@@ -298,9 +306,13 @@ func TestUpsmonParentAlive(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	if got := alive(); got != 0 {
-		t.Errorf("unreaped upsmon: upsmon_parent_alive = %v, want 0", got)
+	wantDead("unreaped upsmon")
+
+	_ = upsmon.Wait()
+	if _, err := os.Stat("/proc/" + strconv.Itoa(upsmon.Process.Pid)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("the reaped upsmon's /proc entry is still there: %v", err)
 	}
+	wantDead("reaped upsmon")
 }
 
 func TestParseProcStat(t *testing.T) {

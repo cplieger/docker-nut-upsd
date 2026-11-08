@@ -4,7 +4,7 @@ This page lists what docker-nut-upsd writes to its log and the alert rules that 
 
 ## What it logs
 
-docker-nut-upsd logs every event to its container log, and it also serves Prometheus metrics on `METRICS_PORT` (default `9199`; `0` starts no exporter). Every line the image writes itself is logfmt with a `level=` field.
+docker-nut-upsd logs every event to its container log, and it also serves Prometheus metrics on `METRICS_PORT` (default `9199`, `0` starts no exporter). Every line the image writes itself is logfmt with a `level=` field.
 
 `upsmon` runs a notify script for each event the generated `upsmon.conf` routes to it, and the script logs one `event="<TYPE>"` line per event. The routed events are `ONLINE`, `ONBATT`, `LOWBATT`, `FSD`, `SHUTDOWN`, `COMMOK`, `COMMBAD`, `NOCOMM`, `REPLBATT`, `NOPARENT`, `OFF`, `BYPASS`, `OVER`, `CAL`, `ALARM` and `OTHER`, and the clears `NOTOFF`, `NOTBYPASS`, `NOTOVER`, `NOTCAL` and `NOTALARM`.
 
