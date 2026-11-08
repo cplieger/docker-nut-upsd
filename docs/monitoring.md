@@ -14,7 +14,7 @@ If you run no monitoring stack, consider Home Assistant's [NUT integration](http
 
 ## Alerting
 
-Load the rules in [`alerts/logql.yaml`](../alerts/logql.yaml) into Loki's ruler, as [Loading an app's alert rules](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#loading-an-apps-alert-rules) shows. [`alerts/promql.yaml`](../alerts/promql.yaml) holds the same UPS state alerts for a Prometheus ruler, read from the built-in exporter, plus `NutUpsdDown`. Together they cover:
+Load the rules in [`alerts/logql.yaml`](../alerts/logql.yaml) into Loki's ruler, as [Loading an app's alert rules](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#loading-an-apps-alert-rules) shows. [`alerts/promql.yaml`](../alerts/promql.yaml) holds the same UPS state alerts for a Prometheus ruler, read from the built-in exporter, plus `NutUpsdDown`. Load the `nut-upsd-events` group of `alerts/logql.yaml` always, and its `nut-upsd-state` group only if you do not load `alerts/promql.yaml`, or each UPS state alert fires twice. Together they cover:
 
 | Alert | Fires when | Severity |
 | --- | --- | --- |
@@ -59,9 +59,9 @@ An `event=` line with no alert is one of these three, or a parsed field that los
 
 A state rule stays firing while its condition holds, because its source repeats the line faster than the window. A pair rule reads the latest of a flag's raise and its clear, so it stays firing from the raise until the clear. A transition rule marks a change and resolves when its line leaves the window. No window can make a transition rule track a condition, because the window would have to outlast the condition itself. Each rule's own source decides its shape, and the notes below name it. `NutUpsdContainerError` has neither shape, because its sources range from a one-shot boot refusal to the watchdog's repeating escalation.
 
-The group evaluates every 10 seconds instead of the ruler's 1-minute default. `NutUpsdOnBattery` pairs this with `for: 10s`, so the battery state must hold across one full interval before the alert fires. A brief dip, such as a load surge from a laser printer's fuser on the UPS, clears within one `upsmon` poll and stays silent. A real outage fires in about 10 to 20 seconds.
+Both groups evaluate every 10 seconds instead of the ruler's 1-minute default. `NutUpsdOnBattery` pairs this with `for: 10s`, so the battery state must hold across one full interval before the alert fires. A brief dip, such as a load surge from a laser printer's fuser on the UPS, clears within one `upsmon` poll and stays silent. A real outage fires in about 10 to 20 seconds.
 
-A 1-minute evaluation could delay that by up to a minute, and the runtime left depends on the load and can be short. The interval applies to every rule in the group. If the extra query load is not worth it for the slower rules, raise it.
+A 1-minute evaluation could delay that by up to a minute, and the runtime left depends on the load and can be short. The interval applies to every rule in a group. If the extra query load is not worth it for the slower rules, raise it.
 
 ### Notes on each rule
 
@@ -101,7 +101,7 @@ This is a state rule. `upsmon` repeats `NOCOMM` every `NOCOMMWARNTIME` seconds w
 
 This is a transition rule. `lifecycle.sh` writes the record once per watchdog-repaired outage, when comms return, and only after at least one driver restart. So one record means the watchdog restarted the driver and comms came back. The rule alerts on the first repair rather than waiting for a second outage, because `stale_secs` and `restarts` already carry the whole outage. A recovery with `COMMS_WATCHDOG=false`, or one the UPS made without a driver restart, writes no record and is outside this rule.
 
-The alert resolves 6 hours after the record. That is the widest range in the group, and its query cost on a live ruler has not been measured. If the cost matters, shorten it or raise the group interval. The rule does not group by `container`, because the message reads `stale_secs` and `restarts` from the matched series. Two repairs in one window alert separately only when those values differ.
+The alert resolves 6 hours after the record. That is the widest range in the `nut-upsd-events` group, and its query cost on a live ruler has not been measured. If the cost matters, shorten it or raise the group interval. The rule does not group by `container`, because the message reads `stale_secs` and `restarts` from the matched series. Two repairs in one window alert separately only when those values differ.
 
 #### NutUpsdHardwareFault
 
@@ -115,7 +115,7 @@ NUT has no clear for `REPLBATT`. It repeats the event every `RBWARNTIME` seconds
 
 The pair rules map a raise to 1 and its clear to 0, and keep the latest value in a 7-day range, as `NutUpsdOnBattery` does in its 2-minute range. A clear is logged once and a raise is not repeated, so with no clear the alert holds for 7 days after the raise.
 
-The image's `starting upsmon` line maps to 0 in every pair. `upsmon` starts with every flag clear and reports each flag that still holds on its first poll. So a clear that happened while the container was down cannot hold the alert, and each container start reports a flag that still holds. The alert can resolve until that poll. If your Loki keeps less than 7 days of logs, a flag holds only as long as its raise stays in Loki.
+The image's `starting upsmon` line maps to 0 in every pair. `upsmon` starts with every flag clear and reports each flag that still holds on its first poll. So a clear that happened while the container was down cannot hold the alert, and each container start reports a flag that still holds. The alert can resolve until that poll. If your Loki keeps less than 7 days of logs, a flag holds only as long as its raise stays in Loki. Each evaluation of a pair reads up to 7 days of this container's log, and that query cost on a live ruler has not been measured. If it matters, raise the `nut-upsd-state` group interval or shorten the ranges.
 
 #### NutUpsdProtectionDegraded
 

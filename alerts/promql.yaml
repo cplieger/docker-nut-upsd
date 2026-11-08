@@ -1,10 +1,10 @@
 # Alert rules for docker-nut-upsd as a Prometheus rule group, for Prometheus,
 # Mimir, vmalert or any ruler that reads them. They read the image's exporter,
 # GET /metrics on METRICS_PORT (default 9199), scraped as job `nut-upsd`. This
-# file is the alternative to the UPS state rules in alerts/logql.yaml, under
-# the same alert names: load one of the two for them, never both. Load the
-# event rules of alerts/logql.yaml beside this file either way, because a
-# forced shutdown, a failed poweroff and an error line leave no series.
+# file is the alternative to the nut-upsd-state group of alerts/logql.yaml,
+# under the same alert names: load one of the two, never both. Load that
+# file's nut-upsd-events group beside this file either way, because a forced
+# shutdown, a failed poweroff and an error line leave no series.
 # NutUpsdDown exists only here. Thresholds, for: windows and severity labels
 # are starting points. docs/monitoring.md explains each rule.
 groups:
