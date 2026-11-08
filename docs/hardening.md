@@ -51,6 +51,8 @@ NUT, libmodbus and Net-SNMP are built from pinned upstream sources on an Alpine 
 | Dependency | Source |
 | --- | --- |
 | alpine | [Alpine](https://hub.docker.com/_/alpine) |
+| github.com/cplieger/go | [GitHub](https://github.com/cplieger/go) |
+| golang | [Docker Hub](https://hub.docker.com/_/golang) |
 | libmodbus | [GitHub](https://github.com/stephane/libmodbus) |
 | netsnmp | [GitHub](https://github.com/net-snmp/net-snmp) |
 | nut | [GitHub](https://github.com/networkupstools/nut) |

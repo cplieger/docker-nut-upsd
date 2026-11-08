@@ -10,10 +10,6 @@
 # it matches while the path is broken, so the line must RECUR rather than fire
 # once and go quiet. Both properties are asserted here.
 #
-# Each line also carries broken_for, the seconds since the outage's first failed
-# probe, so a reader sees one outage and its length; the recovery line carries the
-# total.
-#
 # tests/smoke.sh checks that this function is defined, and covers
 # dbus_poweroff_path_ok's negative case; the loop's own state machine and its log
 # lines are exercised nowhere.

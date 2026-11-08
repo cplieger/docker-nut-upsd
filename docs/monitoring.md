@@ -239,7 +239,7 @@ If a mounted `upsmon.conf.user` leaves out `NOTIFYCMD`, this warning is the only
 | You run | A stopped container | A UPS that stops answering |
 | --- | --- | --- |
 | Prometheus with `alerts/promql.yaml` | `NutUpsdDown` | `NutUpsdCommsLost`, and `/healthz` turns 503 |
-| Loki only | no rule sees a stopped container. `NutUpsdContainerError` fires on the error line of each refused or failed start | `NutUpsdCommsLost` |
+| Loki only | no rule sees a stopped container. `NutUpsdContainerError` fires on the error line of each refused or failed start. Add an uptime prober on `/healthz`, as in the row below | `NutUpsdCommsLost` |
 | Docker or Unraid only | an uptime prober on `/healthz`, or on TCP port 3493 with `METRICS_PORT=0`, or something that watches Docker health | the same |
 
 Every NUT client also logs its own `COMMBAD` and `NOCOMM` events when it loses this server. A `upsmon` that hangs while its parent stays alive is not detected.

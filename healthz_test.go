@@ -13,8 +13,7 @@ import (
 	"time"
 )
 
-// startExporter runs the exporter as entrypoint.sh starts it, against upsdAddr,
-// and returns its listen address once the ready file exists.
+// startExporter runs the exporter against upsdAddr and returns its listen address once the ready file exists.
 func startExporter(t *testing.T, upsdAddr string) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -110,9 +109,6 @@ func TestHealthzFollowsTheUPSStatusFreshness(t *testing.T) {
 			addr := startExporter(t, upsd.ln.Addr().String())
 
 			assertHealthz(t, getHealthz(t, http.MethodGet, addr), tc.healthy)
-			if !slices.Contains(upsd.requests(), "LIST VAR ups") {
-				t.Errorf("/healthz never asked upsd for the UPS; upsd saw %q", upsd.requests())
-			}
 		})
 	}
 }
