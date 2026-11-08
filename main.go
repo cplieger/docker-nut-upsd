@@ -1,6 +1,7 @@
 // Command nut-exporter serves the UPS state upsd reports, and the state the
-// image's own shell processes record, as Prometheus metrics on GET /metrics.
-// entrypoint.sh starts it, validates its settings and supervises it.
+// image's own shell processes record, as Prometheus metrics on GET /metrics,
+// and the image's health verdict on GET /healthz. entrypoint.sh starts it,
+// validates its settings and supervises it.
 package main
 
 import (
@@ -92,14 +93,15 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	}
 
 	reg := measure.NewRegistry(metricPrefix)
-	exp := newExporter(upsdClient{addr: cfg.upsd, ups: cfg.ups},
-		wrapperState{dir: cfg.stateDir, proc: "/proc"}, cfg.hostPoweroff)
+	upsd := upsdClient{addr: cfg.upsd, ups: cfg.ups}
+	exp := newExporter(upsd, wrapperState{dir: cfg.stateDir, proc: "/proc"}, cfg.hostPoweroff)
 	if err := exp.register(reg); err != nil {
 		_ = ln.Close()
 		return fmt.Errorf("register metrics: %w", err)
 	}
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", reg.Handler())
+	mux.Handle("GET /healthz", healthzHandler(upsd))
 	logger.Info("metrics exporter listening", "address", ln.Addr().String())
 	return httpserver.Run(ctx, newServer(mux, logger), ln)
 }
