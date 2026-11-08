@@ -206,15 +206,27 @@ func TestPoweroffPathSeries(t *testing.T) {
 	}
 }
 
-// startNamed runs `sleep 60` from a copy named name, so the kernel's comm for
-// the process is name.
+// TestHelperProcess is the child startNamed runs: it blocks until killed. It
+// does nothing in a normal test run.
+func TestHelperProcess(t *testing.T) {
+	if os.Getenv("NUT_EXPORTER_TEST_HELPER") != "block" {
+		return
+	}
+	time.Sleep(time.Minute)
+	os.Exit(0)
+}
+
+// startNamed runs a copy of this test binary named name, blocked in
+// TestHelperProcess, so the kernel's comm for the process is name. A copy of a
+// system tool is not used: a multicall coreutils exits at once under a name
+// it does not know.
 func startNamed(t *testing.T, name string) *exec.Cmd {
 	t.Helper()
-	sleep, err := exec.LookPath("sleep")
+	self, err := os.Executable()
 	if err != nil {
-		t.Skip("no sleep binary to copy")
+		t.Fatal(err)
 	}
-	src, err := os.ReadFile(sleep)
+	src, err := os.ReadFile(self)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -225,7 +237,8 @@ func startNamed(t *testing.T, name string) *exec.Cmd {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(bin, "60")
+	cmd := exec.Command(bin, "-test.run=^TestHelperProcess$")
+	cmd.Env = append(os.Environ(), "NUT_EXPORTER_TEST_HELPER=block")
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
@@ -247,8 +260,17 @@ func TestUpsmonParentAlive(t *testing.T) {
 	}
 	upsmon := startNamed(t, "upsmon")
 	writeState(t, dir, upsmonPIDFile, strconv.Itoa(upsmon.Process.Pid))
-	if got := alive(); got != 1 {
-		t.Errorf("running upsmon: upsmon_parent_alive = %v, want 1", got)
+	// The first scrape can land before the child reads as a running upsmon,
+	// seen under -race on a loaded host, so it gets a bounded wait.
+	deadline := time.Now().Add(5 * time.Second)
+	got := alive()
+	for got != 1 && time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+		got = alive()
+	}
+	if got != 1 {
+		stat, err := os.ReadFile("/proc/" + strconv.Itoa(upsmon.Process.Pid) + "/stat")
+		t.Errorf("running upsmon: upsmon_parent_alive = %v, want 1 (stat %q, %v)", got, stat, err)
 	}
 
 	other := startNamed(t, "notupsmon")
@@ -261,7 +283,7 @@ func TestUpsmonParentAlive(t *testing.T) {
 	if err := upsmon.Process.Signal(syscall.SIGKILL); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
+	deadline = time.Now().Add(5 * time.Second)
 	for {
 		stat, err := os.ReadFile("/proc/" + strconv.Itoa(upsmon.Process.Pid) + "/stat")
 		if _, state, ok := parseProcStat(stat); err == nil && ok && state == 'Z' {
