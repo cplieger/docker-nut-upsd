@@ -255,8 +255,12 @@ func TestUpsmonParentAlive(t *testing.T) {
 	exp := testExporter(t, upsd, dir)
 	alive := func() float64 { return gather(t, exp)["nut_upsd_upsmon_parent_alive"] }
 
-	if got := alive(); got != 0 {
-		t.Errorf("no PID recorded: upsmon_parent_alive = %v, want 0", got)
+	if got, served := gather(t, exp)["nut_upsd_upsmon_parent_alive"]; served {
+		t.Errorf("no PID recorded: upsmon_parent_alive = %v, want no series", got)
+	}
+	writeState(t, dir, upsmonPIDFile, "not-a-pid")
+	if got, served := gather(t, exp)["nut_upsd_upsmon_parent_alive"]; !served || got != 0 {
+		t.Errorf("unreadable PID recorded: upsmon_parent_alive = %v (served %v), want 0", got, served)
 	}
 	upsmon := startNamed(t, "upsmon")
 	writeState(t, dir, upsmonPIDFile, strconv.Itoa(upsmon.Process.Pid))

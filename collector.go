@@ -9,8 +9,7 @@ import (
 	"github.com/cplieger/go/measure"
 )
 
-// metricPrefix names every family this exporter serves, so an alert rule
-// written against one series name is written against them all.
+// metricPrefix prefixes every family name; alerts/promql.yaml reads the prefixed names.
 const metricPrefix = "nut_upsd"
 
 // statusFlags are the ups.status tokens a NUT v2.8.5 driver sets
@@ -71,7 +70,7 @@ func newExporter(upsd upsdClient, state wrapperState, hostPoweroff bool) *export
 		driverRestarts: measure.NewCounterDesc("driver_restarts_total",
 			"UPS driver restarts the comms watchdog issued since the container started.", nil),
 		parentAlive: measure.NewGaugeDesc("upsmon_parent_alive",
-			"1 while upsmon's privileged parent, the process that runs the shutdown command, is running.", nil),
+			"1 while upsmon's privileged parent, the process that runs the shutdown command, is running. Served only once the container has started upsmon.", nil),
 		poweroffEnabled: measure.NewGaugeDesc("host_poweroff_enabled",
 			"1 when SHUTDOWN_ON_BATTERY_CRITICAL lets a forced shutdown power off the host.", nil),
 		poweroffOK: measure.NewGaugeDesc("poweroff_path_ok",
@@ -108,7 +107,9 @@ func (e *exporter) collect(ctx context.Context, em *measure.Emitter) {
 	}
 
 	em.Emit(e.driverRestarts, float64(e.state.driverRestarts()))
-	em.Emit(e.parentAlive, boolValue(e.state.upsmonParentAlive()))
+	if alive, recorded := e.state.upsmonParent(); recorded {
+		em.Emit(e.parentAlive, boolValue(alive))
+	}
 	em.Emit(e.poweroffEnabled, boolValue(e.hostPoweroff))
 	if ok, at, found := e.state.poweroffPath(); found {
 		em.Emit(e.poweroffOK, boolValue(ok))

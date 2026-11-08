@@ -313,7 +313,7 @@ start_nut_daemon() {
 # Before the NUT daemons, so a malformed METRICS_ADDRESS or a taken port stops
 # the boot before anything is started.
 if [ "$METRICS_PORT" -ne 0 ]; then
-  printf 'level=info msg="starting metrics exporter" listen=%s\n' "$(metrics_listen_address)" >&2
+  printf 'level=info msg="starting metrics exporter" listen="%s"\n' "$(log_value "$(metrics_listen_address)")" >&2
   start_metrics_exporter || {
     teardown_all
     exit 1

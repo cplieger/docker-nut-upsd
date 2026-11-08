@@ -250,7 +250,7 @@ tests:
         flag: 'OFF'
       exp_annotations:
         summary: UPS protection became unavailable (nut-upsd:9199)
-        description: 'Either the UPS reports OFF, off or asleep, or upsmon''s parent is not running, so a forced shutdown cannot power off the host. With OFFDURATION 30, upstream''s default, OFF for 30 seconds forces a shutdown. Restart the container for the parent.
+        description: 'Either the UPS reports OFF, or upsmon''s parent is not running, so a forced shutdown cannot power off the host. With OFFDURATION 30, upstream''s default, OFF for 30 seconds forces a shutdown. Restart the container for the parent.
 
           '
   - eval_time: 2m
@@ -265,9 +265,23 @@ tests:
         instance: nut-upsd:9199
       exp_annotations:
         summary: UPS protection became unavailable (nut-upsd:9199)
-        description: 'Either the UPS reports OFF, off or asleep, or upsmon''s parent is not running, so a forced shutdown cannot power off the host. With OFFDURATION 30, upstream''s default, OFF for 30 seconds forces a shutdown. Restart the container for the parent.
+        description: 'Either the UPS reports OFF, or upsmon''s parent is not running, so a forced shutdown cannot power off the host. With OFFDURATION 30, upstream''s default, OFF for 30 seconds forces a shutdown. Restart the container for the parent.
 
           '
+- name: NutUpsdProtectionUnavailable stays silent while the container has not started upsmon yet
+  interval: 1m
+  input_series:
+  - series: nut_upsd_ups_status{job="nut-upsd", instance="nut-upsd:9199", flag="OFF"}
+    values: 0x5
+  - series: nut_upsd_upsmon_parent_alive{job="nut-upsd", instance="nut-upsd:9199"}
+    values: _x3 1x2
+  alert_rule_test:
+  - eval_time: 2m
+    alertname: NutUpsdProtectionUnavailable
+    exp_alerts: []
+  - eval_time: 5m
+    alertname: NutUpsdProtectionUnavailable
+    exp_alerts: []
 - name: NutUpsdPowerOffPathBroken holds while the probe fails and clears at a good probe
   interval: 5m
   input_series:

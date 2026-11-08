@@ -87,6 +87,8 @@ groups:
             unprotected load, OVER an overload. Losing comms during CAL or
             BYPASS forces a shutdown. OVER is critical only when OVERDURATION
             is configured, and the generated upsmon.conf does not set it.
+      # The parent series is absent until the container has started upsmon,
+      # so a container that is still starting does not fire this rule.
       - alert: NutUpsdProtectionUnavailable
         expr: nut_upsd_ups_status{flag="OFF"} == 1 or nut_upsd_upsmon_parent_alive == 0
         for: 0m
@@ -95,10 +97,10 @@ groups:
         annotations:
           summary: "UPS protection became unavailable ({{ $labels.instance }})"
           description: >
-            Either the UPS reports OFF, off or asleep, or upsmon's parent is
-            not running, so a forced shutdown cannot power off the host. With
-            OFFDURATION 30, upstream's default, OFF for 30 seconds forces a
-            shutdown. Restart the container for the parent.
+            Either the UPS reports OFF, or upsmon's parent is not running, so
+            a forced shutdown cannot power off the host. With OFFDURATION 30,
+            upstream's default, OFF for 30 seconds forces a shutdown. Restart
+            the container for the parent.
       # The probe runs only with SHUTDOWN_ON_BATTERY_CRITICAL=true and
       # DBUS_PROBE_INTERVAL above 0; otherwise the series is absent.
       - alert: NutUpsdPowerOffPathBroken

@@ -56,23 +56,24 @@ func (s wrapperState) driverRestarts() uint64 {
 	return n
 }
 
-// upsmonParentAlive reports whether the PID the entrypoint recorded is a
-// running upsmon. A zombie counts as dead: the entrypoint has not reaped it yet.
-func (s wrapperState) upsmonParentAlive() bool {
+// upsmonParent reports whether the PID the entrypoint recorded is a running
+// upsmon; recorded is false until the entrypoint has started upsmon. A zombie
+// counts as dead: the entrypoint has not reaped it yet.
+func (s wrapperState) upsmonParent() (alive, recorded bool) {
 	v, _, ok := s.read(upsmonPIDFile)
 	if !ok {
-		return false
+		return false, false
 	}
 	pid, err := strconv.Atoi(v)
 	if err != nil || pid < 1 {
-		return false
+		return false, true
 	}
 	stat, err := os.ReadFile(filepath.Join(s.proc, strconv.Itoa(pid), "stat"))
 	if err != nil {
-		return false
+		return false, true
 	}
 	comm, state, ok := parseProcStat(stat)
-	return ok && comm == "upsmon" && state != 'Z' && state != 'X'
+	return ok && comm == "upsmon" && state != 'Z' && state != 'X', true
 }
 
 // parseProcStat reads the comm and state fields of /proc/<pid>/stat. comm is

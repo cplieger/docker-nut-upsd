@@ -96,7 +96,7 @@ order_ok=$(awk '
 
 run_start_block() (
   METRICS_PORT=$1
-  METRICS_ADDRESS=0.0.0.0
+  METRICS_ADDRESS=${3:-0.0.0.0}
   START_RC=$2
   STARTS="$WORK/starts"
   : >"$STARTS"
@@ -105,7 +105,7 @@ run_start_block() (
     return "$START_RC"
   }
   teardown_all() { printf 'teardown\n' >>"$STARTS"; }
-  metrics_listen_address() { printf '0.0.0.0:%s' "$METRICS_PORT"; }
+  metrics_listen_address() { printf '%s:%s' "$METRICS_ADDRESS" "$METRICS_PORT"; }
   # shellcheck disable=SC1090
   . "$start_block"
   printf 'reached\n' >>"$STARTS"
@@ -124,6 +124,10 @@ run_start_block 9199 0 2>"$ERR" || _rc=$?
 [ "$_rc" -eq 0 ] && [ "$(tr '\n' ' ' <"$WORK/starts")" = 'start reached ' ] \
   && ok 'METRICS_PORT=9199 starts the exporter and boots on' \
   || no 'METRICS_PORT=9199 start' "rc=$_rc calls: $(tr '\n' ' ' <"$WORK/starts")"
+run_start_block 9199 0 'a"b=c' 2>"$ERR" || :
+grep -Fxq 'level=info msg="starting metrics exporter" listen="ab=c:9199"' "$ERR" \
+  && ok 'the starting record quotes the listen address and drops its double quotes' \
+  || no 'starting record listen field' "stderr: $(head -c 200 "$ERR")"
 _rc=0
 run_start_block 9199 1 2>"$ERR" || _rc=$?
 [ "$_rc" -eq 1 ] && [ "$(tr '\n' ' ' <"$WORK/starts")" = 'start teardown ' ] \

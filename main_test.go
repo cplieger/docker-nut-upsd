@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -115,6 +116,49 @@ func TestRunServesMetricsAfterTheReadyFile(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("run did not return after cancel")
 	}
+}
+
+func TestServerLogsNetHTTPErrorsAtErrorLevel(t *testing.T) {
+	var buf syncBuffer
+	srv := newServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic("boom")
+	}), newLogger(&buf))
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() { _ = srv.Serve(ln) }()
+	t.Cleanup(func() { _ = srv.Close() })
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	if resp, err := client.Get("http://" + ln.Addr().String() + "/"); err == nil {
+		_ = resp.Body.Close()
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(buf.String(), "boom") && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := buf.String(); !strings.HasPrefix(got, `level=error msg="http: panic serving`) {
+		t.Errorf("net/http's panic record = %q, want it to open with level=error", got)
+	}
+}
+
+// syncBuffer is a buffer the server's goroutines and the test share.
+type syncBuffer struct {
+	b  bytes.Buffer
+	mu sync.Mutex
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }
 
 func TestLoggerOpensEachRecordWithItsLevel(t *testing.T) {

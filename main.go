@@ -100,11 +100,18 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	}
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", reg.Handler())
-	srv := httpserver.New(mux)
+	logger.Info("metrics exporter listening", "address", ln.Addr().String())
+	return httpserver.Run(ctx, newServer(mux, logger), ln)
+}
+
+// newServer routes net/http's own error lines through logger at error level,
+// so they carry level= like every other record.
+func newServer(h http.Handler, logger *slog.Logger) *http.Server {
+	srv := httpserver.New(h)
 	srv.ReadTimeout = 10 * time.Second
 	srv.WriteTimeout = 10 * time.Second
-	logger.Info("metrics exporter listening", "address", ln.Addr().String())
-	return httpserver.Run(ctx, srv, ln)
+	srv.ErrorLog = slog.NewLogLogger(logger.Handler(), slog.LevelError)
+	return srv
 }
 
 func writeReady(dir string) error {
