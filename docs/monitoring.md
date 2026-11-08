@@ -14,7 +14,7 @@ If you run no monitoring stack, consider Home Assistant's [NUT integration](http
 
 ## Alerting
 
-Load the rules in [`alerts/logql.yaml`](../alerts/logql.yaml) into Loki's ruler, as [Loading an app's alert rules](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#loading-an-apps-alert-rules) shows. They cover:
+Load the rules in [`alerts/logql.yaml`](../alerts/logql.yaml) into Loki's ruler, as [Loading an app's alert rules](https://github.com/cplieger/docs/blob/main/docs/monitoring.md#loading-an-apps-alert-rules) shows. [`alerts/promql.yaml`](../alerts/promql.yaml) holds the same UPS state alerts for a Prometheus ruler, read from the built-in exporter, plus `NutUpsdDown`. Together they cover:
 
 | Alert | Fires when | Severity |
 | --- | --- | --- |
@@ -31,6 +31,7 @@ Load the rules in [`alerts/logql.yaml`](../alerts/logql.yaml) into Loki's ruler,
 | `NutUpsdPowerOffPathBroken` | the D-Bus check logs `unreachable`. Host shutdown is on, but a forced shutdown could not power off the host right now | warning |
 | `NutUpsdPowerOffFailed` | every D-Bus `PowerOff` call failed, or an accepted call was later refuted, during a forced shutdown | critical |
 | `NutUpsdContainerError` | the image logs its own `level=error` line, such as a refused setting, a failed daemon start, a failed watchdog restart or a shutdown error | warning |
+| `NutUpsdDown` | the scrape of the built-in exporter failed or found no target for 5 minutes, in `alerts/promql.yaml` only | warning |
 
 The rules for `NutUpsdPowerOffPathBroken` and `NutUpsdPowerOffFailed` need `SHUTDOWN_ON_BATTERY_CRITICAL=true`, and `DBUS_PROBE_INTERVAL=0` turns off only the first one. The notes below explain each rule's window and shape.
 

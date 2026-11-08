@@ -116,7 +116,15 @@ func TestStaleDataServesNoUPSState(t *testing.T) {
 	if _, ok := got["nut_upsd_ups_status|OL"]; ok {
 		t.Error("stale data still serves ups_status")
 	}
-	if reqs := upsd.requests(); len(reqs) != 2 || reqs[0] != "LIST VAR ups" || reqs[1] != "LOGOUT" {
+	// The client closes after LOGOUT without waiting for the reply, so the fake
+	// may read it after gather returns.
+	deadline := time.Now().Add(5 * time.Second)
+	reqs := upsd.requests()
+	for len(reqs) < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+		reqs = upsd.requests()
+	}
+	if len(reqs) != 2 || reqs[0] != "LIST VAR ups" || reqs[1] != "LOGOUT" {
 		t.Errorf("upsd saw %q, want LIST VAR ups then LOGOUT", reqs)
 	}
 }
