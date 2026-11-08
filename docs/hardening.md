@@ -1,10 +1,12 @@
 # Security
 
-This page covers how docker-nut-upsd protects its port and credentials, how TLS works, what runs with which privileges, and what the image contains. Read it before you expose the server beyond one trusted network.
+This page covers how docker-nut-upsd protects its ports and credentials, how TLS works, what runs with which privileges, and what the image contains. Read it before you expose the server beyond one trusted network.
 
 ## Exposure and credentials
 
 NUT clients decide when to shut down from the status that `upsd` serves. Anyone who can reach port 3493 can read the UPS status without a password, and the `admin` account can force a shutdown of every client. Protect port 3493 with strong `API_PASSWORD` and `ADMIN_PASSWORD` values, and restrict who can reach the port. A Synology NAS logs in only as `monuser` with `secret`, so where one follows this server, restricting the port is the protection that remains.
+
+The exporter on `METRICS_PORT`, `9199` by default, serves `/metrics` and `/healthz` with no login. It is read-only. It shows the UPS state port 3493 already gives anyone, plus the watchdog, `upsmon` and poweroff check state, and it accepts no command. The compose example does not publish it. Publish it only to your monitoring network, or set `METRICS_PORT=0` to run no exporter. After it binds its port, the exporter runs as the `nut` user.
 
 The generated `admin` password and the internal monitor password are kept in `/var/run/nut-secrets`, a directory only root can read. They are written to a temporary file and renamed into place.
 
@@ -44,7 +46,7 @@ A mounted `upsd.conf.user` owns the TLS directives, and its `LISTEN` line must m
 
 ## What the image contains
 
-NUT, libmodbus and Net-SNMP are built from pinned upstream sources on an Alpine Linux base. The Alpine base image and those three source releases are pinned, and [Renovate](https://github.com/renovatebot/renovate) updates the pins. The Alpine packages the image installs are not pinned, and each image build takes their current versions.
+NUT, libmodbus and Net-SNMP are built from pinned upstream sources on an Alpine Linux base. The metrics exporter, `nut-exporter`, is a Go program built from this repository. The Alpine base image, the Go toolchain image, the Go modules and those three source releases are pinned, and [Renovate](https://github.com/renovatebot/renovate) updates the pins. The Alpine packages the image installs are not pinned, and each image build takes their current versions.
 
 | Dependency | Source |
 | --- | --- |

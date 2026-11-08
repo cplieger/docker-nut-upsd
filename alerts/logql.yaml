@@ -1,13 +1,13 @@
 # Loki ruler (LogQL) alert rules for docker-nut-upsd. Ship the container's logs
-# to Loki, for example with Grafana Alloy's Docker log discovery, and load this
-# file into Loki's ruler. It holds two groups by role: load nut-upsd-events
-# always, and load nut-upsd-state only if you do not load alerts/promql.yaml,
-# which holds the same state alerts under the same names. The rules match the
-# event=<TYPE> line upsmon's NOTIFYCMD logs, the image's own level=error records
-# and two raw upsmon lines. Every event the generated upsmon.conf routes to
-# NOTIFYCMD has a rule below except COMMBAD, COMMOK and OTHER. Thresholds,
-# for: windows and severity labels are starting points. Adjust the container
-# selector to the label your log collector sets.
+# to Loki and load this file into Loki's ruler. It holds two groups by role:
+# load nut-upsd-events always, and load nut-upsd-state only if you do not load
+# alerts/promql.yaml, which holds the same state alerts under the same names
+# plus NutUpsdDown, which has no log rule here. The rules match the event=<TYPE>
+# line upsmon's NOTIFYCMD logs, the image's own level=error records and two raw
+# upsmon lines. Every event the generated upsmon.conf routes to NOTIFYCMD has a
+# rule below except COMMBAD, COMMOK and OTHER. Thresholds, for: windows and
+# severity labels are starting points. Adjust the container selector to the
+# label your log collector sets.
 groups:
   # Role: always load, alone or beside alerts/promql.yaml, which has no rule
   # for these events.

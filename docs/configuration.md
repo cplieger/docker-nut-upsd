@@ -6,7 +6,7 @@ This page lists every setting of docker-nut-upsd and explains the ones whose eff
 
 Every setting is an environment variable in `compose.yaml`. At each start the container checks the values and writes NUT's four config files from them: `ups.conf`, `upsd.conf`, `upsd.users` and `upsmon.conf`. Recreate the container with `docker compose up -d` after a change.
 
-The container refuses to start when a value would break a NUT config file. It rejects control characters everywhere and NUT's config delimiters where the table says so, and the log line names the variable.
+The container refuses to start when a value would break a NUT config file. It rejects control characters everywhere and NUT's config delimiters where the table says so, and the log line names the variable. It also refuses a `METRICS_PORT` outside 0 to 65535 or equal to `API_PORT`, and a `METRICS_ADDRESS` the exporter cannot listen on.
 
 ## Every setting
 
@@ -26,7 +26,7 @@ The container refuses to start when a value would break a NUT config file. It re
 | `COMMS_WATCHDOG` | Restart the UPS driver when the UPS stops answering, such as after it drops off USB | `true` |
 | `API_ADDRESS` | Address the server listens on. Write IPv6 without brackets, such as `::1` | `0.0.0.0` |
 | `API_PORT` | Port the server listens on | `3493` |
-| `METRICS_PORT` | Port the built-in exporter serves Prometheus metrics on. `0` starts no exporter. Must differ from `API_PORT`. Published only if you map it | `9199` |
+| `METRICS_PORT` | Port the built-in exporter serves Prometheus metrics and `/healthz` on. `0` starts no exporter. Must differ from `API_PORT`. Published only if you map it | `9199` |
 | `METRICS_ADDRESS` | Address the exporter listens on, the same as `API_ADDRESS` unless you set it. Write IPv6 without brackets. A value it cannot listen on stops the container at startup | `$API_ADDRESS` |
 | `POLLFREQ` | Seconds between status checks on mains power. `1` or more | `5` |
 | `POLLFREQALERT` | Seconds between status checks on battery. `1` or more | `5` |
@@ -103,7 +103,7 @@ Low battery is the usual trigger. The generated `upsmon.conf` sets `OFFDURATION 
 
 When the battery is critical, the monitor runs the shutdown command and exits. With host shutdown off, it logs the forced shutdown and leaves the host running. The container then exits, and the example restart policy starts it again, which repeats until mains power returns.
 
-While host shutdown is on, the container checks every `DBUS_PROBE_INTERVAL` seconds that the host would accept a power-off request, and logs an error when it would not. The `NutUpsdPowerOffPathBroken` alert keys on that line. Keep that alert's window above twice this interval, because the alert stays active only while the error line recurs.
+While host shutdown is on, the container checks every `DBUS_PROBE_INTERVAL` seconds that the host would accept a power-off request, and logs an error when it would not. The `NutUpsdPowerOffPathBroken` log rule keys on that line, and the metrics page reports the same check result. Keep that rule's window above twice this interval, because it stays active only while the error line recurs.
 
 ## Your own NUT config files
 
@@ -112,11 +112,11 @@ Mount `/etc/nut/ups.conf.user`, `/etc/nut/upsd.conf.user`, `/etc/nut/upsd.users.
 - In `ups.conf.user`, keep the section name `[...]` equal to `UPS_NAME` and the `driver` directive equal to `UPS_DRIVER`. The healthcheck, the generated `upsmon.conf` and the comms watchdog use the section name, and the container waits for the driver's PID file `/var/run/nut/$UPS_DRIVER-$UPS_NAME.pid`. Either mismatch stops the boot. The log shows `UPS driver did not confirm a live PID for the expected binary in time`, the container exits about five seconds in, and the restart policy brings it back to the same state.
 - The serial Modbus drivers are `apc_modbus`, `generic_modbus` and `adelsystem_cbi`. Give them a standard POSIX baud rate, such as 9600, their default. Every standard rate from 110 up to 115200 and beyond works. libmodbus is built here without custom-rate support, which does not compile on Alpine. A rate such as 14400 or 28800 is then accepted but opened at 9600, and the driver never reaches the device. The log shows a communication failure and does not name the baud rate.
 - In `ups.conf.user`, keep the driver's worst-case start inside 90s, the outer bound the container puts on `upsdrvctl start`. NUT's own `maxstartdelay` defaults to 75 seconds per driver and `maxretry` to 1 attempt, as the [ups.conf manual](https://networkupstools.org/docs/man/ups.conf.html) says. Raising either can pass that bound, and `maxretry 2` alone allows up to 75 + 5 + 75 = 155 seconds. The log then shows `upsdrvctl start failed or timed out at boot`, the container exits, and the restart policy repeats it.
-- In `upsd.conf.user`, keep `LISTEN` on `API_ADDRESS` and `API_PORT`, where the health checks look. A different `LISTEN` fails every check against a server that works, and the container exits after about a minute of failed checks.
+- In `upsd.conf.user`, keep `LISTEN` on `API_ADDRESS` and `API_PORT`, where the health checks and the metrics exporter look. A different `LISTEN` fails every check against a server that works, and the container exits after about a minute of failed checks.
 - In `upsd.conf.user`, your file owns the TLS directives. [Security](hardening.md#tls-starttls) says which certificate path to name.
 - In `upsmon.conf.user`, keep a `SHUTDOWNCMD` line. Without it a forced shutdown does nothing on the host, even with `SHUTDOWN_ON_BATTERY_CRITICAL=true`, and `upsmon` prints `Warning: no shutdown command defined!` once at start.
 - In `upsmon.conf.user`, keep `POWERDOWNFLAG /var/run/nut-secrets/killpower` at that exact path. Otherwise the comms watchdog cannot stand down during a real host power-off. A driver restart then causes a short forced-shutdown blackout for network clients and skips the `HOSTSYNC` wait, because NUT v2.8.5 counts zero logged-in clients after the server-side failure. The stale-flag cleanup at boot also stops matching.
-- In `upsmon.conf.user`, keep the `NOTIFYCMD` line and the `EXEC` notify flags, or the event log lines and the alerts that key on them stop. [Monitoring and alerts](monitoring.md#alerting) has the details.
+- In `upsmon.conf.user`, keep the `NOTIFYCMD` line and the `EXEC` notify flags, or the event log lines and the log rules that key on them stop. The metric rules do not depend on `NOTIFYCMD`. [Monitoring and alerts](monitoring.md#alerting) has the details.
 - A mounted `ups.conf.user` makes `LOWBATT_PERCENT` and `LOWBATT_RUNTIME` do nothing.
 
 Anything mounted under `/etc/nut` is used exactly as provided, with no ownership or mode change. It must already be readable by the `nut` user, and a whole-directory mount must also let that user enter it.
