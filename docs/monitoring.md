@@ -227,7 +227,7 @@ If a mounted `upsmon.conf.user` leaves out `NOTIFYCMD`, this warning is the only
 - Power over time charts the charge and the runtime against their low battery marks, the load, the mains and output voltage, and when the UPS ran on battery.
 - Exporter health shows whether the scrape, `upsd` and the UPS data are healthy, the driver restarts the comms watchdog made, and the shutdown path: host poweroff, the D-Bus check and the `upsmon` parent.
 
-The status box shows the forced-shutdown flag (`FSD`) while the UPS reports it. The forced-shutdown event, a failed poweroff and an error line leave no series, so they stay in the log and in the `nut-upsd-events` group of `alerts/logql.yaml`.
+The status box shows the forced-shutdown flag (`FSD`) while the UPS reports it. The forced-shutdown event, a failed poweroff, an error line and the other events of the `nut-upsd-events` group of `alerts/logql.yaml` leave no series, so they stay in the log and in that group.
 
 The dashboard is versioned with the image, and the `grafana-dashboard.json` of release `<tag>` matches the metrics that image serves. Each release attaches it with its checksum at `https://github.com/cplieger/docker-nut-upsd/releases/download/<tag>/grafana-dashboard.json`, and each image publish pushes it as the OCI artifact `ghcr.io/cplieger/docker-nut-upsd/dashboard:<tag>`. The file sets `metadata.name` to `docker-nut-upsd`, which Grafana uses as the dashboard UID, so importing a newer copy over the old one updates it in place.
 
