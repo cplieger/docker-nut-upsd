@@ -75,7 +75,6 @@ type gridItem struct {
 }
 
 type layoutNode struct {
-	Kind string `json:"kind"`
 	Spec struct {
 		Layout               *layoutNode     `json:"layout"`
 		ConditionalRendering *conditionGroup `json:"conditionalRendering"`
@@ -219,8 +218,9 @@ func TestDashboardAttentionTilesMirrorEveryShippedRule(t *testing.T) {
 	rules := ruleExprs(t, promqlRules)
 	attention := row(t, tab(t, &d, "Overview"), "Needs attention")
 	gate := attention.Spec.ConditionalRendering
-	if gate == nil || len(gate.Spec.Items) != 1 || gate.Spec.Items[0].Kind != "ConditionalRenderingVariable" ||
-		gate.Spec.Items[0].Spec.Value != "^[1-9]" {
+	if gate == nil || gate.Spec.Visibility != "show" || len(gate.Spec.Items) != 1 ||
+		gate.Spec.Items[0].Kind != "ConditionalRenderingVariable" ||
+		gate.Spec.Items[0].Spec.Operator != "matches" || gate.Spec.Items[0].Spec.Value != "^[1-9]" {
 		t.Fatal("Needs attention is not shown by a variable matching ^[1-9]")
 	}
 	counted := variableQueries(&d)[gate.Spec.Items[0].Spec.Variable]
@@ -235,10 +235,10 @@ func TestDashboardAttentionTilesMirrorEveryShippedRule(t *testing.T) {
 			}
 		}
 		slices.Sort(conds)
-		if cr == nil || cr.Spec.Condition != "or" ||
+		if cr == nil || cr.Spec.Visibility != "show" || cr.Spec.Condition != "or" ||
 			!slices.Equal(conds, []string{"ConditionalRenderingData", "ConditionalRenderingTimeRangeSize"}) ||
 			p.Spec.Data.Spec.QueryOptions.MaxDataPoints <= 0 {
-			t.Errorf("%q can show before its query answers: want a has-data rule or'ed with a 0s range rule and a maxDataPoints pin", p.Spec.Title)
+			t.Errorf("%q does not show exactly while its query answers: want a shown group or'ing a has-data rule with a 0s range rule, and a maxDataPoints pin", p.Spec.Title)
 		}
 		for _, e := range panelExprs(&p) {
 			if !strings.Contains(counted, "count("+e+")") {
