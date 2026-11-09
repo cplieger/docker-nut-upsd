@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -115,27 +116,39 @@ func TestPromQLRulesReadOnlyExportedSeries(t *testing.T) {
 				t.Errorf("%s reads %s, which the exporter does not serve", alert, name)
 			}
 		}
-		for _, sel := range selectorRe.FindAllStringSubmatch(expr, -1) {
-			labels, ok := exported[sel[1]]
-			if !ok {
+		for _, problem := range selectorProblems(expr, exported, scrapeLabels) {
+			t.Errorf("%s %s", alert, problem)
+		}
+	}
+}
+
+// selectorProblems lists each label matcher in expr that names a label the
+// exporter does not set on that series, or a value it never serves there. A
+// matcher on a scrape label, or one whose value is a dashboard variable, is
+// not checked.
+func selectorProblems(expr string, exported map[string]map[string][]string, scrapeLabels []string) []string {
+	var problems []string
+	for _, sel := range selectorRe.FindAllStringSubmatch(expr, -1) {
+		labels, ok := exported[sel[1]]
+		if !ok {
+			continue
+		}
+		for _, m := range matcherRe.FindAllStringSubmatch(sel[2], -1) {
+			values, known := labels[m[1]]
+			if !known {
+				if !slices.Contains(scrapeLabels, m[1]) {
+					problems = append(problems, fmt.Sprintf("matches label %s on %s, which the exporter does not set", m[1], sel[1]))
+				}
 				continue
 			}
-			for _, m := range matcherRe.FindAllStringSubmatch(sel[2], -1) {
-				values, known := labels[m[1]]
-				if !known {
-					if !slices.Contains(scrapeLabels, m[1]) {
-						t.Errorf("%s matches label %s on %s, which the exporter does not set", alert, m[1], sel[1])
-					}
-					continue
-				}
-				for want := range strings.SplitSeq(m[3], "|") {
-					if !slices.Contains(values, want) {
-						t.Errorf("%s matches %s=%q on %s, which the exporter never serves", alert, m[1], want, sel[1])
-					}
+			for want := range strings.SplitSeq(m[3], "|") {
+				if !strings.HasPrefix(want, "$") && !slices.Contains(values, want) {
+					problems = append(problems, fmt.Sprintf("matches %s=%q on %s, which the exporter never serves", m[1], want, sel[1]))
 				}
 			}
 		}
 	}
+	return problems
 }
 
 // TestNutUpsdDownHasBothArms keeps both arms of the down rule: up == 0 for a

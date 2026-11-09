@@ -6,7 +6,7 @@ docker-nut-upsd serves a Prometheus metrics page for the UPS and its shutdown pa
 
 | You run | You get | You set up |
 | --- | --- | --- |
-| Prometheus, Mimir or VictoriaMetrics, with Alertmanager | the UPS state alerts and `NutUpsdDown` from the metrics, graphs of charge, runtime and load | publish port 9199, scrape it as job `nut-upsd`, load [`alerts/promql.yaml`](../alerts/promql.yaml) |
+| Prometheus, Mimir or VictoriaMetrics, with Alertmanager | the UPS state alerts and `NutUpsdDown` from the metrics, and the [dashboard](#dashboard) of charge, runtime and load | publish port 9199, scrape it as job `nut-upsd`, load [`alerts/promql.yaml`](../alerts/promql.yaml) |
 | Prometheus and Loki, with Alertmanager | the alerts above, plus the event alerts no metric can carry: a forced shutdown, a failed poweroff, an error line | the row above, plus the `nut-upsd-events` group of [`alerts/logql.yaml`](../alerts/logql.yaml) |
 | Loki and Alertmanager, no metric store | every alert except `NutUpsdDown`, from the log | both groups of `alerts/logql.yaml` |
 | Grafana-managed alerting only | the same rules, imported into Grafana | a Prometheus or Loki data source, then the rules above |
@@ -42,11 +42,7 @@ The exporter asks `upsd` for the UPS's variables at each scrape, with a 3-second
 
 The `flag` label carries one `ups.status` word: `OL`, `OB`, `LB`, `HB`, `RB`, `CHRG`, `DISCHRG`, `BYPASS`, `CAL`, `OFF`, `OVER`, `TRIM`, `BOOST`, `FSD`, `ALARM` or `ECO`. Any other word sets `OTHER`. The UPS variables are served only while the data is fresh and only for the variables your UPS reports, and the percentages NUT reports are served as ratios.
 
-The page also carries the exporter's Go runtime and process families (`go_*`, `process_*`) under the names Go's official Prometheus client uses, so stock Go dashboards work. Three queries to start with in Grafana's Metrics Drilldown:
-
-- `nut_upsd_battery_runtime_seconds / 60`, the minutes of battery left at the current load.
-- `nut_upsd_ups_status{flag="OB"}`, the times the UPS ran on battery.
-- `increase(nut_upsd_driver_restarts_total[1d])`, the driver restarts the watchdog made in the last day.
+The page also carries the exporter's Go runtime and process families (`go_*`, `process_*`) under the names Go's official Prometheus client uses, so stock Go dashboards work. The bundled [dashboard](#dashboard) shows the UPS series in Grafana.
 
 ## Logs
 
@@ -222,6 +218,18 @@ An abort exits the container, so the restart policy retries it and the line repe
 The rule is a net under the others and overlaps them. A broken D-Bus poweroff path also fires `NutUpsdPowerOffPathBroken`, and an unconfirmed host poweroff also fires `NutUpsdPowerOffFailed`. A forced-shutdown path record does not fire `NutUpsdForcedShutdown`, because that rule keys on `event=`, which only `nut-notify.sh` writes and this rule's exclusion drops.
 
 If a mounted `upsmon.conf.user` leaves out `NOTIFYCMD`, this warning is the only alert-firing record of a forced shutdown. That holds only while `SHUTDOWNCMD` is still one of the image's `nut-shutdown` scripts. With any other `SHUTDOWNCMD`, a forced shutdown leaves no alert-firing record here, because the `upsmon` parent-exit record is `level=warn`.
+
+## Dashboard
+
+[`grafana-dashboard.json`](../grafana-dashboard.json) imports as the NUT UPS dashboard. It reads the metrics above from a Prometheus data source and needs Grafana 13.2 or newer. When you run more than one container, the UPS variable picks the exporter to show. It has three tabs:
+
+- Overview shows the UPS status in words, the battery charge, the runtime left beside the low battery mark, and the load. Below them, a Needs attention row appears only while an alert from `alerts/promql.yaml` fires, with one tile per rule. Each tile reads its rule's `ALERTS` series, which Prometheus and the Mimir ruler store beside your metrics, so the row stays hidden while those rules are not loaded.
+- Power over time charts the charge and the runtime against their low battery marks, the load, the mains and output voltage, and when the UPS ran on battery.
+- Exporter health shows whether the scrape, `upsd` and the UPS data are healthy, the driver restarts the comms watchdog made, and the shutdown path: host poweroff, the D-Bus check and the `upsmon` parent.
+
+A forced shutdown and the other events leave no series, so the dashboard does not show them. The log and the `nut-upsd-events` group of `alerts/logql.yaml` carry them.
+
+The dashboard is versioned with the image, and the `grafana-dashboard.json` of release `<tag>` matches the metrics that image serves. Each release attaches it with its checksum at `https://github.com/cplieger/docker-nut-upsd/releases/download/<tag>/grafana-dashboard.json`, and each image publish pushes it as the OCI artifact `ghcr.io/cplieger/docker-nut-upsd/dashboard:<tag>`. The file sets `metadata.name` to `docker-nut-upsd`, which Grafana uses as the dashboard UID, so importing a newer copy over the old one updates it in place.
 
 ## Knowing the app is alive
 

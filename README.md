@@ -130,7 +130,7 @@ The healthcheck asks the server for the UPS status every 30 seconds. Unhealthy m
 
 ## Monitoring
 
-docker-nut-upsd serves Prometheus metrics for the UPS and its shutdown path on port 9199, and logs each UPS event, such as `event="ONBATT"`. Alert rules for Prometheus and for Loki ship in [`alerts/`](alerts/). [Monitoring and alerts](docs/monitoring.md) says which to load together, and the [monitoring guide](https://github.com/cplieger/docs/blob/main/docs/monitoring.md) shows how to load them. The image has a Docker healthcheck, and [Knowing the app is alive](docs/monitoring.md#knowing-the-app-is-alive) says what it proves and who is told.
+docker-nut-upsd serves Prometheus metrics for the UPS and its shutdown path on port 9199, and logs each UPS event, such as `event="ONBATT"`. Alert rules for Prometheus and for Loki ship in [`alerts/`](alerts/). A Grafana dashboard of the UPS state, battery, load and firing alerts ships as [`grafana-dashboard.json`](grafana-dashboard.json) and needs Grafana 13.2 or newer. [Monitoring and alerts](docs/monitoring.md) says which to load together, and the [monitoring guide](https://github.com/cplieger/docs/blob/main/docs/monitoring.md) shows how to load them. The image has a Docker healthcheck, and [Knowing the app is alive](docs/monitoring.md#knowing-the-app-is-alive) says what it proves and who is told.
 
 ## Documentation
 
