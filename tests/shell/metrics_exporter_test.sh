@@ -144,7 +144,8 @@ ENTRYPOINT="$VALIDATE"
 load_function strip_leading_zeros
 load_function log_value
 
-constants=$(sed -n '/^WRAPPER_STATE_DIR=/,/^EXPORTER_START_TIMEOUT=/p' "$LIFECYCLE")
+# Dropped readonly so each case can point the constants at its own fixtures.
+constants=$(sed -n '/^readonly WRAPPER_STATE_DIR=/,/^readonly EXPORTER_START_TIMEOUT=/s/^readonly //p' "$LIFECYCLE")
 if [ -z "$constants" ]; then
   printf 'harness error: the wrapper state constants were not found in lifecycle.sh\n' >&2
   exit 1

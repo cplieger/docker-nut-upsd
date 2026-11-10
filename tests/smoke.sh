@@ -1068,6 +1068,7 @@ rejected_table_value() {
     identifier) printf 'bad value' ;;
     numeric) printf 'not-a-number' ;;
     positive | port) printf '0' ;;
+    port_or_zero) printf '65536' ;;
     percent) printf '101' ;;
     *) return 1 ;;
   esac
@@ -1085,6 +1086,7 @@ rejected_table_message() {
     numeric) printf 'must be a non-negative integer' ;;
     positive) printf 'must be a positive integer (>= 1)' ;;
     port) printf 'must be 1-65535' ;;
+    port_or_zero) printf 'must be 0-65535' ;;
     percent) printf 'must be 0-100' ;;
     *) return 1 ;;
   esac
@@ -1167,6 +1169,7 @@ while IFS='|' read -r _ws_var _ws_value; do
 done <<'CASES'
 UPS_PORT|/dev/ttyS0 extra
 API_ADDRESS|0.0.0.0 4444
+METRICS_ADDRESS|0.0.0.0 9199
 CASES
 
 # Bracketed IPv6 must be rejected: bare IPv6 (::1) is the accepted spelling,

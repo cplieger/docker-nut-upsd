@@ -506,14 +506,15 @@ dbus_liveness_probe() {
 # nut-exporter (state.go) reads these files at scrape time and names them
 # itself, so a rename here must change state.go too. Each file has one writer,
 # and the entrypoint empties the directory at boot.
-WRAPPER_STATE_DIR=/var/run/nut-state
-DRIVER_RESTARTS_STATE=driver-restarts
-UPSMON_PID_STATE=upsmon.pid
-POWEROFF_PATH_STATE=poweroff-path
-EXPORTER_READY_STATE=exporter.ready
-EXPORTER_BIN=/usr/local/bin/nut-exporter
+readonly WRAPPER_STATE_DIR=/var/run/nut-state
+readonly DRIVER_RESTARTS_STATE=driver-restarts
+# shellcheck disable=SC2034  # consumed by sourced entrypoint.sh
+readonly UPSMON_PID_STATE=upsmon.pid
+readonly POWEROFF_PATH_STATE=poweroff-path
+readonly EXPORTER_READY_STATE=exporter.ready
+readonly EXPORTER_BIN=/usr/local/bin/nut-exporter
 # Seconds start_metrics_exporter waits for the exporter to bind.
-EXPORTER_START_TIMEOUT=10
+readonly EXPORTER_START_TIMEOUT=10
 
 # write_wrapper_state NAME VALUE: replace one state file by rename, so a scrape
 # never reads half a value. Always returns 0: a lost record must not end the
@@ -595,5 +596,6 @@ start_metrics_exporter() {
     wait "$!" || true
     _sme_ticks=$((_sme_ticks + 1))
   done
+  # shellcheck disable=SC2034  # consumed by sourced entrypoint.sh
   EXPORTER_PID=$_sme_pid
 }
