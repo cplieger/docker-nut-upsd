@@ -15,6 +15,10 @@ COMMS_RECOVERY_TIMEOUT=10
 COMMS_FAST_RETRIES=1
 COMMS_BACKOFF_FACTOR=5
 CALLS="$WORK/restarts"
+RECORDS="$WORK/records"
+# Stands in for the state write the metrics exporter reads: one line per call.
+record_driver_restart() { printf 'restart\n' >>"$RECORDS"; }
+: >"$RECORDS"
 (
   NOW=0
   TICKS=0
@@ -36,8 +40,8 @@ CALLS="$WORK/restarts"
 EXPECTED='1 15
 1 30
 1 45'
-[ "$(cat "$CALLS")" = "$EXPECTED" ] \
-  && ok 'two stood-down crossings leave the first accepted bounce numbered 1 and on the fast cadence' \
+[ "$(cat "$CALLS")" = "$EXPECTED" ] && [ "$(wc -l <"$RECORDS")" -eq 1 ] \
+  && ok 'two stood-down crossings leave the first accepted bounce numbered 1 and on the fast cadence, and only that bounce is recorded for the exporter' \
   || no 'stand-down does not spend the restart budget' "calls=$(tr '\n' '|' <"$CALLS") err=$(cat "$WORK/err")"
 
 ENTRYPOINT="$REPO_ROOT/validate.sh"
@@ -58,6 +62,7 @@ DBUS_PROBE_INTERVAL=0300
 . "$CANONICALIZE_WATCHDOG"
 PADDED_CALLS="$WORK/padded-restarts"
 : >"$PADDED_CALLS"
+: >"$RECORDS"
 (
   NOW=0
   TICKS=0
@@ -77,7 +82,7 @@ PADDED_CALLS="$WORK/padded-restarts"
 PADDED_EXPECTED='1 104
 2 832'
 [ "$COMMS_CHECK_INTERVAL $COMMS_RECOVERY_TIMEOUT $COMMS_FAST_RETRIES $COMMS_BACKOFF_FACTOR $DBUS_PROBE_INTERVAL" = '8 90 1 8 300' ] \
-  && [ "$(cat "$PADDED_CALLS")" = "$PADDED_EXPECTED" ] \
+  && [ "$(cat "$PADDED_CALLS")" = "$PADDED_EXPECTED" ] && [ "$(wc -l <"$RECORDS")" -eq 2 ] \
   && ok 'zero-padded watchdog timings remain decimal through the backoff threshold' \
   || no 'zero-padded watchdog arithmetic' \
     "values=$COMMS_CHECK_INTERVAL,$COMMS_RECOVERY_TIMEOUT,$COMMS_FAST_RETRIES,$COMMS_BACKOFF_FACTOR,$DBUS_PROBE_INTERVAL calls=$(tr '\n' '|' <"$PADDED_CALLS") err=$(cat "$WORK/padded-err")"

@@ -1,57 +1,21 @@
 # Loki ruler (LogQL) alert rules for docker-nut-upsd. Ship the container's logs
-# to Loki, for example with Grafana Alloy's Docker log discovery, and load this
-# file into Loki's ruler. Firing alerts go through your Alertmanager.
-# The rules match the event=<TYPE> line upsmon's NOTIFYCMD logs for each UPS
-# event, the image's own level=error records and two raw upsmon lines. Every
-# event the generated upsmon.conf routes to NOTIFYCMD has a rule below except
-# COMMBAD, COMMOK and OTHER. Thresholds, for: windows and severity labels are
-# starting points. Adjust the container selector to the label your log
-# collector sets. docs/monitoring.md explains each rule's window and shape.
+# to Loki and load this file into Loki's ruler. It holds two groups by role:
+# load nut-upsd-events always, and load nut-upsd-state only if you do not load
+# alerts/promql.yaml, which holds the same state alerts under the same names
+# plus NutUpsdDown, which has no log rule here. The rules match the event=<TYPE>
+# line upsmon's NOTIFYCMD logs, the image's own level=error records and two raw
+# upsmon lines. Every event the generated upsmon.conf routes to NOTIFYCMD has a
+# rule below except COMMBAD, COMMOK and OTHER. Thresholds, for: windows and
+# severity labels are starting points. Adjust the container selector to the
+# label your log collector sets.
 groups:
-  - name: nut-upsd
-    # Evaluate every 10s instead of the ruler's 1m default. With
-    # NutUpsdOnBattery's for: 10s, a mains flicker stays silent and a real
-    # outage fires in about 10 to 20 seconds. The interval applies to every
-    # rule in the group.
+  # Role: always load, alone or beside alerts/promql.yaml, which has no rule
+  # for these events.
+  - name: nut-upsd-events
+    # Evaluate every 10s instead of the ruler's 1m default, so a forced
+    # shutdown alerts within seconds of its line.
     interval: 10s
     rules:
-      # ONBATT maps to 1 and ONLINE to 0, and last_over_time keeps the latest
-      # value, so the rule fires when the most recent mains event was ONBATT.
-      # by (container) keeps both events in one series. Keep the 2m window
-      # above POLLFREQ + POLLFREQALERT.
-      - alert: NutUpsdOnBattery
-        expr: |
-          last_over_time(
-            {container="nut-upsd"}
-            | logfmt | event=~"ONBATT|ONLINE"
-            | label_format mains_state=`{{ if eq .event "ONBATT" }}1{{ else }}0{{ end }}`
-            | unwrap mains_state [2m]
-          ) by (container) == 1
-        for: 10s
-        labels:
-          severity: warning
-        annotations:
-          summary: "UPS is on battery after mains power loss ({{ $labels.container }})"
-          description: >
-            The latest mains event was ONBATT, so the UPS lost mains power and
-            carries the load on battery. The alert marks that event and
-            resolves within 2 minutes. Check mains power now.
-            NutUpsdLowBattery follows if the battery runs low.
-      - alert: NutUpsdLowBattery
-        expr: |
-          sum by (container) (count_over_time(
-            {container="nut-upsd"} | logfmt | event="LOWBATT" [5m]
-          )) > 0
-        for: 0m
-        labels:
-          severity: critical
-        annotations:
-          summary: "UPS reports low battery ({{ $labels.container }})"
-          description: >
-            nut-upsd logged a LOWBATT event, so the UPS raised its low-battery
-            flag. Check mains power now. On battery, this starts the shutdown
-            sequence. On line power, the UPS probably misreports it, so check
-            LOWBATT_PERCENT or ignorelb.
       - alert: NutUpsdForcedShutdown
         expr: |
           sum by (container) (count_over_time(
@@ -101,23 +65,9 @@ groups:
           summary: "nut-upsd could not exec its NOTIFYCMD ({{ $labels.container }})"
           description: >
             upsmon could not exec the NOTIFYCMD set in your mounted
-            upsmon.conf.user, so every event= alert in this group is blind. Fix
+            upsmon.conf.user, so every event= alert in this file is blind. Fix
             the NOTIFYCMD path or permissions. It fires on each failed exec and
             does not track the fault.
-      - alert: NutUpsdCommsLost
-        expr: |
-          sum by (container) (count_over_time(
-            {container="nut-upsd"} | logfmt | event="NOCOMM" [15m]
-          )) > 0
-        for: 0m
-        labels:
-          severity: warning
-        annotations:
-          summary: "UPS communication lost ({{ $labels.container }})"
-          description: >
-            upsmon could not reach the UPS for at least NOCOMMWARNTIME seconds
-            (default 300) and repeats NOCOMM while comms stay down. UPS state
-            is unknown until communication returns. Check the UPS connection.
       # No sum by (container) here, because the annotation reads stale_secs and
       # restarts off the matched series. Two repairs with the same values in
       # one window are one series and alert once.
@@ -135,67 +85,6 @@ groups:
             stale_secs={{ $labels.stale_secs }} and
             restarts={{ $labels.restarts }}. This catches a repair that ends
             before NOCOMMWARNTIME reports an outage. Check the UPS connection.
-      - alert: NutUpsdHardwareFault
-        expr: |
-          sum by (container) (count_over_time(
-            {container="nut-upsd"} | logfmt | event=~"REPLBATT|ALARM" [15m]
-          )) > 0
-        for: 0m
-        labels:
-          severity: warning
-        annotations:
-          summary: "UPS reports a hardware fault ({{ $labels.container }})"
-          description: >
-            The UPS reports a hardware fault, named in the detail field, and
-            may drop the load in an outage. With ALARMCRITICAL 1,
-            upstream's default, losing comms during ALARM forces a shutdown.
-            REPLBATT repeats every RBWARNTIME seconds (default 43200). Plan
-            service.
-      - alert: NutUpsdProtectionDegraded
-        expr: |
-          sum by (container) (count_over_time(
-            {container="nut-upsd"} | logfmt | event=~"BYPASS|OVER|CAL" [15m]
-          )) > 0
-        for: 0m
-        labels:
-          severity: warning
-        annotations:
-          summary: "UPS protection is degraded ({{ $labels.container }})"
-          description: >
-            CAL is calibration, BYPASS an unprotected load, OVER an overload.
-            Losing comms during CAL or BYPASS forces a shutdown. Treat BYPASS as
-            urgent. OVER counts as critical only when OVERDURATION is
-            configured, and the generated upsmon.conf does not set it.
-      - alert: NutUpsdProtectionUnavailable
-        expr: |
-          sum by (container) (count_over_time(
-            {container="nut-upsd"} | logfmt | event=~"NOPARENT|OFF" [15m]
-          )) > 0
-        for: 0m
-        labels:
-          severity: warning
-        annotations:
-          summary: "UPS protection became unavailable ({{ $labels.container }})"
-          description: >
-            NOPARENT means upsmon's privileged parent died, so a forced shutdown
-            cannot power off the host. Restart the container. OFF means the UPS
-            is off or asleep. With OFFDURATION 30, upstream's default, OFF for
-            30 seconds forces a shutdown.
-      - alert: NutUpsdPowerOffPathBroken
-        expr: |
-          sum by (container) (count_over_time(
-            {container="nut-upsd"} | logfmt | msg=~"D-Bus poweroff path unreachable.*" [15m]
-          )) > 0
-        for: 0m
-        labels:
-          severity: warning
-        annotations:
-          summary: "UPS host-poweroff path broken ({{ $labels.container }})"
-          description: >
-            The D-Bus probe, run every DBUS_PROBE_INTERVAL seconds
-            (default 300), got no logind answer that permits a non-interactive
-            poweroff. A forced shutdown would leave the host running. The
-            detail field points at the bus socket or the host polkit policy.
       - alert: NutUpsdPowerOffFailed
         expr: |
           sum by (container) (count_over_time(
@@ -231,3 +120,170 @@ groups:
             setting, a failed daemon or a boot refusal. An abort exits the
             container, and each restart repeats the line while the UPS goes
             unmonitored. Read the line.
+  # Role: the alternative to alerts/promql.yaml, under the same alert names.
+  # Load this group only if you do not load that file, or each UPS state alert
+  # fires twice.
+  - name: nut-upsd-state
+    # Evaluate every 10s instead of the ruler's 1m default. With
+    # NutUpsdOnBattery's for: 10s, a mains flicker stays silent and a real
+    # outage fires in about 10 to 20 seconds. The interval applies to every
+    # rule in the group.
+    interval: 10s
+    rules:
+      # ONBATT maps to 1 and ONLINE to 0, and last_over_time keeps the latest
+      # value, so the rule fires when the most recent mains event was ONBATT.
+      # by (container) keeps both events in one series. Keep the 2m window
+      # above POLLFREQ + POLLFREQALERT.
+      - alert: NutUpsdOnBattery
+        expr: |
+          last_over_time(
+            {container="nut-upsd"}
+            | logfmt | event=~"ONBATT|ONLINE"
+            | label_format mains_state=`{{ if eq .event "ONBATT" }}1{{ else }}0{{ end }}`
+            | unwrap mains_state [2m]
+          ) by (container) == 1
+        for: 10s
+        labels:
+          severity: warning
+        annotations:
+          summary: "UPS is on battery after mains power loss ({{ $labels.container }})"
+          description: >
+            The latest mains event was ONBATT, so the UPS lost mains power and
+            carries the load on battery. The alert marks that event and
+            resolves within 2 minutes. Check mains power now.
+            NutUpsdLowBattery follows if the battery runs low.
+      - alert: NutUpsdLowBattery
+        expr: |
+          sum by (container) (count_over_time(
+            {container="nut-upsd"} | logfmt | event="LOWBATT" [5m]
+          )) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "UPS reports low battery ({{ $labels.container }})"
+          description: >
+            nut-upsd logged a LOWBATT event, so the UPS raised its low-battery
+            flag. Check mains power now. On battery, this starts the shutdown
+            sequence. On line power, the UPS probably misreports it, so check
+            LOWBATT_PERCENT or ignorelb.
+      - alert: NutUpsdCommsLost
+        expr: |
+          sum by (container) (count_over_time(
+            {container="nut-upsd"} | logfmt | event="NOCOMM" [15m]
+          )) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "UPS communication lost ({{ $labels.container }})"
+          description: >
+            upsmon could not reach the UPS for at least NOCOMMWARNTIME seconds
+            (default 300) and repeats NOCOMM while comms stay down. UPS state
+            is unknown until communication returns. Check the UPS connection.
+      # Each flag is a pair, like NutUpsdOnBattery: the raise maps to 1 and
+      # its NOT clear to 0. The image's "starting upsmon" line maps to 0 too,
+      # because upsmon starts with every flag clear and reports a flag that
+      # still holds on its first poll, so a clear missed while the container
+      # was down cannot hold the alert. ALARM is raised once per change and
+      # never repeated, so the 7d range is how long it holds without a clear
+      # or a restart. REPLBATT has no clear and repeats every RBWARNTIME, so
+      # its 25h range stays above twice the default.
+      - alert: NutUpsdHardwareFault
+        expr: |
+          last_over_time(
+            {container="nut-upsd"}
+            | logfmt | event=~"ALARM|NOTALARM" or msg="starting upsmon"
+            | label_format raised=`{{ if eq .event "ALARM" }}1{{ else }}0{{ end }}`
+            | unwrap raised [7d]
+          ) by (container) == 1
+          or
+          last_over_time(
+            {container="nut-upsd"}
+            | logfmt | event="REPLBATT" or msg="starting upsmon"
+            | label_format raised=`{{ if eq .event "REPLBATT" }}1{{ else }}0{{ end }}`
+            | unwrap raised [25h]
+          ) by (container) == 1
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "UPS reports a hardware fault ({{ $labels.container }})"
+          description: >
+            The UPS reports a hardware fault, named in the detail field. The
+            alert holds until NOTALARM, or while REPLBATT repeats every
+            RBWARNTIME seconds (default 43200). With ALARMCRITICAL 1,
+            upstream's default, losing comms during ALARM forces a shutdown.
+            Plan service.
+      # One pair per flag, so one flag's clear leaves another flag held.
+      - alert: NutUpsdProtectionDegraded
+        expr: |
+          last_over_time(
+            {container="nut-upsd"}
+            | logfmt | event=~"BYPASS|NOTBYPASS" or msg="starting upsmon"
+            | label_format raised=`{{ if eq .event "BYPASS" }}1{{ else }}0{{ end }}`
+            | unwrap raised [7d]
+          ) by (container) == 1
+          or
+          last_over_time(
+            {container="nut-upsd"}
+            | logfmt | event=~"OVER|NOTOVER" or msg="starting upsmon"
+            | label_format raised=`{{ if eq .event "OVER" }}1{{ else }}0{{ end }}`
+            | unwrap raised [7d]
+          ) by (container) == 1
+          or
+          last_over_time(
+            {container="nut-upsd"}
+            | logfmt | event=~"CAL|NOTCAL" or msg="starting upsmon"
+            | label_format raised=`{{ if eq .event "CAL" }}1{{ else }}0{{ end }}`
+            | unwrap raised [7d]
+          ) by (container) == 1
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "UPS protection is degraded ({{ $labels.container }})"
+          description: >
+            CAL is calibration, BYPASS an unprotected load, OVER an overload,
+            each held until its clear. Losing comms during CAL or BYPASS
+            forces a shutdown. OVER is critical only when OVERDURATION is
+            configured, and the generated upsmon.conf does not set it.
+      # NOPARENT has no clear, and upsmon repeats it every 120 seconds while
+      # the parent stays dead, so a count over 15 minutes holds it.
+      - alert: NutUpsdProtectionUnavailable
+        expr: |
+          last_over_time(
+            {container="nut-upsd"}
+            | logfmt | event=~"OFF|NOTOFF" or msg="starting upsmon"
+            | label_format raised=`{{ if eq .event "OFF" }}1{{ else }}0{{ end }}`
+            | unwrap raised [7d]
+          ) by (container) == 1
+          or
+          sum by (container) (count_over_time(
+            {container="nut-upsd"} | logfmt | event="NOPARENT" [15m]
+          )) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "UPS protection became unavailable ({{ $labels.container }})"
+          description: >
+            NOPARENT means upsmon's parent died, so a forced shutdown cannot
+            power off the host; restart the container. OFF, held until
+            NOTOFF, means the UPS is off or asleep. With OFFDURATION 30,
+            upstream's default, OFF for 30 seconds forces a shutdown.
+      - alert: NutUpsdPowerOffPathBroken
+        expr: |
+          sum by (container) (count_over_time(
+            {container="nut-upsd"} | logfmt | msg=~"D-Bus poweroff path unreachable.*" [15m]
+          )) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "UPS host-poweroff path broken ({{ $labels.container }})"
+          description: >
+            The D-Bus probe, run every DBUS_PROBE_INTERVAL seconds
+            (default 300), got no logind answer that permits a non-interactive
+            poweroff. A forced shutdown would leave the host running. The
+            detail field points at the bus socket or the host polkit policy.

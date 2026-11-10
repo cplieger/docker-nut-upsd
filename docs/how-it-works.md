@@ -4,11 +4,11 @@ This page explains what runs inside the container, how it recovers a UPS that st
 
 ## What runs in the container
 
-One container runs three NUT programs that normally deploy separately. They are the UPS driver, the `upsd` server that answers clients on port 3493, and the `upsmon` monitor that starts the shutdown. NUT, libmodbus and Net-SNMP are compiled from pinned upstream sources on Alpine Linux.
+One container runs three NUT programs that normally deploy separately. They are the UPS driver, the `upsd` server that answers clients on port 3493, and the `upsmon` monitor that starts the shutdown. Unless `METRICS_PORT=0`, a small exporter also runs beside them and reads `upsd` at each scrape of its metrics page. NUT, libmodbus and Net-SNMP are compiled from pinned upstream sources on Alpine Linux.
 
-At each start the entrypoint checks every setting, writes NUT's config files from them, and starts the driver, then `upsd`, then `upsmon`. It waits up to 90 seconds for the driver and 30 seconds for `upsd`. A daemon that fails to start inside its bound stops the boot, and the container exits with a non-zero code.
+At each start the entrypoint checks every setting, writes NUT's config files from them, and starts the exporter, then the driver, then `upsd`, then `upsmon`. An exporter that cannot listen on its address stops the boot, and one that exits later is started again. The entrypoint waits up to 90 seconds for the driver and 30 seconds for `upsd`. A daemon that fails to start inside its bound stops the boot, and the container exits with a non-zero code.
 
-On `SIGTERM` the container stops the watchdog, the D-Bus check and every NUT daemon before it exits.
+On `SIGTERM` the container stops the watchdog, the D-Bus check, the exporter and every NUT daemon before it exits.
 
 ## When the container exits on purpose
 
@@ -23,6 +23,8 @@ In each case the restart policy decides what happens next. A restart starts from
 The built-in healthcheck runs `upsc` against `upsd` every 30 seconds, on the configured listen address, or on the loopback address for the default `API_ADDRESS=0.0.0.0`. It checks that the driver is talking to the UPS. It turns unhealthy when the UPS is disconnected, the driver failed to start, or `upsd` stops responding, and healthy again once the driver reaches the UPS. Health is a live check every time, never a stored result.
 
 The comms watchdog below drives that recovery, so the unhealthy window lasts about `COMMS_RECOVERY_TIMEOUT` seconds rather than until you recreate the container.
+
+The exporter's `/healthz` asks `upsd` the same question at each request, so it follows the same verdict. Nothing tells you about an unhealthy container unless something watches Docker health or probes `/healthz`, as [Knowing the app is alive](monitoring.md#knowing-the-app-is-alive) explains.
 
 ## A UPS that drops off USB
 

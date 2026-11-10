@@ -236,7 +236,7 @@ printf '%s\n' "$_hostile_detail_line" | grep -Eq "$_quoted_field_pattern" \
 # carries no log level to derive. A new routed event must be classified here.
 expected_level() {
   case "$1" in
-    ONLINE | COMMOK) printf 'info' ;;
+    ONLINE | COMMOK | NOTCAL | NOTOFF | NOTBYPASS | NOTALARM | NOTOVER) printf 'info' ;;
     FSD | SHUTDOWN) printf 'error' ;;
     ONBATT | LOWBATT | COMMBAD | NOCOMM | REPLBATT | NOPARENT | OFF | BYPASS | OVER | CAL | ALARM | OTHER) printf 'warn' ;;
     *) return 1 ;;
@@ -256,9 +256,9 @@ done
   && ok 'every routed event has its literal severity class and logs at that level' \
   || no 'routed-event severity classes' "unclassified:$_unclassified; mismatched:$_misclassified"
 
-# A mounted upsmon.conf.user can route these clear-state twins even though the
-# generated file does not. Their membership class stays explicit here.
-clear_events=(NOTALARM NOTBYPASS NOTOVER NOTOFF NOTCAL NOTOTHER)
+# A mounted upsmon.conf.user can route clear-state twins the generated file
+# does not, such as NOTOTHER. Their membership class stays explicit here.
+clear_events=(NOTOTHER NOTECO NOTTRIM NOTBOOST)
 all_match '^level=info ' "${clear_events[@]}" \
   && [ -z "$(unbound_events "${clear_events[*]}")" ] \
   && ok 'mounted-config clear-state twins retain their event names and classify as level=info' \

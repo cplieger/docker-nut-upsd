@@ -131,7 +131,7 @@ done
 # 2. Valid env passes validation and generates all four config files.
 export UPS_NAME=ups UPS_DESC="Test UPS" UPS_DRIVER=usbhid-ups UPS_PORT=auto \
   API_USER=monuser API_PASSWORD=secret API_ADDRESS=0.0.0.0 API_PORT=3493 \
-  API_TLS=true \
+  API_TLS=true METRICS_PORT=9199 METRICS_ADDRESS=0.0.0.0 \
   ADMIN_PASSWORD=adminpass LOCAL_UPSMON_PASSWORD=localmonpass \
   SHUTDOWN_CMD=/usr/local/bin/nut-shutdown-noop.sh \
   POLLFREQ=5 POLLFREQALERT=5 DEADTIME=15 FINALDELAY=5 HOSTSYNC=15 \
@@ -197,11 +197,16 @@ NOTIFYFLAG SHUTDOWN SYSLOG+EXEC
 NOTIFYFLAG REPLBATT SYSLOG+EXEC
 NOTIFYFLAG NOPARENT SYSLOG+EXEC
 NOTIFYFLAG OFF SYSLOG+EXEC
+NOTIFYFLAG NOTOFF SYSLOG+EXEC
 NOTIFYFLAG BYPASS SYSLOG+EXEC
+NOTIFYFLAG NOTBYPASS SYSLOG+EXEC
 NOTIFYFLAG OVER SYSLOG+EXEC
+NOTIFYFLAG NOTOVER SYSLOG+EXEC
 NOTIFYFLAG CAL SYSLOG+EXEC
+NOTIFYFLAG NOTCAL SYSLOG+EXEC
 NOTIFYFLAG NOCOMM SYSLOG+EXEC
 NOTIFYFLAG ALARM EXEC
+NOTIFYFLAG NOTALARM SYSLOG+EXEC
 NOTIFYFLAG OTHER EXEC
 NOTIFYEOF
 sed -n -e '/^NOTIFYCMD /p' -e '/^NOTIFYFLAG /p' /etc/nut/upsmon.conf >"$NOTIFY_ACTUAL"
@@ -1063,6 +1068,7 @@ rejected_table_value() {
     identifier) printf 'bad value' ;;
     numeric) printf 'not-a-number' ;;
     positive | port) printf '0' ;;
+    port_or_zero) printf '65536' ;;
     percent) printf '101' ;;
     *) return 1 ;;
   esac
@@ -1080,6 +1086,7 @@ rejected_table_message() {
     numeric) printf 'must be a non-negative integer' ;;
     positive) printf 'must be a positive integer (>= 1)' ;;
     port) printf 'must be 1-65535' ;;
+    port_or_zero) printf 'must be 0-65535' ;;
     percent) printf 'must be 0-100' ;;
     *) return 1 ;;
   esac
@@ -1089,8 +1096,14 @@ check_table_rejection() {
   _matrix_var="$1"
   _matrix_class="$2"
   _matrix_optional="$3"
-  _matrix_value=$(rejected_table_value "$_matrix_class") || exit 1
-  _matrix_want=$(rejected_table_message "$_matrix_class") || exit 1
+  _matrix_value=$(rejected_table_value "$_matrix_class") || {
+    err "FAIL: no rejected value for check class $_matrix_class ($_matrix_var)"
+    exit 1
+  }
+  _matrix_want=$(rejected_table_message "$_matrix_class") || {
+    err "FAIL: no rejection message for check class $_matrix_class ($_matrix_var)"
+    exit 1
+  }
   if _matrix_err=$(
     (
       export "$_matrix_var=$_matrix_value"
@@ -1162,6 +1175,7 @@ while IFS='|' read -r _ws_var _ws_value; do
 done <<'CASES'
 UPS_PORT|/dev/ttyS0 extra
 API_ADDRESS|0.0.0.0 4444
+METRICS_ADDRESS|0.0.0.0 9199
 CASES
 
 # Bracketed IPv6 must be rejected: bare IPv6 (::1) is the accepted spelling,

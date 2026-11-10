@@ -1,0 +1,117 @@
+# Alert rules for docker-nut-upsd as a Prometheus rule group, for Prometheus,
+# Mimir, vmalert or any ruler that reads them. They read the image's exporter,
+# GET /metrics on METRICS_PORT (default 9199), scraped as job `nut-upsd`. This
+# file is the alternative to the nut-upsd-state group of alerts/logql.yaml,
+# under the same alert names: load one of the two, never both. Load that
+# file's nut-upsd-events group beside this file either way, because a forced
+# shutdown, a failed poweroff and an error line leave no series.
+# NutUpsdDown exists only here. Thresholds, for: windows and severity labels
+# are starting points. docs/monitoring.md explains each rule.
+groups:
+  - name: nut-upsd
+    rules:
+      # Two arms, because neither covers the other: `up == 0` catches a target
+      # that fails its scrape and keeps its labels, `absent(up{...})` catches a
+      # target that is gone. Use an exact job matcher, never a regex.
+      - alert: NutUpsdDown
+        expr: up{job="nut-upsd"} == 0 or absent(up{job="nut-upsd"})
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "nut-upsd is not being scraped"
+          description: >
+            No successful scrape for 5m: the container is stopped,
+            crash-looping or refusing to start, METRICS_PORT is 0, or the
+            scrape cannot reach the exporter. Check the container's state and
+            its log.
+      # The flag rules read ups.status, which the exporter serves only while
+      # upsd has fresh data. With stale data they resolve and
+      # NutUpsdCommsLost takes over.
+      - alert: NutUpsdOnBattery
+        expr: nut_upsd_ups_status{flag="OB"} == 1
+        for: 10s
+        labels:
+          severity: warning
+        annotations:
+          summary: "UPS is on battery after mains power loss ({{ $labels.instance }})"
+          description: >
+            The UPS reports OB: it lost mains power and carries the load on
+            battery, and the alert holds until mains returns. Check mains
+            power now. NutUpsdLowBattery follows if the battery runs low.
+      - alert: NutUpsdLowBattery
+        expr: nut_upsd_ups_status{flag="LB"} == 1
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "UPS reports low battery ({{ $labels.instance }})"
+          description: >
+            The UPS raised its low-battery flag. Check mains power now. On
+            battery, this starts the shutdown sequence. On line power, the UPS
+            probably misreports it, so check LOWBATT_PERCENT or ignorelb.
+      # 5m matches NUT's default NOCOMMWARNTIME, the delay before upsmon's
+      # own NOCOMM warning.
+      - alert: NutUpsdCommsLost
+        expr: nut_upsd_ups_data_fresh == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "UPS communication lost ({{ $labels.instance }})"
+          description: >
+            upsd has served no fresh data for the UPS for 5m: the data is
+            stale, the driver is gone or upsd does not answer. UPS state is
+            unknown until communication returns. Check the UPS connection.
+      - alert: NutUpsdHardwareFault
+        expr: nut_upsd_ups_status{flag=~"RB|ALARM"} == 1
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "UPS reports a hardware fault ({{ $labels.instance }})"
+          description: >
+            The UPS reports {{ $labels.flag }}: RB is a battery to replace,
+            ALARM an active alarm, named in ups.alarm. With ALARMCRITICAL 1,
+            upstream's default, losing comms during ALARM forces a shutdown.
+            Plan service.
+      - alert: NutUpsdProtectionDegraded
+        expr: nut_upsd_ups_status{flag=~"BYPASS|OVER|CAL"} == 1
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "UPS protection is degraded ({{ $labels.instance }})"
+          description: >
+            The UPS reports {{ $labels.flag }}. CAL is calibration, BYPASS an
+            unprotected load, OVER an overload. Losing comms during CAL or
+            BYPASS forces a shutdown. OVER is critical only when OVERDURATION
+            is configured, and the generated upsmon.conf does not set it.
+      # The parent series is absent until the container has started upsmon,
+      # so a container that is still starting does not fire this rule.
+      - alert: NutUpsdProtectionUnavailable
+        expr: nut_upsd_ups_status{flag="OFF"} == 1 or nut_upsd_upsmon_parent_alive == 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "UPS protection became unavailable ({{ $labels.instance }})"
+          description: >
+            Either the UPS reports OFF, or upsmon's parent is not running, so
+            a forced shutdown cannot power off the host. With OFFDURATION 30,
+            upstream's default, OFF for 30 seconds forces a shutdown. Restart
+            the container for the parent.
+      # The probe runs only with SHUTDOWN_ON_BATTERY_CRITICAL=true and
+      # DBUS_PROBE_INTERVAL above 0; otherwise the series is absent.
+      - alert: NutUpsdPowerOffPathBroken
+        expr: nut_upsd_poweroff_path_ok == 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "UPS host-poweroff path broken ({{ $labels.instance }})"
+          description: >
+            The last D-Bus probe got no logind answer that permits a
+            non-interactive poweroff, so a forced shutdown would leave the
+            host running. The container log's probe line names the bus socket
+            or the host polkit policy.

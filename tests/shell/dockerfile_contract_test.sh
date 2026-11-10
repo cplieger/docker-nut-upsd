@@ -266,20 +266,23 @@ runtime_stage=$(awk '
   in_stage { print }
 ' "$dockerfile")
 
-exposed_port=$(awk '
-  $1 == "EXPOSE" && $2 ~ /^[0-9][0-9]*$/ { print $2 }
-' <<<"$runtime_stage")
+exposed_ports=$(awk '
+  $1 == "EXPOSE" { for (i = 2; i <= NF; i++) print $i }
+' <<<"$runtime_stage" | sort)
 entrypoint_port=$(sed -n \
   's/^: "[$]{API_PORT:=\([0-9][0-9]*\)}"$/\1/p' \
   "$REPO_ROOT/entrypoint.sh")
+metrics_port=$(sed -n \
+  's/^: "[$]{METRICS_PORT:=\([0-9][0-9]*\)}"$/\1/p' \
+  "$REPO_ROOT/entrypoint.sh")
 
-if [ "$(printf '%s\n' "$exposed_port" | grep -c .)" -eq 1 ] \
-  && [ "$(printf '%s\n' "$entrypoint_port" | grep -c .)" -eq 1 ] \
-  && [ "$exposed_port" = "$entrypoint_port" ]; then
-  ok "runtime image exposes its API_PORT default ($entrypoint_port)"
+if [ "$(printf '%s\n' "$entrypoint_port" | grep -c .)" -eq 1 ] \
+  && [ "$(printf '%s\n' "$metrics_port" | grep -c .)" -eq 1 ] \
+  && [ "$exposed_ports" = "$(printf '%s\n' "$entrypoint_port" "$metrics_port" | sort)" ]; then
+  ok "runtime image exposes its API_PORT ($entrypoint_port) and METRICS_PORT ($metrics_port) defaults and nothing else"
 else
-  no 'EXPOSE/API_PORT contract' \
-    "EXPOSE=${exposed_port:-missing} API_PORT default=${entrypoint_port:-missing}"
+  no 'EXPOSE/API_PORT/METRICS_PORT contract' \
+    "EXPOSE=$(tr '\n' ' ' <<<"${exposed_ports:-missing}") API_PORT default=${entrypoint_port:-missing} METRICS_PORT default=${metrics_port:-missing}"
 fi
 
 runtime_env=$(grep -v '^[[:space:]]*#' <<<"$runtime_stage")

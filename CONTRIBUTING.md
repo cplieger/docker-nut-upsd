@@ -13,3 +13,9 @@ The [shared rules](https://github.com/cplieger/.github/blob/main/CONTRIBUTING.md
 - Removing `cve-2026-54161-notifycmd-execvp.patch` also touches the `NOTIFYCMD` paragraph of `docs/monitoring.md` and the `NutUpsdNotifyExecFailed` rule in `alerts/logql.yaml`. That rule matches the `execvp(` failure line the patch adds. No test checks that NUT still logs that line, so confirm it in the new release.
 - When the build's source check reports that the `OFFDURATION`, `OBLBDURATION` or `ALARMCRITICAL` pin in `generate-config.sh` differs from `clients/upsmon.c`, choose NUT's new default or keep the current value. Keeping it means changing that check in the `Dockerfile` too.
 - Either way, update the `NutUpsdHardwareFault` and `NutUpsdProtectionUnavailable` descriptions in `alerts/logql.yaml` and the "Host shutdown" section of `docs/configuration.md`, which call the pins NUT's defaults. No test checks that wording.
+
+## Dashboard
+
+- `grafana-dashboard.json` reads series names, labels and `ups.status` flags as text. A test fails when a panel reads one the exporter does not serve, or when a rule in `alerts/promql.yaml` has no Needs attention tile. Update the dashboard with any rename.
+- Save a dashboard change made in the Grafana UI with Export, then Export as code, choosing the V2 Resource model.
+- A change to `grafana-dashboard.json` takes `fix:` or `feat:`. Under `chore:` or `docs:` it replaces the dashboard's OCI artifact at the current version tags, and the GitHub Release keeps the old file.

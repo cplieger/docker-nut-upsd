@@ -165,6 +165,19 @@ EOF
 
 COPY LICENSE NOTICE /out/usr/share/licenses/nut-upsd/
 
+# nut-exporter, the in-image metrics exporter (the root Go module).
+FROM golang:1.27-alpine@sha256:7d5cbf6833f7331dafd25a2e8b9673477f559759ff8ed4ca8efabe6795ad08db AS exporter-builder
+ENV GOTOOLCHAIN=auto
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY *.go ./
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /nut-exporter .
+COPY LICENSE NOTICE ./
+COPY scripts/collect-licenses.sh scripts/
+RUN sh scripts/collect-licenses.sh --name nut-upsd .
+
 FROM builder AS source-checks
 SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
 COPY validate.sh entrypoint.sh generate-config.sh /tmp/source-checks/
@@ -293,6 +306,8 @@ COPY --from=builder /out/usr/bin/upsc /usr/bin/
 COPY --from=builder /out/usr/lib/nut/ /usr/lib/nut/
 COPY --from=builder /out/usr/share/cmdvartab /usr/share/cmdvartab
 COPY --from=builder /out/usr/share/licenses /usr/share/licenses
+COPY --from=exporter-builder /out/usr/share/licenses /usr/share/licenses
+COPY --chmod=755 --from=exporter-builder /nut-exporter /usr/local/bin/nut-exporter
 COPY licenses/ /usr/share/licenses/
 # Placed where Syft's *.cdx.json cataloger inventories it.
 COPY --from=builder /out/nut-upsd.cdx.json /usr/share/sbom/nut-upsd.cdx.json
@@ -308,7 +323,7 @@ ENV NUT_QUIET_INIT_UPSNOTIFY=true \
 COPY --chmod=755 entrypoint.sh validate.sh generate-config.sh lifecycle.sh \
      secrets.sh nut-notify.sh nut-shutdown.sh nut-shutdown-noop.sh \
      /usr/local/bin/
-EXPOSE 3493
+EXPOSE 3493 9199
 
 # The /tests-passed marker below is the only graph edge that makes a
 # default-target build execute tests/smoke.sh, so a smoke failure fails the build.

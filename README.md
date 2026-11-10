@@ -17,7 +17,7 @@ Your NAS, servers and other NUT clients follow one UPS and shut down cleanly whe
 
 ## Who it is for
 
-docker-nut-upsd is built for a UPS on an always-on Linux machine that runs Docker, shared with every machine on the same power. It checks every setting before it starts and ships alert rules for UPS events. You need a UPS listed on the [NUT hardware list](https://networkupstools.org/stable-hcl.html), connected to that machine by USB, serial or the network.
+docker-nut-upsd is built for a UPS on an always-on Linux machine that runs Docker, shared with every machine on the same power. It checks every setting before it starts and ships UPS metrics and alert rules. You need a UPS listed on the [NUT hardware list](https://networkupstools.org/stable-hcl.html), connected to that machine by USB, serial or the network.
 
 Two other projects suit a different setup:
 
@@ -84,7 +84,6 @@ Settings are environment variables in `compose.yaml`. The container reads them a
 | Variable | Description | Default |
 | --- | --- | --- |
 | `UPS_NAME` | Name of the UPS that clients ask for, as in `ups@host` | `ups` |
-| `UPS_DESC` | Description shown in NUT clients. No `"`, `\` or `#` | `My UPS` |
 | `UPS_DRIVER` | NUT driver for your UPS model, from the [NUT hardware list](https://networkupstools.org/stable-hcl.html) | `usbhid-ups` |
 | `UPS_PORT` | `auto` for USB, a device node such as `/dev/ttyUSB0` for serial, or `host[:port]` for a network UPS | `auto` |
 | `API_USER` | User name your NUT clients log in with. Letters, numbers, `_` and `-` | `monuser` |
@@ -95,8 +94,9 @@ Settings are environment variables in `compose.yaml`. The container reads them a
 | `LOWBATT_RUNTIME` | Seconds of runtime left at which the UPS counts as low. `0` turns this threshold off | Hardware default |
 | `SHUTDOWN_ON_BATTERY_CRITICAL` | Power off the machine running this container when the battery is critical | `false` |
 | `COMMS_WATCHDOG` | Restart the UPS driver when the UPS stops answering, such as after it drops off USB | `true` |
+| `METRICS_PORT` | Port the built-in exporter serves Prometheus metrics and `/healthz` on. `0` starts no exporter. Must differ from `API_PORT`. Published only if you map it | `9199` |
 
-[Configuration](docs/configuration.md) lists all 26 settings and covers serial and network UPSes, low-battery thresholds, host shutdown and your own NUT config files.
+[Configuration](docs/configuration.md) lists every setting, including `UPS_DESC` and the exporter's `METRICS_ADDRESS`, and covers serial and network UPSes, low-battery thresholds, host shutdown and your own NUT config files.
 
 | Mount | Description |
 | --- | --- |
@@ -108,16 +108,19 @@ Settings are environment variables in `compose.yaml`. The container reads them a
 | Port | Description |
 | --- | --- |
 | `3493` | The NUT protocol, for your NUT clients |
+| `9199` | Prometheus metrics at `/metrics` and the health check at `/healthz`, with no login. Publish it only to your monitoring network |
 
 ## Security
 
-Your clients shut down on what this server reports, and anyone who can reach port 3493 can read the UPS status without a password. Keep the port on your own network, and change `API_PASSWORD` from `secret` unless a Synology NAS uses this server. TLS is on by default, with a certificate the container creates. A client that does not check that certificate gets an encrypted connection but cannot tell this server from an impostor. The PEM file inside the container holds the private key, so export only the certificate, as [Security](docs/hardening.md#tls-starttls) shows.
+Your clients shut down on what this server reports, and anyone who can reach port 3493 can read the UPS status without a password. Keep the port on your own network, and change `API_PASSWORD` from `secret` unless a Synology NAS uses this server. The metrics port shows the same UPS state with no password, so keep it on your network too.
+
+TLS is on by default, with a certificate the container creates. A client that does not check that certificate gets an encrypted connection but cannot tell this server from an impostor. The PEM file inside the container holds the private key, so export only the certificate, as [Security](docs/hardening.md#tls-starttls) shows.
 
 The container starts as root. With the generated configuration, the UPS driver and the server then run as the `nut` user. `upsmon` keeps a root parent process to run the shutdown command. The live USB bind gives the container's `nut` group read and write access to every USB device on the host. Members of a host group with the same group ID get that access too. Host shutdown does not work with Docker user-namespace remapping under systemd-logind's default policy. [Security](docs/hardening.md) covers TLS certificates, privileges and what the image contains.
 
 ## Troubleshooting
 
-The healthcheck asks the server for the UPS status every 30 seconds. Unhealthy means the UPS is unplugged, the driver failed, or the server stopped answering. When the UPS drops off USB, the watchdog restarts the driver after 90 seconds of stale data and the container turns healthy again once the UPS answers. If the server stops answering for about a minute, the container exits and your restart policy starts it again.
+The healthcheck asks the server for the UPS status every 30 seconds. Unhealthy means the UPS is unplugged, the driver failed, or the server stopped answering. When the UPS drops off USB, the watchdog restarts the driver after 90 seconds of stale data and the container turns healthy again once the UPS answers. If the server stops answering for about a minute, the container exits and your restart policy starts it again. An unhealthy container notifies nobody. [Monitoring and alerts](docs/monitoring.md#knowing-the-app-is-alive) says what does.
 
 - The log shows `/dev/bus/usb not found`. Put back the two USB lines from the example.
 - The container stops with `env var contains` and a character name. Remove that character from the variable the line names.
@@ -127,14 +130,14 @@ The healthcheck asks the server for the UPS status every 30 seconds. Unhealthy m
 
 ## Monitoring
 
-docker-nut-upsd reports through its container log. It logs each UPS event, such as `event="ONBATT"`, and its own errors there. Your log stack turns them into alerts, as the [monitoring guide](https://github.com/cplieger/docs/blob/main/docs/monitoring.md) shows. Thirteen Loki alert rules ship in [`alerts/logql.yaml`](alerts/logql.yaml). [Monitoring and alerts](docs/monitoring.md) lists them and shows how to load them.
+docker-nut-upsd serves Prometheus metrics for the UPS and its shutdown path on port 9199, and logs each UPS event, such as `event="ONBATT"`. Alert rules for Prometheus and for Loki ship in [`alerts/`](alerts/). A Grafana dashboard of the UPS state, battery, load and firing alerts ships as [`grafana-dashboard.json`](grafana-dashboard.json) and needs Grafana 13.2 or newer. [Monitoring and alerts](docs/monitoring.md) says which to load together, and the [monitoring guide](https://github.com/cplieger/docs/blob/main/docs/monitoring.md) shows how to load them. The image has a Docker healthcheck, and [Knowing the app is alive](docs/monitoring.md#knowing-the-app-is-alive) says what it proves and who is told.
 
 ## Documentation
 
 - [Configuration](docs/configuration.md) lists every setting, for serial, network and custom setups.
 - [How docker-nut-upsd works](docs/how-it-works.md) explains recovery, the healthcheck and planned exits.
 - [Security](docs/hardening.md) covers TLS, privileges and the image contents.
-- [Monitoring and alerts](docs/monitoring.md) lists the log lines and alert rules.
+- [Monitoring and alerts](docs/monitoring.md) lists the metrics, the log lines, both rule files and which groups to load.
 
 ## Credits
 

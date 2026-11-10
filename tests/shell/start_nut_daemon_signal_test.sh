@@ -107,6 +107,8 @@ UPS_DRIVER=usbhid-ups
 UPS_PORT=auto
 API_ADDRESS=0.0.0.0
 API_PORT=3493
+# The metrics exporter has its own test (metrics_exporter_test.sh).
+METRICS_PORT=0
 
 graceful_shutdown() { exit 0; }
 teardown_all() { printf 'teardown\n' >>"$TEARDOWN_LOG"; }

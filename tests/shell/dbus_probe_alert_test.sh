@@ -14,9 +14,11 @@
 # dbus_poweroff_path_ok's negative case; the loop's own state machine and its log
 # lines are exercised nowhere.
 #
-# The two seams are the probe itself and sleep. sleep both bounds the cadence and
-# ends the loop here (the shipped loop is `while true`), so each scenario runs in a
-# subshell whose sleep stub exits after a fixed number of ticks.
+# The seams are the probe itself, sleep and the clock. sleep both bounds the cadence
+# and ends the loop here (the shipped loop is `while true`), so each scenario runs in
+# a subshell whose sleep stub exits after a fixed number of ticks. Each tick advances
+# the fake clock by CLOCK_STEP, deliberately not DBUS_PROBE_INTERVAL, so broken_for
+# must be read off the clock rather than computed from the interval.
 # Lint directives for this whole file, each against a stated guarantee rather than
 # an assumption:
 #   SC2015 - the assertion form `[ cond ] && ok "..." || no "..."` cannot mis-fire,
@@ -39,28 +41,45 @@ new_workdir >/dev/null
 #   ENTRYPOINT=/tmp/mut-lifecycle.sh bash tests/shell/dbus_probe_alert_test.sh
 [ "$ENTRYPOINT" = "$REPO_ROOT/entrypoint.sh" ] && ENTRYPOINT="$REPO_ROOT/lifecycle.sh"
 load_function dbus_liveness_probe
+# The entrypoint sources validate.sh's log_value before the probe runs, and the
+# detail field is part of the error line asserted here.
+ENTRYPOINT="$REPO_ROOT/validate.sh"
+load_function log_value
 
 DBUS_PROBE_INTERVAL=300
 LOG="$WORK/probe.log"
+STATE_LOG="$WORK/state.log"
+POWEROFF_PATH_STATE=poweroff-path
+# Records the verdict each probe hands the metrics exporter.
+write_wrapper_state() { printf '%s=%s\n' "$1" "$2" >>"$STATE_LOG"; }
+
+CLOCK_STEP=307
 
 # run_probe <ticks> <mode>: run the loop for <ticks> sleeps with the poweroff-path
 # probe answering per <mode> -- broken (always fails), healthy (always succeeds),
-# or recovering (fails the first probe, succeeds afterwards).
+# recovering (fails the first probe, succeeds afterwards), long-recovering (fails
+# the first two probes) or flapping (fails, succeeds, then fails again).
 run_probe() {
   _ticks=$1
   _mode=$2
   : >"$LOG"
+  : >"$STATE_LOG"
   (
     TICKS=0
+    # $TICKS counts the sleeps already taken, so the first probe sees tick 0.
     dbus_poweroff_path_ok() {
       case "$_mode" in
-        broken) return 1 ;;
+        broken)
+          _dbus_detail='Error org.freedesktop.DBus.Error.AccessDenied'
+          return 1
+          ;;
         healthy) return 0 ;;
-        # $TICKS counts the sleeps already taken, so the first probe fails and
-        # every later one succeeds.
         recovering) [ "$TICKS" -ge 1 ] ;;
+        long-recovering) [ "$TICKS" -ge 2 ] ;;
+        flapping) [ "$TICKS" -eq 1 ] ;;
       esac
     }
+    watchdog_epoch() { printf '%s' $((5000 + TICKS * CLOCK_STEP)); }
     sleep() {
       TICKS=$((TICKS + 1))
       [ "$TICKS" -lt "$_ticks" ] || exit 0
@@ -71,6 +90,12 @@ run_probe() {
 
 count() {
   grep -c "$1" "$LOG"
+}
+
+# broken_for_values <msg prefix>: the broken_for value of every line whose msg
+# opens with the prefix, in order, space-separated.
+broken_for_values() {
+  grep -F -- "msg=\"$1" "$LOG" | sed -n 's/.* broken_for=\([0-9]*\)\( .*\)\{0,1\}$/\1/p' | tr '\n' ' '
 }
 
 # --- 1. the matcher alerts/logql.yaml actually uses ------------------------------------
@@ -105,7 +130,8 @@ run_probe 1 broken
 grep -qF -- "msg=\"$M_DBUS_PHRASE" "$LOG" \
   && grep -q 'level=error' "$LOG" \
   && grep -q 'socket=/run/dbus/system_bus_socket' "$LOG" \
-  && ok "a broken poweroff path logs level=error whose msg opens with '$M_DBUS_PHRASE' (read from alerts/logql.yaml), naming the socket" \
+  && grep -qF 'detail="Error org.freedesktop.DBus.Error.AccessDenied"' "$LOG" \
+  && ok "a broken poweroff path logs level=error whose msg opens with '$M_DBUS_PHRASE' (read from alerts/logql.yaml), naming the socket and the probe's reply" \
   || no 'NutUpsdPowerOffPathBroken matcher' "alerts/logql.yaml wants msg=\"$M_DBUS_PHRASE, log: $(head -c 300 "$LOG")"
 
 # --- 2. the line RECURS while broken --------------------------------------------
@@ -118,6 +144,15 @@ run_probe 3 broken
   && ok 'the error line repeats on every failed probe (keeps the 15m alert firing)' \
   || no 'recurring error line' "expected 3 lines, got $(count "$M_DBUS_PHRASE")"
 
+# --- 2b. each repeat says how long the path has been broken ----------------------
+#
+# Three broken probes CLOCK_STEP seconds apart: the outage starts at the first, so
+# the lines read 0, one step and two steps, every one of them on the error line.
+run_probe 3 broken
+[ "$(broken_for_values "$M_DBUS_PHRASE")" = "0 $CLOCK_STEP $((2 * CLOCK_STEP)) " ] \
+  && ok "each repeat carries a growing broken_for read off the clock (0, $CLOCK_STEP, $((2 * CLOCK_STEP)))" \
+  || no 'growing broken_for' "broken_for values: $(broken_for_values "$M_DBUS_PHRASE"), log: $(tr '\n' '|' <"$LOG")"
+
 # --- 3. recovery is reported ONCE ------------------------------------------------
 #
 # The state machine's only job: one info line when the path comes back, and silence
@@ -129,6 +164,24 @@ run_probe 3 recovering
   && ok 'recovery logs one info line across two healthy probes, after one error line' \
   || no 'recovery logged once' "log: $(tr '\n' '|' <"$LOG")"
 
+# --- 3b. the recovery line carries the outage's total ----------------------------
+#
+# Two failed probes, then recovery at the third: the path was broken from the first
+# probe to the third, two clock steps.
+run_probe 4 long-recovering
+[ "$(broken_for_values "$M_DBUS_PHRASE")" = "0 $CLOCK_STEP " ] \
+  && [ "$(broken_for_values 'D-Bus poweroff path recovered')" = "$((2 * CLOCK_STEP)) " ] \
+  && [ "$(count 'level=info msg="D-Bus poweroff path recovered"')" -eq 1 ] \
+  && ok "the recovered line carries the outage's total broken_for ($((2 * CLOCK_STEP)))" \
+  || no 'recovered broken_for total' "log: $(tr '\n' '|' <"$LOG")"
+
+# --- 3c. a new outage counts from its own start ----------------------------------
+run_probe 3 flapping
+[ "$(broken_for_values "$M_DBUS_PHRASE")" = "0 0 " ] \
+  && [ "$(broken_for_values 'D-Bus poweroff path recovered')" = "$CLOCK_STEP " ] \
+  && ok 'a second outage starts broken_for at 0 again, after a recovery that carried the first outage' \
+  || no 'broken_for per outage' "log: $(tr '\n' '|' <"$LOG")"
+
 # --- 4. a healthy path is silent -------------------------------------------------
 #
 # The positive control: without it, a probe that logged the error unconditionally
@@ -137,6 +190,12 @@ run_probe 3 healthy
 [ ! -s "$LOG" ] \
   && ok 'a healthy poweroff path logs nothing at all (no false NutUpsdPowerOffPathBroken)' \
   || no 'healthy path silent' "logged: $(head -c 300 "$LOG")"
+
+# --- 4b. every probe records its verdict for the metrics exporter --------------
+run_probe 3 recovering
+[ "$(tr '\n' ' ' <"$STATE_LOG")" = 'poweroff-path=0 poweroff-path=1 poweroff-path=1 ' ] \
+  && ok 'each probe records its verdict for the exporter: 0 while broken, 1 once healthy' \
+  || no 'probe verdict record' "records: $(tr '\n' ' ' <"$STATE_LOG")"
 
 # --- 5. the cadence variable is mandatory ----------------------------------------
 #
