@@ -1,6 +1,6 @@
 module github.com/cplieger/docker-nut-upsd
 
-go 1.27.3
+go 1.27.4
 
 require (
 	github.com/cplieger/go/health v1.0.0
