@@ -1096,8 +1096,14 @@ check_table_rejection() {
   _matrix_var="$1"
   _matrix_class="$2"
   _matrix_optional="$3"
-  _matrix_value=$(rejected_table_value "$_matrix_class") || exit 1
-  _matrix_want=$(rejected_table_message "$_matrix_class") || exit 1
+  _matrix_value=$(rejected_table_value "$_matrix_class") || {
+    err "FAIL: no rejected value for check class $_matrix_class ($_matrix_var)"
+    exit 1
+  }
+  _matrix_want=$(rejected_table_message "$_matrix_class") || {
+    err "FAIL: no rejection message for check class $_matrix_class ($_matrix_var)"
+    exit 1
+  }
   if _matrix_err=$(
     (
       export "$_matrix_var=$_matrix_value"

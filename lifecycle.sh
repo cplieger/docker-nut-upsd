@@ -508,7 +508,7 @@ dbus_liveness_probe() {
 # and the entrypoint empties the directory at boot.
 readonly WRAPPER_STATE_DIR=/var/run/nut-state
 readonly DRIVER_RESTARTS_STATE=driver-restarts
-# shellcheck disable=SC2034  # consumed by sourced entrypoint.sh
+# shellcheck disable=SC2034  # read by entrypoint.sh, which sources this file
 readonly UPSMON_PID_STATE=upsmon.pid
 readonly POWEROFF_PATH_STATE=poweroff-path
 readonly EXPORTER_READY_STATE=exporter.ready
@@ -596,6 +596,6 @@ start_metrics_exporter() {
     wait "$!" || true
     _sme_ticks=$((_sme_ticks + 1))
   done
-  # shellcheck disable=SC2034  # consumed by sourced entrypoint.sh
+  # shellcheck disable=SC2034  # read by entrypoint.sh, which sources this file
   EXPORTER_PID=$_sme_pid
 }
