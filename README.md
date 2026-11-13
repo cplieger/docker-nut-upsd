@@ -120,7 +120,7 @@ The container starts as root. With the generated configuration, the UPS driver a
 
 ## Troubleshooting
 
-An unhealthy container means the UPS is unplugged, the driver failed, or the server stopped answering. The container recovers on its own once the UPS answers again.
+An unhealthy container means the UPS is unplugged, the driver failed, or the server stopped answering. The container recovers on its own once the UPS answers again. If the server stops answering for about a minute, the container exits and your restart policy starts it again.
 
 - The log shows `/dev/bus/usb not found`. Put back the two USB lines from the example.
 - The container stops with `env var contains` and a character name. Remove that character from the variable the line names.
