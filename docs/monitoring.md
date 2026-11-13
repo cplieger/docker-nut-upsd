@@ -237,11 +237,11 @@ The dashboard is versioned with the image, and the `grafana-dashboard.json` of r
 | Route | Method | Port | Login | Answers |
 | --- | --- | --- | --- | --- |
 | `/healthz` | `GET`, `HEAD` | `METRICS_PORT`, `9199` by default | none | `200 {"status":"ok"}`, or `503 {"status":"unhealthy","reasons":[...]}` |
-| `/metrics` | `GET` | the same port | none, so keep the port on your network | Prometheus text format |
+| `/metrics` | `GET` | the same port | none; keep the port on your network | Prometheus text format |
 
 **What healthy means.** `upsd` answers within 3 seconds with a fresh `ups.status` for the UPS. Stale data, a driver that is not connected or an `upsd` that does not answer makes the container unhealthy. A UPS on battery is still healthy, because the check reports the link to the UPS, not the power state. `/healthz` and the Docker healthcheck ask `upsd` the same question, so they give the same answer.
 
-**Docker health.** The image checks itself every 30 seconds with `upsc <UPS_NAME>@<address>:<API_PORT> ups.status`, against `upsd` inside the container. Docker marks the container unhealthy after 3 failures, and allows 135 seconds after a start. Docker's health status notifies nobody on its own, and Docker does not restart an unhealthy container. The comms watchdog restarts the driver after `COMMS_RECOVERY_TIMEOUT` seconds of stale data, and the container exits when `upsd` stops answering for about a minute, as [How docker-nut-upsd works](how-it-works.md) explains.
+**Docker health.** The image checks itself every 30 seconds with `upsc <UPS_NAME>@<address>:<API_PORT> ups.status`, which asks `upsd` inside the container for the UPS status, on `API_ADDRESS` or on loopback for the default `0.0.0.0`. Docker marks the container unhealthy after 3 failures, and allows 135 seconds after a start. Docker's health status notifies nobody on its own, and Docker does not restart an unhealthy container. The comms watchdog restarts the driver after `COMMS_RECOVERY_TIMEOUT` seconds of stale data, and the container exits when `upsd` stops answering for about a minute, as [How docker-nut-upsd works](how-it-works.md) explains.
 
 **Who is told.**
 
@@ -253,4 +253,4 @@ The dashboard is versioned with the image, and the `grafana-dashboard.json` of r
 
 Every NUT client also logs its own `COMMBAD` and `NOCOMM` events when it loses this server. A `upsmon` that hangs while its parent stays alive is not detected.
 
-**Probing from outside.** Check `GET http://<host>:9199/healthz` and pass on status 200 only. Do not match the body. Use a 5-second timeout, check every 60 seconds, alert after 3 failures, and wait 135 seconds after a first start. Publish the port to the prober's network first. With `METRICS_PORT=0`, probe TCP port 3493 instead, which proves only that `upsd` accepts connections.
+**Probing from outside.** Check `GET http://<host>:9199/healthz` and pass on status 200 only. Do not match the body. Use a 5-second timeout, check every 60 seconds, alert after 3 failures, and wait 135 seconds after a first start. Publish the port to the prober's network first. With `METRICS_PORT=0`, probe TCP port 3493 instead, which proves only that `upsd` accepts connections. A Kubernetes liveness probe that must ignore the UPS link uses a `tcpSocket` probe on port 3493.
