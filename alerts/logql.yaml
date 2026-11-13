@@ -130,17 +130,18 @@ groups:
     # rule in the group.
     interval: 10s
     rules:
-      # ONBATT maps to 1 and ONLINE to 0, and last_over_time keeps the latest
-      # value, so the rule fires when the most recent mains event was ONBATT.
-      # by (container) keeps both events in one series. Keep the 2m window
-      # above POLLFREQ + POLLFREQALERT.
+      # A pair like the flag rules below: ONBATT maps to 1, and ONLINE and the
+      # image's "starting upsmon" line map to 0. upsmon logs ONBATT once per
+      # outage, and after a start it reports a running outage on its first
+      # poll, so the alert holds from ONBATT until ONLINE, across a restart,
+      # for up to the 6h range. by (container) keeps both events in one series.
       - alert: NutUpsdOnBattery
         expr: |
           last_over_time(
             {container="nut-upsd"}
-            | logfmt | event=~"ONBATT|ONLINE"
-            | label_format mains_state=`{{ if eq .event "ONBATT" }}1{{ else }}0{{ end }}`
-            | unwrap mains_state [2m]
+            | logfmt | event=~"ONBATT|ONLINE" or msg="starting upsmon"
+            | label_format raised=`{{ if eq .event "ONBATT" }}1{{ else }}0{{ end }}`
+            | unwrap raised [6h]
           ) by (container) == 1
         for: 10s
         labels:
@@ -149,8 +150,9 @@ groups:
           summary: "UPS is on battery after mains power loss ({{ $labels.container }})"
           description: >
             The latest mains event was ONBATT, so the UPS lost mains power and
-            carries the load on battery. The alert marks that event and
-            resolves within 2 minutes. Check mains power now.
+            carries the load on battery. The alert holds until ONLINE, for up
+            to 6 hours, and a container start raises it again on upsmon's
+            first poll while the outage lasts. Check mains power now.
             NutUpsdLowBattery follows if the battery runs low.
       - alert: NutUpsdLowBattery
         expr: |

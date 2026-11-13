@@ -69,7 +69,7 @@ The first six alerts below are in the `nut-upsd-events` group. The next seven ar
 | `NutUpsdCommsRepaired` | the container logged `comms watchdog UPS comms recovered` after a watchdog driver restart. The line carries the outage length and restart count | warning |
 | `NutUpsdPowerOffFailed` | every D-Bus `PowerOff` call failed, or an accepted call was later refuted, during a forced shutdown | critical |
 | `NutUpsdContainerError` | the image logs its own `level=error` line, such as a refused setting, a failed daemon start, a failed watchdog restart or a shutdown error | warning |
-| `NutUpsdOnBattery` | an `ONBATT` event with no `ONLINE` after it in the window, so mains power was lost and the UPS took the load onto its battery | warning |
+| `NutUpsdOnBattery` | the latest `ONBATT` has no `ONLINE` after it, so mains power was lost and the UPS carries the load on its battery | warning |
 | `NutUpsdLowBattery` | a `LOWBATT` event, so the UPS raised its low-battery flag. On battery with low battery starts the shutdown | critical |
 | `NutUpsdCommsLost` | a `NOCOMM` event, so `upsmon` could not reach the UPS for `NOCOMMWARNTIME` seconds (default 300). The metric rule fires after 5 minutes of stale data | warning |
 | `NutUpsdHardwareFault` | the latest `ALARM` has no `NOTALARM` after it, or `REPLBATT` keeps repeating, so the UPS reports a worn or missing battery, a fan failure, overheating or a charger fault | warning |
@@ -114,9 +114,9 @@ A 1-minute evaluation could delay that by up to a minute, and the runtime left d
 
 #### NutUpsdOnBattery
 
-This is a transition rule, because `upsmon` logs `ONBATT` once when it loses mains and `ONLINE` once when mains returns. The source is `ups_on_batt` and `ups_on_line` in NUT v2.8.5 `clients/upsmon.c`. The rule keeps the latest of the two in time order. A recovery and a second outage inside one window then fire on the second `ONBATT`. The alert resolves within 2 minutes while the UPS may still carry the load. The metric rule holds while the UPS reports `OB`, so follow a long outage there or on the metrics page.
+This is a pair rule. `upsmon` logs `ONBATT` once when it loses mains and `ONLINE` once when mains returns, and the rule keeps the latest of the two, so the alert holds from the first until the second. The source is `ups_on_batt` and `ups_on_line` in NUT v2.8.5 `clients/upsmon.c`. A recovery and a second outage close together fire again on the second `ONBATT`. The range is 6 hours, so an outage that outlasts it with no restart resolves at 6 hours. If your battery can outlast that, follow a longer outage with the metric rule in `alerts/promql.yaml`, which holds while the UPS reports `OB`. The `for: 10s` keeps a flicker silent: a dip that ends within one `upsmon` poll logs `ONLINE` before the alert fires.
 
-The `ONBATT` line lands within one `POLLFREQ`. `upsmon` then switches to `POLLFREQALERT` and restores `POLLFREQ` only once it sees the UPS on line again. The source is `ups_on_batt` at line 887 and `try_restore_pollfreq`. So a flicker spans about `POLLFREQ` + `POLLFREQALERT`, and the 2-minute window must stay above that. If you raise either setting, raise the window too, and see [Configuration](configuration.md) for both defaults.
+A container start during an outage resets the alert and raises it again on `upsmon`'s first poll, as [How the pair rules hold](#how-the-pair-rules-hold) explains. `upsmon` starts each UPS with no `OB` flag and no line state, so its first poll that reads `OB` sends `ONBATT`, and a start on mains logs no `ONLINE`. The `starting upsmon` line is what clears an outage that ended while the container was down.
 
 How long the battery holds depends on the load and on the battery's size and age. Judge the urgency from the runtime your own UPS reports rather than from a fixed figure.
 
@@ -160,9 +160,9 @@ NUT has no clear for `REPLBATT`. It repeats the event every `RBWARNTIME` seconds
 
 #### How the pair rules hold
 
-The pair rules map a raise to 1 and its clear to 0, and keep the latest value in a 7-day range, as `NutUpsdOnBattery` does in its 2-minute range. A clear is logged once and a raise is not repeated, so with no clear the alert holds for 7 days after the raise.
+The pair rules map a raise to 1 and its clear to 0, and keep the latest value in their range: 7 days for the flags and 6 hours for `NutUpsdOnBattery`. A clear is logged once and a raise is not repeated, so with no clear the alert holds for the whole range after the raise.
 
-The image's `starting upsmon` line maps to 0 in every pair. `upsmon` starts with every flag clear and reports each flag that still holds on its first poll. So a clear that happened while the container was down cannot hold the alert, and each container start reports a flag that still holds. The alert can resolve until that poll. If your Loki keeps less than 7 days of logs, a flag holds only as long as its raise stays in Loki. Each evaluation of a pair reads up to 7 days of this container's log, and that query cost on a live ruler has not been measured. If it matters, raise the `nut-upsd-state` group interval or shorten the ranges.
+The image's `starting upsmon` line maps to 0 in every pair. `upsmon` starts with every flag clear and reports each flag that still holds on its first poll. So a clear that happened while the container was down cannot hold the alert, and each container start reports a flag that still holds. The alert can resolve until that poll. If your Loki keeps less than 7 days of logs, a flag holds only as long as its raise stays in Loki. Each evaluation of a pair reads up to its range of this container's log, and that query cost on a live ruler has not been measured. If it matters, raise the `nut-upsd-state` group interval or shorten the ranges.
 
 #### NutUpsdProtectionDegraded
 
