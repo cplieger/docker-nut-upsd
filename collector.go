@@ -12,6 +12,13 @@ import (
 // metricPrefix prefixes every family name; alerts/promql.yaml reads the prefixed names.
 const metricPrefix = "nut_upsd"
 
+// version is the image release and nutVersion the NUT release it compiles,
+// both stamped by the Dockerfile's go build line.
+var (
+	version    = "dev"
+	nutVersion = "unknown"
+)
+
 // statusFlags are the ups.status tokens a NUT v2.8.5 driver sets
 // (docs/new-drivers.txt "Status data"), ALARM, which NUT adds itself, and ECO,
 // which upsmon reads (clients/upsmon.c). Each is served on every fresh read, 0
@@ -91,6 +98,18 @@ func (e *exporter) register(reg *measure.Registry) error {
 		e.poweroffEnabled, e.poweroffOK, e.probeAt,
 	}, e.vars...)
 	return reg.Register(measure.NewCollector(e.collect, descs...))
+}
+
+// registerBuildInfo serves build_info at 1, labelled with the releases this
+// image runs, for a query to join on.
+func registerBuildInfo(reg *measure.Registry) error {
+	info := measure.NewLabeledGauge("build_info",
+		"Always 1; the labels are the image release and the NUT release it runs.", []string{"version", "nut_version"})
+	if err := reg.Register(info); err != nil {
+		return err
+	}
+	info.Set(1, version, nutVersion)
+	return nil
 }
 
 func (e *exporter) collect(ctx context.Context, em *measure.Emitter) {

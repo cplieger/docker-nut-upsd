@@ -242,14 +242,42 @@ expect resolved NutUpsdHardwareFault "$f" 601 'NutUpsdHardwareFault resolves whe
 timeline "$f" "0:ALARM" "60:REPLBATT" "120:NOTALARM"
 expect firing NutUpsdHardwareFault "$f" 180 'NutUpsdHardwareFault holds REPLBATT after NOTALARM'
 
-# --- 4. NOPARENT repeats every 120 seconds (check_parent, NUT v2.8.5 clients/upsmon.c)
+# --- 4. NutUpsdOnBattery pairs ONBATT with ONLINE and holds the whole outage ------
+# upsmon logs ONBATT once per outage, and after a start it reports a running
+# outage on its first poll (ups_on_batt, NUT v2.8.5 clients/upsmon.c).
+dir="$WORK/legs-NutUpsdOnBattery"
+n=$(rule_legs NutUpsdOnBattery "$dir")
+spec=$(leg_spec "$dir/1")
+IFS='|' read -r kind events raise reset window compare <<<"$spec"
+if [ "$n" -eq 1 ] && [ "$kind" = last ] && [ "$events" = "ONBATT ONLINE" ] && [ "$raise" = ONBATT ] \
+  && [ "$reset" = "$start_msg" ] && [ "$window" = 21600 ] && [ "$compare" = "== 1" ]; then
+  ok 'NutUpsdOnBattery pairs ONBATT with ONLINE and the upsmon start line in one 6-hour last_over_time leg'
+else
+  no 'NutUpsdOnBattery pair shape' "legs=$n spec=$spec"
+fi
+f="$WORK/t-ob"
+timeline "$f" "0:ONBATT"
+expect firing NutUpsdOnBattery "$f" 900 'NutUpsdOnBattery still fires 15 minutes into an outage'
+expect firing NutUpsdOnBattery "$f" 21599 'NutUpsdOnBattery holds ONBATT to the end of its range'
+expect resolved NutUpsdOnBattery "$f" 21600 'NutUpsdOnBattery resolves once ONBATT leaves its range'
+timeline "$f" "0:ONBATT" "1800:ONLINE"
+expect firing NutUpsdOnBattery "$f" 1799 'NutUpsdOnBattery holds until ONLINE'
+expect resolved NutUpsdOnBattery "$f" 1800 'NutUpsdOnBattery resolves on ONLINE'
+timeline "$f" "0:ONBATT" "60:ONLINE" "120:ONBATT"
+expect firing NutUpsdOnBattery "$f" 180 'NutUpsdOnBattery fires on a second outage after a recovery'
+timeline "$f" "0:ONBATT" "3600:START"
+expect resolved NutUpsdOnBattery "$f" 3601 'NutUpsdOnBattery resolves when the container starts again'
+timeline "$f" "0:ONBATT" "3600:START" "3605:ONBATT"
+expect firing NutUpsdOnBattery "$f" 3606 'NutUpsdOnBattery fires again when upsmon reports the running outage after the start'
+
+# --- 5. NOPARENT repeats every 120 seconds (check_parent, NUT v2.8.5 clients/upsmon.c)
 f="$WORK/t-np"
 timeline "$f" "0:NOPARENT" "120:NOPARENT" "240:NOPARENT" "360:NOPARENT"
 expect firing NutUpsdProtectionUnavailable "$f" 480 'NutUpsdProtectionUnavailable holds while NOPARENT repeats'
 timeline "$f" "0:OFF" "60:NOPARENT" "90:NOTOFF"
 expect firing NutUpsdProtectionUnavailable "$f" 100 'NutUpsdProtectionUnavailable holds NOPARENT after NOTOFF'
 
-# --- 5. the evaluator itself: a controlled leg it must read both ways -------------
+# --- 6. the evaluator itself: a controlled leg it must read both ways -------------
 f="$WORK/t-self"
 printf '0\t%s\n' "$(event_line CAL)" >"$f"
 if leg_firing 'last|CAL NOTCAL|CAL||600|== 1' "$f" 599 \

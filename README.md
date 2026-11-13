@@ -120,7 +120,7 @@ The container starts as root. With the generated configuration, the UPS driver a
 
 ## Troubleshooting
 
-The healthcheck asks the server for the UPS status every 30 seconds. Unhealthy means the UPS is unplugged, the driver failed, or the server stopped answering. When the UPS drops off USB, the watchdog restarts the driver after 90 seconds of stale data and the container turns healthy again once the UPS answers. If the server stops answering for about a minute, the container exits and your restart policy starts it again. An unhealthy container notifies nobody. [Monitoring and alerts](docs/monitoring.md#knowing-the-app-is-alive) says what does.
+An unhealthy container means the UPS is unplugged, the driver failed, or the server stopped answering. The container recovers on its own once the UPS answers again. If the server stops answering for about a minute, the container exits and your restart policy starts it again.
 
 - The log shows `/dev/bus/usb not found`. Put back the two USB lines from the example.
 - The container stops with `env var contains` and a character name. Remove that character from the variable the line names.
