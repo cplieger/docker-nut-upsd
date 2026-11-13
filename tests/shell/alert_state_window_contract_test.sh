@@ -173,12 +173,12 @@ else
 fi
 
 on_battery_window=$(rule_window_seconds NutUpsdOnBattery)
-on_battery_claim=$(rule_text NutUpsdOnBattery)
+on_battery_page=$(tr -s '[:space:]' ' ' <"$REPO_ROOT/docs/monitoring.md")
 if [ $((on_battery_window % 3600)) -eq 0 ] \
-  && printf '%s\n' "$on_battery_claim" | grep -Fq "for up to $((on_battery_window / 3600)) hours"; then
-  ok "NutUpsdOnBattery publishes its range (${on_battery_window}s) as the longest outage it holds"
+  && printf '%s\n' "$on_battery_page" | grep -Fq "The range is $((on_battery_window / 3600)) hours"; then
+  ok "NutUpsdOnBattery's page publishes its range (${on_battery_window}s) as the longest outage it holds"
 else
-  no 'NutUpsdOnBattery published hold' "range=${on_battery_window}s; the annotation must name it in whole hours"
+  no 'NutUpsdOnBattery published hold' "range=${on_battery_window}s; docs/monitoring.md must name it in whole hours"
 fi
 
 compose_restart=$(awk '$1 == "restart:" { print $2; exit }' "$REPO_ROOT/compose.yaml")

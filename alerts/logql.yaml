@@ -150,10 +150,8 @@ groups:
           summary: "UPS is on battery after mains power loss ({{ $labels.container }})"
           description: >
             The latest mains event was ONBATT, so the UPS lost mains power and
-            carries the load on battery. The alert holds until ONLINE, for up
-            to 6 hours, and a container start raises it again on upsmon's
-            first poll while the outage lasts. Check mains power now.
-            NutUpsdLowBattery follows if the battery runs low.
+            carries the load on battery. The alert holds until ONLINE. Check
+            mains power now. NutUpsdLowBattery follows if the battery runs low.
       - alert: NutUpsdLowBattery
         expr: |
           sum by (container) (count_over_time(
