@@ -5,9 +5,11 @@
 # loading the rule file, so an alert added, removed, renamed or re-graded on one
 # side leaves the published inventory lying with nothing to catch it.
 #
-# Reads every file in alerts/ rather than one filename. The folder holds one
-# file per expression language, and the docs/monitoring.md table publishes the whole
-# bundle, so a rule added in a second language belongs in that table too.
+# Reads every rule file in alerts/ rather than one filename. The folder holds
+# one file per expression language, and the docs/monitoring.md table publishes
+# the whole bundle once per alert name, so a rule added in a second language
+# belongs in that table too, and an alert both files hold must carry one
+# severity in both.
 #
 # Names and severity labels only: the "Fires when" prose is deliberately not
 # pinned, so rewording an explanation stays green.
@@ -18,7 +20,7 @@ set -u
 
 # Assert the bundle before reading it: an empty glob and a bundle with no rules
 # both yield no pairs, and only the first is a moved or renamed folder.
-mapfile -t alert_files < <(find "$REPO_ROOT/alerts" -maxdepth 1 -name '*.yaml' -type f | sort)
+mapfile -t alert_files < <(find "$REPO_ROOT/alerts" -maxdepth 1 -name '*.yaml' ! -name '*_test.yaml' -type f | sort)
 if [ "${#alert_files[@]}" -eq 0 ]; then
   printf 'harness error: no rule files under %s/alerts\n' "$REPO_ROOT" >&2
   exit 1
@@ -30,7 +32,7 @@ alert_pairs=$(awk '
     print alert "|" $2
     alert = ""
   }
-' "${alert_files[@]}" | sort)
+' "${alert_files[@]}" | sort -u)
 
 readme_pairs=$(awk -F '|' '
   /^\| Alert \| Fires when \| Severity \|$/ { in_table = 1; next }
@@ -49,6 +51,13 @@ readme_pairs=$(awk -F '|' '
 if [ -z "$alert_pairs" ] || [ -z "$readme_pairs" ]; then
   printf 'harness error: could not extract both alert inventories\n' >&2
   exit 1
+fi
+
+split_severity=$(printf '%s\n' "$alert_pairs" | cut -d'|' -f1 | uniq -d)
+if [ -z "$split_severity" ]; then
+  ok 'an alert both rule files hold has one severity in both'
+else
+  no 'one severity per alert name' "different severities across alerts/ files: $(tr '\n' ' ' <<<"$split_severity")"
 fi
 
 if [ "$alert_pairs" = "$readme_pairs" ]; then

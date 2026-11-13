@@ -1,0 +1,308 @@
+# promtool test rules alerts/promql_test.yaml
+rule_files:
+- promql.yaml
+evaluation_interval: 15s
+tests:
+- name: a failing scrape pages after 5m and keeps the target labels
+  interval: 1m
+  input_series:
+  - series: up{job="nut-upsd", instance="nut-upsd:9199"}
+    values: 1 0x10
+  alert_rule_test:
+  - eval_time: 4m
+    alertname: NutUpsdDown
+    exp_alerts: []
+  - eval_time: 8m
+    alertname: NutUpsdDown
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        job: nut-upsd
+        instance: nut-upsd:9199
+      exp_annotations:
+        summary: nut-upsd is not being scraped
+        description: 'No successful scrape for 5m: the container is stopped, crash-looping or refusing to start, METRICS_PORT is 0, or the scrape cannot reach the exporter. Check the container''s state and its log.
+
+          '
+- name: a target that is gone pages through the absent arm
+  interval: 1m
+  input_series:
+  - series: up{job="other", instance="x:1"}
+    values: 1x10
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: NutUpsdDown
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        job: nut-upsd
+      exp_annotations:
+        summary: nut-upsd is not being scraped
+        description: 'No successful scrape for 5m: the container is stopped, crash-looping or refusing to start, METRICS_PORT is 0, or the scrape cannot reach the exporter. Check the container''s state and its log.
+
+          '
+- name: NutUpsdOnBattery holds for the whole outage and resolves when mains returns
+  interval: 15s
+  input_series:
+  - series: nut_upsd_ups_status{job="nut-upsd", instance="nut-upsd:9199", flag="OB"}
+    values: 0 1x240 0x4
+  alert_rule_test:
+  - eval_time: 15s
+    alertname: NutUpsdOnBattery
+    exp_alerts: []
+  - eval_time: 1m
+    alertname: NutUpsdOnBattery
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        job: nut-upsd
+        instance: nut-upsd:9199
+        flag: OB
+      exp_annotations:
+        summary: UPS is on battery after mains power loss (nut-upsd:9199)
+        description: 'The UPS reports OB: it lost mains power and carries the load on battery, and the alert holds until mains returns. Check mains power now. NutUpsdLowBattery follows if the battery runs low.
+
+          '
+  - eval_time: 60m
+    alertname: NutUpsdOnBattery
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        job: nut-upsd
+        instance: nut-upsd:9199
+        flag: OB
+      exp_annotations:
+        summary: UPS is on battery after mains power loss (nut-upsd:9199)
+        description: 'The UPS reports OB: it lost mains power and carries the load on battery, and the alert holds until mains returns. Check mains power now. NutUpsdLowBattery follows if the battery runs low.
+
+          '
+  - eval_time: 61m
+    alertname: NutUpsdOnBattery
+    exp_alerts: []
+- name: NutUpsdLowBattery fires on the low-battery flag at once
+  interval: 1m
+  input_series:
+  - series: nut_upsd_ups_status{job="nut-upsd", instance="nut-upsd:9199", flag="LB"}
+    values: 0 1x3
+  alert_rule_test:
+  - eval_time: 0m
+    alertname: NutUpsdLowBattery
+    exp_alerts: []
+  - eval_time: 1m
+    alertname: NutUpsdLowBattery
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        job: nut-upsd
+        instance: nut-upsd:9199
+        flag: LB
+      exp_annotations:
+        summary: UPS reports low battery (nut-upsd:9199)
+        description: 'The UPS raised its low-battery flag. Check mains power now. On battery, this starts the shutdown sequence. On line power, the UPS probably misreports it, so check LOWBATT_PERCENT or ignorelb.
+
+          '
+- name: NutUpsdCommsLost waits 5m of stale data and resolves when it is fresh again
+  interval: 1m
+  input_series:
+  - series: nut_upsd_ups_data_fresh{job="nut-upsd", instance="nut-upsd:9199"}
+    values: 1 0x7 1x3
+  alert_rule_test:
+  - eval_time: 5m
+    alertname: NutUpsdCommsLost
+    exp_alerts: []
+  - eval_time: 7m
+    alertname: NutUpsdCommsLost
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        job: nut-upsd
+        instance: nut-upsd:9199
+      exp_annotations:
+        summary: UPS communication lost (nut-upsd:9199)
+        description: 'upsd has served no fresh data for the UPS for 5m: the data is stale, the driver is gone or upsd does not answer. UPS state is unknown until communication returns. Check the UPS connection.
+
+          '
+  - eval_time: 10m
+    alertname: NutUpsdCommsLost
+    exp_alerts: []
+- name: NutUpsdHardwareFault fires per flag, RB and ALARM, and clears with each
+  interval: 1m
+  input_series:
+  - series: nut_upsd_ups_status{job="nut-upsd", instance="nut-upsd:9199", flag="RB"}
+    values: 1x10
+  - series: nut_upsd_ups_status{job="nut-upsd", instance="nut-upsd:9199", flag="ALARM"}
+    values: 0 1x3 0x6
+  - series: nut_upsd_ups_status{job="nut-upsd", instance="nut-upsd:9199", flag="OL"}
+    values: 1x10
+  alert_rule_test:
+  - eval_time: 2m
+    alertname: NutUpsdHardwareFault
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        job: nut-upsd
+        instance: nut-upsd:9199
+        flag: ALARM
+      exp_annotations:
+        summary: UPS reports a hardware fault (nut-upsd:9199)
+        description: 'The UPS reports ALARM: RB is a battery to replace, ALARM an active alarm, named in ups.alarm. With ALARMCRITICAL 1, upstream''s default, losing comms during ALARM forces a shutdown. Plan service.
+
+          '
+    - exp_labels:
+        severity: warning
+        job: nut-upsd
+        instance: nut-upsd:9199
+        flag: RB
+      exp_annotations:
+        summary: UPS reports a hardware fault (nut-upsd:9199)
+        description: 'The UPS reports RB: RB is a battery to replace, ALARM an active alarm, named in ups.alarm. With ALARMCRITICAL 1, upstream''s default, losing comms during ALARM forces a shutdown. Plan service.
+
+          '
+  - eval_time: 6m
+    alertname: NutUpsdHardwareFault
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        job: nut-upsd
+        instance: nut-upsd:9199
+        flag: RB
+      exp_annotations:
+        summary: UPS reports a hardware fault (nut-upsd:9199)
+        description: 'The UPS reports RB: RB is a battery to replace, ALARM an active alarm, named in ups.alarm. With ALARMCRITICAL 1, upstream''s default, losing comms during ALARM forces a shutdown. Plan service.
+
+          '
+- name: NutUpsdProtectionDegraded holds each of BYPASS, OVER and CAL until it clears
+  interval: 1m
+  input_series:
+  - series: nut_upsd_ups_status{job="nut-upsd", instance="nut-upsd:9199", flag="BYPASS"}
+    values: 1x10
+  - series: nut_upsd_ups_status{job="nut-upsd", instance="nut-upsd:9199", flag="OVER"}
+    values: 1 0x9
+  - series: nut_upsd_ups_status{job="nut-upsd", instance="nut-upsd:9199", flag="CAL"}
+    values: 0x5 1x5
+  - series: nut_upsd_ups_status{job="nut-upsd", instance="nut-upsd:9199", flag="TRIM"}
+    values: 1x10
+  alert_rule_test:
+  - eval_time: 0m
+    alertname: NutUpsdProtectionDegraded
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        job: nut-upsd
+        instance: nut-upsd:9199
+        flag: BYPASS
+      exp_annotations:
+        summary: UPS protection is degraded (nut-upsd:9199)
+        description: 'The UPS reports BYPASS. CAL is calibration, BYPASS an unprotected load, OVER an overload. Losing comms during CAL or BYPASS forces a shutdown. OVER is critical only when OVERDURATION is configured, and the generated upsmon.conf does not set it.
+
+          '
+    - exp_labels:
+        severity: warning
+        job: nut-upsd
+        instance: nut-upsd:9199
+        flag: OVER
+      exp_annotations:
+        summary: UPS protection is degraded (nut-upsd:9199)
+        description: 'The UPS reports OVER. CAL is calibration, BYPASS an unprotected load, OVER an overload. Losing comms during CAL or BYPASS forces a shutdown. OVER is critical only when OVERDURATION is configured, and the generated upsmon.conf does not set it.
+
+          '
+  - eval_time: 7m
+    alertname: NutUpsdProtectionDegraded
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        job: nut-upsd
+        instance: nut-upsd:9199
+        flag: BYPASS
+      exp_annotations:
+        summary: UPS protection is degraded (nut-upsd:9199)
+        description: 'The UPS reports BYPASS. CAL is calibration, BYPASS an unprotected load, OVER an overload. Losing comms during CAL or BYPASS forces a shutdown. OVER is critical only when OVERDURATION is configured, and the generated upsmon.conf does not set it.
+
+          '
+    - exp_labels:
+        severity: warning
+        job: nut-upsd
+        instance: nut-upsd:9199
+        flag: CAL
+      exp_annotations:
+        summary: UPS protection is degraded (nut-upsd:9199)
+        description: 'The UPS reports CAL. CAL is calibration, BYPASS an unprotected load, OVER an overload. Losing comms during CAL or BYPASS forces a shutdown. OVER is critical only when OVERDURATION is configured, and the generated upsmon.conf does not set it.
+
+          '
+- name: NutUpsdProtectionUnavailable fires on OFF and on a dead upsmon parent
+  interval: 1m
+  input_series:
+  - series: nut_upsd_ups_status{job="nut-upsd", instance="nut-upsd:9199", flag="OFF"}
+    values: 0 1 0x5
+  - series: nut_upsd_upsmon_parent_alive{job="nut-upsd", instance="nut-upsd:9199"}
+    values: 1x3 0x3
+  alert_rule_test:
+  - eval_time: 0m
+    alertname: NutUpsdProtectionUnavailable
+    exp_alerts: []
+  - eval_time: 1m
+    alertname: NutUpsdProtectionUnavailable
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        job: nut-upsd
+        instance: nut-upsd:9199
+        flag: 'OFF'
+      exp_annotations:
+        summary: UPS protection became unavailable (nut-upsd:9199)
+        description: 'Either the UPS reports OFF, or upsmon''s parent is not running, so a forced shutdown cannot power off the host. With OFFDURATION 30, upstream''s default, OFF for 30 seconds forces a shutdown. Restart the container for the parent.
+
+          '
+  - eval_time: 2m
+    alertname: NutUpsdProtectionUnavailable
+    exp_alerts: []
+  - eval_time: 5m
+    alertname: NutUpsdProtectionUnavailable
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        job: nut-upsd
+        instance: nut-upsd:9199
+      exp_annotations:
+        summary: UPS protection became unavailable (nut-upsd:9199)
+        description: 'Either the UPS reports OFF, or upsmon''s parent is not running, so a forced shutdown cannot power off the host. With OFFDURATION 30, upstream''s default, OFF for 30 seconds forces a shutdown. Restart the container for the parent.
+
+          '
+- name: NutUpsdProtectionUnavailable stays silent while the container has not started upsmon yet
+  interval: 1m
+  input_series:
+  - series: nut_upsd_ups_status{job="nut-upsd", instance="nut-upsd:9199", flag="OFF"}
+    values: 0x5
+  - series: nut_upsd_upsmon_parent_alive{job="nut-upsd", instance="nut-upsd:9199"}
+    values: _x3 1x2
+  alert_rule_test:
+  - eval_time: 2m
+    alertname: NutUpsdProtectionUnavailable
+    exp_alerts: []
+  - eval_time: 5m
+    alertname: NutUpsdProtectionUnavailable
+    exp_alerts: []
+- name: NutUpsdPowerOffPathBroken holds while the probe fails and clears at a good probe
+  interval: 5m
+  input_series:
+  - series: nut_upsd_poweroff_path_ok{job="nut-upsd", instance="nut-upsd:9199"}
+    values: 1 0x2 1
+  alert_rule_test:
+  - eval_time: 0m
+    alertname: NutUpsdPowerOffPathBroken
+    exp_alerts: []
+  - eval_time: 15m
+    alertname: NutUpsdPowerOffPathBroken
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        job: nut-upsd
+        instance: nut-upsd:9199
+      exp_annotations:
+        summary: UPS host-poweroff path broken (nut-upsd:9199)
+        description: 'The last D-Bus probe got no logind answer that permits a non-interactive poweroff, so a forced shutdown would leave the host running. The container log''s probe line names the bus socket or the host polkit policy.
+
+          '
+  - eval_time: 20m
+    alertname: NutUpsdPowerOffPathBroken
+    exp_alerts: []

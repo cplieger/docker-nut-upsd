@@ -1,6 +1,10 @@
 # check=error=true
 
-FROM alpine:3.24.4@sha256:93b41ef40b1677fce8fcc64ff4af09daddfacf5040afde618bc46c1e2d1cc7d4 AS builder
+# Global so the NUT build and the exporter's build_info read one pin.
+# renovate: datasource=github-releases depName=networkupstools/nut
+ARG NUT_VERSION=v2.8.5
+
+FROM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS builder
 
 SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
 
@@ -69,8 +73,7 @@ RUN wget -qO netsnmp.tar.gz \
     && mkdir -p /out/usr/share/licenses/net-snmp \
     && cp COPYING /out/usr/share/licenses/net-snmp/
 
-# renovate: datasource=github-releases depName=networkupstools/nut
-ARG NUT_VERSION=v2.8.5
+ARG NUT_VERSION
 # The signature authenticates the publisher; the same-channel sha pin preserves transport integrity.
 # Release subkey BFA06D7C653B64C11DFDAF0442061031267D11B1 belongs to primary
 # B83459F776B90224988F36C0DE0184DA7043DCF7, cross-checked against the tarball's
@@ -165,6 +168,22 @@ EOF
 
 COPY LICENSE NOTICE /out/usr/share/licenses/nut-upsd/
 
+# nut-exporter, the in-image metrics exporter (the root Go module).
+FROM golang:1.27-alpine@sha256:7d5cbf6833f7331dafd25a2e8b9673477f559759ff8ed4ca8efabe6795ad08db AS exporter-builder
+ENV GOTOOLCHAIN=auto
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY *.go ./
+ARG NUT_VERSION
+# The release pipeline passes the channel tag; a local build reports dev.
+ARG BUILD_VERSION=dev
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${BUILD_VERSION} -X main.nutVersion=${NUT_VERSION#v}" -o /nut-exporter .
+COPY LICENSE NOTICE ./
+COPY scripts/collect-licenses.sh scripts/
+RUN sh scripts/collect-licenses.sh --name nut-upsd .
+
 FROM builder AS source-checks
 SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
 COPY validate.sh entrypoint.sh generate-config.sh /tmp/source-checks/
@@ -256,7 +275,7 @@ grep -Fq 'retrying harder' drivers/upsdrvctl.c || {
 touch /source-checks-passed
 CHECKS
 
-FROM alpine:3.24.4@sha256:93b41ef40b1677fce8fcc64ff4af09daddfacf5040afde618bc46c1e2d1cc7d4 AS runtime
+FROM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS runtime
 
 # The `echo` is load-bearing: BuildKit keys a RUN on the args it CONSUMES, so
 # dropping it leaves the upgrade on a cached layer and the image ships stale
@@ -293,6 +312,8 @@ COPY --from=builder /out/usr/bin/upsc /usr/bin/
 COPY --from=builder /out/usr/lib/nut/ /usr/lib/nut/
 COPY --from=builder /out/usr/share/cmdvartab /usr/share/cmdvartab
 COPY --from=builder /out/usr/share/licenses /usr/share/licenses
+COPY --from=exporter-builder /out/usr/share/licenses /usr/share/licenses
+COPY --chmod=755 --from=exporter-builder /nut-exporter /usr/local/bin/nut-exporter
 COPY licenses/ /usr/share/licenses/
 # Placed where Syft's *.cdx.json cataloger inventories it.
 COPY --from=builder /out/nut-upsd.cdx.json /usr/share/sbom/nut-upsd.cdx.json
@@ -308,7 +329,7 @@ ENV NUT_QUIET_INIT_UPSNOTIFY=true \
 COPY --chmod=755 entrypoint.sh validate.sh generate-config.sh lifecycle.sh \
      secrets.sh nut-notify.sh nut-shutdown.sh nut-shutdown-noop.sh \
      /usr/local/bin/
-EXPOSE 3493
+EXPOSE 3493 9199
 
 # The /tests-passed marker below is the only graph edge that makes a
 # default-target build execute tests/smoke.sh, so a smoke failure fails the build.

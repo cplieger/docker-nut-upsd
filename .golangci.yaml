@@ -1,0 +1,202 @@
+# Synced from cplieger/ci/.golangci.yaml. Change it there.
+version: "2"
+
+run:
+  timeout: 5m
+  tests: true
+  modules-download-mode: readonly
+
+linters:
+  default: standard
+  # unused, ineffassign and wastedassign are off: the deadset check
+  # (deadset-ci.yaml) reports the same findings (DS1002, DS1003, DS1404) and
+  # gates on them in every Go module.
+  disable:
+    - unused
+    - ineffassign
+  enable:
+    - bodyclose
+    - noctx
+    - gosec
+    - gocritic
+    - revive
+    - goconst
+    - gocyclo
+    - gocognit
+    - dupl
+    - unconvert
+    - unparam
+    - prealloc
+    - intrange
+    - modernize
+    - usestdlibvars
+    - usetesting
+    - perfsprint
+    - misspell
+    - durationcheck
+    - errname
+    - nolintlint
+    - sloglint
+  settings:
+    errcheck:
+      check-type-assertions: true
+    govet:
+      enable-all: true
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+    gocyclo:
+      # Cyclomatic complexity ~= the minimum number of test cases needed to
+      # cover every path, so it doubles as a "how much test does this need"
+      # signal. Tightened 18 -> 15 toward McCabe's limit (10), pragmatically
+      # raised for Go since each `if err != nil` adds a path.
+      min-complexity: 15
+    gocognit:
+      # Cognitive complexity (SonarQube's standard ceiling of 15) measures how
+      # hard a function is to understand, the better defect-density signal.
+      # Flat switches and sequential error checks that inflate gocyclo stay low
+      # here; a genuinely path-heavy-but-flat function may carry an explained
+      # //nolint:gocyclo (nolintlint requires the explanation).
+      min-complexity: 15
+    dupl:
+      # Cross-file duplication was the one quality axis nothing measured. The
+      # tool's default of 150 tokens over-fires on idiomatic Go (error-handling
+      # chains, flat switch bodies); 200 was chosen by measurement, not taste.
+      # VALIDATED AGAINST KNOWN FINDINGS before being enabled, because a gate
+      # never seen to fire may not be gating anything: at 200 with tests exempt
+      # a sweep of 37 Go repos reported exactly 2 findings, both the
+      # insertLines/deleteLines pair in web-terminal-engine/vt/csi.go. Those
+      # were resolved by extracting the shared prologue (prepareLineShift), and
+      # the sweep then measured clean.
+      # So this gate now guards against future drift rather than clearing a
+      # backlog. Duplication is genuinely rare here; do not read a green result
+      # as the linter being broken. Tests are exempt below for the same reason
+      # gocyclo/gocognit are: table-driven subtests are structurally repetitive
+      # by design.
+      threshold: 200
+    goconst:
+      ignore-tests: true
+    perfsprint:
+      strconcat: false
+    sloglint:
+      kv-only: true
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+  exclusions:
+    presets:
+      # `comments` preset removed: revive's `exported` (every exported symbol
+      # needs a doc comment starting with its name) and `package-comments`
+      # (every package needs a doc comment) are enforced.
+      - std-error-handling
+      - common-false-positives
+      - legacy
+    paths:
+      - node_modules
+    rules:
+      # Tests are exempt from style/correctness linters (placeholder secrets,
+      # deliberate error-ignores, repeated literals) AND from complexity
+      # (gocyclo + gocognit). Both over-fire on idiomatic Go test code: a
+      # thorough table-driven / property / fuzz test is a loop + t.Run closures
+      # + per-case assertion guards, which gocognit's nesting model scores high
+      # without that being a smell: clean table tests score cognitive 36-72,
+      # and gating them would force a //nolint or the splitting of cohesive
+      # table tests. golangci also can't set a test-only threshold
+      # (min-complexity is global), so the prod gate of 15 can't coexist with a
+      # lenient test bar. Test complexity is judged in review instead (Eager
+      # Test, Conditional Test Logic).
+      - path: _test\.go
+        linters:
+          - dupl
+          - gocyclo
+          - gocognit
+          - errcheck
+          - gosec
+          - goconst
+          - gocritic
+          - govet
+          - prealloc
+          - perfsprint
+          - errname
+          - sloglint
+          - unparam
+          - usetesting
+          - noctx
+          - revive
+      - path: _test\.go
+        text: "string .* has .* occurrences"
+        linters:
+          - goconst
+
+# Formatters (golangci-lint v2). `golangci-lint run` reports unformatted
+# files as issues (exit 1), so the existing lint step enforces these — no
+# extra workflow step / version bump needed; the config propagates via
+# sync.yaml. `golangci-lint fmt` applies them.
+formatters:
+  enable:
+    - gofumpt
+    - gci
+  settings:
+    gofumpt:
+      # Strictest: every `extra` rule, on top of gofumpt's strict superset of
+      # gofmt. module-path is auto-detected from each repo's go.mod when left
+      # empty.
+      #
+      # Named individually rather than via the old `extra-rules: true`
+      # catch-all, which golangci-lint deprecates (it warns on every run) and
+      # which will be removed. The three keys below are exactly what
+      # `extra-rules: true` enabled, so this migration changes no formatting.
+      #
+      # Upstream deliberately offers NO replacement "all" switch: enabling each
+      # rule is meant to be a conscious choice so new rules cannot silently
+      # reformat every repo. The consequence to know is that a future gofumpt
+      # rule will NOT arrive here automatically and has to be added on purpose.
+      extra:
+        # Group adjacent function parameters that share a type.
+        group-params: true
+        # Clothe naked returns in functions with named results.
+        clothe-returns: true
+        # Put a multi-line call's closing paren on its own line when the
+        # opening paren ends a line.
+        balance-calls: true
+    gci:
+      # Deterministic import grouping: standard -> third-party -> local
+      # module (folded by gofumpt into the third-party group). A separate
+      # gci `localmodule`/`prefix` section is intentionally NOT used: gofumpt
+      # never emits a distinct local-import group, so it would never converge.
+      # goimports is intentionally NOT enabled: it conflicts with gci on
+      # ordering, and its only unique capability (add/remove imports) is
+      # moot in CI — the Go compiler already rejects unused/missing
+      # imports, and editors handle it via gopls.
+      sections:
+        - standard
+        - default
+      custom-order: true
+  exclusions:
+    # Generated files are auto-excluded (default generated: lax).
+    paths:
+      - node_modules
+
+# Report every finding, rather than the first few of each kind.
+#
+# Both limits below default to a non-zero value (max-same-issues 3,
+# max-issues-per-linter 50), and the deduplication is keyed on the issue's
+# TEXT alone — no rule, file or position component. gosec's taint analyzers
+# give every finding of a rule the rule's static description, so the wrapper
+# builds one identical string ("G702: Command injection via taint analysis")
+# for every site and the processor keeps three of them.
+#
+# Measured: a corpus where standalone gosec reported 15 G702
+# findings reported 3 through golangci-lint, and which 3 survived depended on
+# processing order — which is also what made a `//nolint:gosec` directive on a
+# taint finding fail `nolintlint` as "unused" on some runs and not others.
+# A security scanner silently dropping findings is the wrong default here, and
+# the flicker it causes costs more CI rounds than the noise it saves.
+#
+# `golangci-lint run -v` logs "N/M issues with text ... were hidden" when a
+# limit bites, which is the direct way to check this rather than inferring it.
+issues:
+  max-same-issues: 0
+  max-issues-per-linter: 0

@@ -41,6 +41,14 @@ if [ -n "$(stale_nut_pid_paths | head -c 1)" ]; then
   fi
 fi
 
+# The exporter's wrapper state starts empty each boot: a restart count or a
+# probe verdict from a previous lifecycle would read as this one's.
+if ! _wsd_err=$({ rm -rf "$WRAPPER_STATE_DIR" && install -d -m 750 -o root -g nut "$WRAPPER_STATE_DIR"; } 2>&1); then
+  printf 'level=error msg="could not reset the metrics exporter state directory; refusing to start" path=%s err="%s"\n' \
+    "$WRAPPER_STATE_DIR" "$(log_value "$_wsd_err")" >&2
+  exit 1
+fi
+
 # Clear temps leaked by a kill between mktemp and rm -f/mv. The secrets
 # directory is app-owned; in operator-mountable /etc/nut cleanup is limited to the
 # names this app stages: the generated configs, plus the two TLS working copies
@@ -86,6 +94,9 @@ canonicalize_validated_values
 : "${API_PASSWORD:=secret}"
 : "${API_ADDRESS:=0.0.0.0}"
 : "${API_PORT:=3493}"
+# The in-image metrics exporter (nut-exporter); 0 starts none.
+: "${METRICS_PORT:=9199}"
+: "${METRICS_ADDRESS:=$API_ADDRESS}"
 # STARTTLS on the upsd listener (opportunistic; legacy clients that never
 # request it keep talking cleartext). See resolve_tls_cert (secrets.sh).
 : "${API_TLS:=true}"
@@ -192,6 +203,7 @@ COMMS_RECOVERY_TIMEOUT=$(strip_leading_zeros "$COMMS_RECOVERY_TIMEOUT")
 COMMS_FAST_RETRIES=$(strip_leading_zeros "$COMMS_FAST_RETRIES")
 COMMS_BACKOFF_FACTOR=$(strip_leading_zeros "$COMMS_BACKOFF_FACTOR")
 DBUS_PROBE_INTERVAL=$(strip_leading_zeros "$DBUS_PROBE_INTERVAL")
+METRICS_PORT=$(strip_leading_zeros "$METRICS_PORT")
 
 # TLS certificate provisioning. Runs whenever API_TLS=true, even with a
 # mounted upsd.conf.user: the override's TLS directives may point CERTFILE at
@@ -252,6 +264,7 @@ stop_bg_pid() {
 UPSMON_PID=""
 WATCHDOG_PID=""
 DBUS_PROBE_PID=""
+EXPORTER_PID=""
 
 # teardown_all: the one teardown sequence every exit path shares - reap both
 # background loops, then stop the NUT daemons. Exit codes stay with the callers.
@@ -261,6 +274,7 @@ teardown_all() {
   set +e
   stop_bg_pid "${WATCHDOG_PID:-}"
   stop_bg_pid "${DBUS_PROBE_PID:-}"
+  stop_bg_pid "${EXPORTER_PID:-}"
   stop_services "${UPSMON_PID:-}"
 }
 
@@ -296,6 +310,18 @@ start_nut_daemon() {
   fi
 }
 
+# Before the NUT daemons, so a malformed METRICS_ADDRESS or a taken port stops
+# the boot before anything is started.
+if [ "$METRICS_PORT" -ne 0 ]; then
+  printf 'level=info msg="starting metrics exporter" listen="%s"\n' "$(log_value "$(metrics_listen_address)")" >&2
+  start_metrics_exporter || {
+    teardown_all
+    exit 1
+  }
+else
+  printf 'level=info msg="metrics exporter disabled" metrics_port=0\n' >&2
+fi
+
 # 90s outer bound on upsdrvctl wedging, sized above NUT's own default
 # maxstartdelay (75s). Not redundant with it: at v2.8.5 a maxstartdelay of 0 or
 # below skips the alarm() and then blocks in waitpid() forever
@@ -319,6 +345,7 @@ wait_for_pidfile "upsd" "/var/run/nut/upsd.pid" /usr/sbin/upsd || {
 printf 'level=info msg="starting upsmon"\n' >&2
 /usr/sbin/upsmon -F &
 UPSMON_PID=$!
+write_wrapper_state "$UPSMON_PID_STATE" "$UPSMON_PID"
 
 printf 'level=info msg="NUT services started; supervising upsmon"\n' >&2
 
@@ -386,6 +413,13 @@ while kill -0 "$UPSMON_PID" 2>/dev/null; do
     printf 'level=error msg="D-Bus poweroff-path probe exited; starting a fresh one, whose unreachable/recovered state restarts from zero" rc=%d\n' "$_dp_rc" >&2 || :
     dbus_liveness_probe &
     DBUS_PROBE_PID=$!
+  fi
+  if [ -n "${EXPORTER_PID:-}" ] && ! pid_running "$EXPORTER_PID"; then
+    _ex_rc=0
+    wait "$EXPORTER_PID" 2>/dev/null || _ex_rc=$?
+    printf 'level=error msg="metrics exporter exited; starting a fresh one" rc=%d\n' "$_ex_rc" >&2 || :
+    # A failed restart has logged its cause; the UPS stays monitored without it.
+    start_metrics_exporter || :
   fi
   if upsd_responsive; then
     upsd_failures=0

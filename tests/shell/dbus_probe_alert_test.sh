@@ -1,66 +1,60 @@
 #!/usr/bin/env bash
-# dbus_liveness_probe(): the background loop that re-checks the host-poweroff path
-# while SHUTDOWN_ON_BATTERY_CRITICAL is on, and the sole source of the line
-# alerts/logql.yaml's NutUpsdPowerOffPathBroken matches.
-#
-# The whole point of the probe is that it reports a broken poweroff path BEFORE a
-# real forced shutdown, because during one it can no longer be fixed. That makes
-# its log line a contract: NutUpsdPowerOffPathBroken matches the literal
-# `D-Bus poweroff path unreachable` (copied verbatim from alerts/logql.yaml below), and
-# it matches while the path is broken, so the line must RECUR rather than fire
-# once and go quiet. Both properties are asserted here.
-#
-# tests/smoke.sh checks that this function is defined, and covers
-# dbus_poweroff_path_ok's negative case; the loop's own state machine and its log
-# lines are exercised nowhere.
-#
-# The two seams are the probe itself and sleep. sleep both bounds the cadence and
-# ends the loop here (the shipped loop is `while true`), so each scenario runs in a
-# subshell whose sleep stub exits after a fixed number of ticks.
-# Lint directives for this whole file, each against a stated guarantee rather than
-# an assumption:
-#   SC2015 - the assertion form `[ cond ] && ok "..." || no "..."` cannot mis-fire,
-#     because lib.sh's ok/no return 0 unconditionally by design (see their comment).
-#   SC2034 - DBUS_PROBE_INTERVAL is an INPUT to lifecycle.sh code that is extracted
-#     and sourced at RUNTIME, so shellcheck cannot see the read.
-#   SC2329 - the dbus_poweroff_path_ok and sleep stubs are invoked from that same
-#     runtime-sourced function, so shellcheck cannot see those calls either.
-#   SC2016 - the backtick pattern that reads the matcher out of alerts/logql.yaml must
-#     stay single-quoted: it matches the LITERAL backticks LogQL wraps a line
-#     filter in, and double quotes would run it as a command substitution.
-# shellcheck disable=SC2015,SC2034,SC2329,SC2016
+# dbus_liveness_probe() emits the only line alerts/logql.yaml's
+# NutUpsdPowerOffPathBroken matches, and the line must recur while the poweroff
+# path stays broken, or the alert resolves before a forced shutdown needs the path.
+# Seams: the probe, sleep (exits the shipped `while true` after a fixed tick count)
+# and the clock, which steps CLOCK_STEP, not DBUS_PROBE_INTERVAL, so broken_for
+# must be read off the clock.
+
+# SC2015: lib.sh's ok/no always return 0. SC2034, SC2329: the variable and the
+# stubs are used by the function sourced at run time.
+# shellcheck disable=SC2015,SC2034,SC2329
 set -u
 
 # shellcheck source-path=SCRIPTDIR
 . "$(dirname -- "$0")/lib.sh"
 new_workdir >/dev/null
 
-# The file under test; a caller who SET ENTRYPOINT wins, which is the red-check:
-#   ENTRYPOINT=/tmp/mut-lifecycle.sh bash tests/shell/dbus_probe_alert_test.sh
+# A caller-set ENTRYPOINT wins (red-check: ENTRYPOINT=/tmp/mut-lifecycle.sh).
 [ "$ENTRYPOINT" = "$REPO_ROOT/entrypoint.sh" ] && ENTRYPOINT="$REPO_ROOT/lifecycle.sh"
 load_function dbus_liveness_probe
+# The probe's detail field comes from validate.sh's log_value.
+ENTRYPOINT="$REPO_ROOT/validate.sh"
+load_function log_value
 
 DBUS_PROBE_INTERVAL=300
 LOG="$WORK/probe.log"
+STATE_LOG="$WORK/state.log"
+POWEROFF_PATH_STATE=poweroff-path
+# Records the verdict each probe hands the metrics exporter.
+write_wrapper_state() { printf '%s=%s\n' "$1" "$2" >>"$STATE_LOG"; }
 
-# run_probe <ticks> <mode>: run the loop for <ticks> sleeps with the poweroff-path
-# probe answering per <mode> -- broken (always fails), healthy (always succeeds),
-# or recovering (fails the first probe, succeeds afterwards).
+CLOCK_STEP=307
+
+# run_probe <ticks> <mode>: <ticks> sleeps; the probe fails always (broken), never
+# (healthy), first only (recovering), first two (long-recovering) or all but the
+# second (flapping).
 run_probe() {
   _ticks=$1
   _mode=$2
   : >"$LOG"
+  : >"$STATE_LOG"
   (
     TICKS=0
+    # $TICKS counts the sleeps already taken, so the first probe sees tick 0.
     dbus_poweroff_path_ok() {
       case "$_mode" in
-        broken) return 1 ;;
+        broken)
+          _dbus_detail='Error org.freedesktop.DBus.Error.AccessDenied'
+          return 1
+          ;;
         healthy) return 0 ;;
-        # $TICKS counts the sleeps already taken, so the first probe fails and
-        # every later one succeeds.
         recovering) [ "$TICKS" -ge 1 ] ;;
+        long-recovering) [ "$TICKS" -ge 2 ] ;;
+        flapping) [ "$TICKS" -eq 1 ] ;;
       esac
     }
+    watchdog_epoch() { printf '%s' $((5000 + TICKS * CLOCK_STEP)); }
     sleep() {
       TICKS=$((TICKS + 1))
       [ "$TICKS" -lt "$_ticks" ] || exit 0
@@ -73,18 +67,15 @@ count() {
   grep -c "$1" "$LOG"
 }
 
-# --- 1. the matcher alerts/logql.yaml actually uses ------------------------------------
-# The pattern is read FROM the rule file, so either side of the contract failing
-# fails here: reword the log line and it stops matching; edit the alert expression
-# and the extracted pattern changes out from under the emitter. The rule filters on
-# the PARSED msg field (`| logfmt | msg=~"<phrase>.*"`), which is anchored, so the
-# emitted msg VALUE has to start with the phrase -- a line that merely contains it
-# somewhere else would not fire the alert and must not satisfy this assertion.
-# The range ends at the NEXT rule (or EOF) rather than at a `[15m]` literal, so a
-# window change cannot overrun it into a neighbouring rule; and the guard checks the
-# pattern's SHAPE, not just non-emptiness -- an empty pattern would make
-# `grep -F -- ""` match every line, and a wrong-rule pattern would be non-empty but
-# meaningless.
+# broken_for_values <msg prefix>: space-separated broken_for of each matching line.
+broken_for_values() {
+  grep -F -- "msg=\"$1" "$LOG" | sed -n 's/.* broken_for=\([0-9]*\)\( .*\)\{0,1\}$/\1/p' | tr '\n' ' '
+}
+
+# --- 1. the matcher alerts/logql.yaml actually uses ---------------------------
+# Read from the one rule, up to the next. The rule's `| logfmt | msg=~` is anchored,
+# so the msg value must open with the phrase. The case guard refuses an empty
+# pattern (matches every line) or another rule's.
 M_DBUS=$(awk '
   /- alert: NutUpsdPowerOffPathBroken$/ { inrule = 1; next }
   inrule && /- alert: / { exit }
@@ -98,51 +89,66 @@ case "$M_DBUS" in
     exit 1
     ;;
 esac
-# The rule's trailing `.*` is what lets the msg carry more than the phrase; strip it
-# to get the prefix the field must open with.
+# Drop the rule's trailing `.*` to get the prefix.
 M_DBUS_PHRASE=${M_DBUS%.\*}
 run_probe 1 broken
 grep -qF -- "msg=\"$M_DBUS_PHRASE" "$LOG" \
   && grep -q 'level=error' "$LOG" \
   && grep -q 'socket=/run/dbus/system_bus_socket' "$LOG" \
-  && ok "a broken poweroff path logs level=error whose msg opens with '$M_DBUS_PHRASE' (read from alerts/logql.yaml), naming the socket" \
+  && grep -qF 'detail="Error org.freedesktop.DBus.Error.AccessDenied"' "$LOG" \
+  && ok "a broken poweroff path logs level=error whose msg opens with '$M_DBUS_PHRASE' (read from alerts/logql.yaml), naming the socket and the probe's reply" \
   || no 'NutUpsdPowerOffPathBroken matcher' "alerts/logql.yaml wants msg=\"$M_DBUS_PHRASE, log: $(head -c 300 "$LOG")"
 
 # --- 2. the line RECURS while broken --------------------------------------------
-#
-# NutUpsdPowerOffPathBroken is count_over_time(...[15m]) > 0, so a single line on the
-# transition would let the alert resolve itself while the path is still broken.
-# Three broken ticks must produce three lines.
+# The rule counts over 15m, so one line on the transition would let it resolve.
 run_probe 3 broken
 [ "$(count "$M_DBUS_PHRASE")" -eq 3 ] \
   && ok 'the error line repeats on every failed probe (keeps the 15m alert firing)' \
   || no 'recurring error line' "expected 3 lines, got $(count "$M_DBUS_PHRASE")"
 
+# --- 2b. each repeat says how long the path has been broken ----------------------
+run_probe 3 broken
+[ "$(broken_for_values "$M_DBUS_PHRASE")" = "0 $CLOCK_STEP $((2 * CLOCK_STEP)) " ] \
+  && ok "each repeat carries a growing broken_for read off the clock (0, $CLOCK_STEP, $((2 * CLOCK_STEP)))" \
+  || no 'growing broken_for' "broken_for values: $(broken_for_values "$M_DBUS_PHRASE"), log: $(tr '\n' '|' <"$LOG")"
+
 # --- 3. recovery is reported ONCE ------------------------------------------------
-#
-# The state machine's only job: one info line when the path comes back, and silence
-# afterwards. Without the _dbus_broken latch the healthy loop would log a recovery
-# line every interval forever.
 run_probe 3 recovering
 [ "$(count "$M_DBUS_PHRASE")" -eq 1 ] \
   && [ "$(count 'level=info msg="D-Bus poweroff path recovered"')" -eq 1 ] \
   && ok 'recovery logs one info line across two healthy probes, after one error line' \
   || no 'recovery logged once' "log: $(tr '\n' '|' <"$LOG")"
 
+# --- 3b. the recovery line carries the outage's total ----------------------------
+run_probe 4 long-recovering
+[ "$(broken_for_values "$M_DBUS_PHRASE")" = "0 $CLOCK_STEP " ] \
+  && [ "$(broken_for_values 'D-Bus poweroff path recovered')" = "$((2 * CLOCK_STEP)) " ] \
+  && [ "$(count 'level=info msg="D-Bus poweroff path recovered"')" -eq 1 ] \
+  && ok "the recovered line carries the outage's total broken_for ($((2 * CLOCK_STEP)))" \
+  || no 'recovered broken_for total' "log: $(tr '\n' '|' <"$LOG")"
+
+# --- 3c. a new outage counts from its own start ----------------------------------
+run_probe 3 flapping
+[ "$(broken_for_values "$M_DBUS_PHRASE")" = "0 0 " ] \
+  && [ "$(broken_for_values 'D-Bus poweroff path recovered')" = "$CLOCK_STEP " ] \
+  && ok 'a second outage starts broken_for at 0 again, after a recovery that carried the first outage' \
+  || no 'broken_for per outage' "log: $(tr '\n' '|' <"$LOG")"
+
 # --- 4. a healthy path is silent -------------------------------------------------
-#
-# The positive control: without it, a probe that logged the error unconditionally
-# would satisfy cases 1 and 2, and the alert would fire on every healthy container.
+# The control: a probe logging the error unconditionally would pass cases 1 and 2.
 run_probe 3 healthy
 [ ! -s "$LOG" ] \
   && ok 'a healthy poweroff path logs nothing at all (no false NutUpsdPowerOffPathBroken)' \
   || no 'healthy path silent' "logged: $(head -c 300 "$LOG")"
 
+# --- 4b. every probe records its verdict for the metrics exporter --------------
+run_probe 3 recovering
+[ "$(tr '\n' ' ' <"$STATE_LOG")" = 'poweroff-path=0 poweroff-path=1 poweroff-path=1 ' ] \
+  && ok 'each probe records its verdict for the exporter: 0 while broken, 1 once healthy' \
+  || no 'probe verdict record' "records: $(tr '\n' ' ' <"$STATE_LOG")"
+
 # --- 5. the cadence variable is mandatory ----------------------------------------
-#
-# `sleep ""` returns immediately, so a probe started without DBUS_PROBE_INTERVAL
-# would spin at full speed and flood both the log and the alert; the :? guard
-# refuses to start instead.
+# `sleep ""` returns at once, so a probe without an interval would spin.
 if (
   unset DBUS_PROBE_INTERVAL
   dbus_liveness_probe

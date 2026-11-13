@@ -1,5 +1,5 @@
 #!/bin/sh
-# NUT notification handler — emits structured log lines for Alloy pickup.
+# NUT notification handler: emits one logfmt line per UPS event.
 # Invoked by upsmon for each event with NOTIFYFLAG ... EXEC.
 # NUT passes NOTIFYTYPE, UPSNAME (upsmon's "upsname@hostname[:port]") and the message as $1.
 

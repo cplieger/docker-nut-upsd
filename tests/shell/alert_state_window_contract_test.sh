@@ -172,35 +172,13 @@ else
     "annotation=$published_alarmcritical generated=$generated_alarmcritical"
 fi
 
-on_battery_annotation=$(awk '
-  /^[[:space:]]*#/ { leading = leading $0 ORS; next }
-  /^[[:space:]]*$/ { leading = leading ORS; next }
-  /^[[:space:]]*- alert: NutUpsdOnBattery$/ {
-    printf "%s", leading
-    found = 1
-    exit
-  }
-  { leading = "" }
-  END { if (!found) exit 1 }
-' "$ALERTS") || {
-  printf 'harness error: NutUpsdOnBattery leading annotation not found\n' >&2
-  exit 1
-}
-
-if printf '%s\n' "$on_battery_annotation" | grep -qw POLLFREQ \
-  && printf '%s\n' "$on_battery_annotation" | grep -qw POLLFREQALERT; then
-  ok 'NutUpsdOnBattery sizing annotation names both POLLFREQ and POLLFREQALERT'
-else
-  no 'NutUpsdOnBattery cadence annotation' 'both polling knobs must be named'
-fi
-
 on_battery_window=$(rule_window_seconds NutUpsdOnBattery)
-pollfreq=$(default_seconds POLLFREQ)
-pollfreqalert=$(default_seconds POLLFREQALERT)
-if [ "$on_battery_window" -gt "$((pollfreq + pollfreqalert))" ]; then
-  ok "NutUpsdOnBattery range (${on_battery_window}s) clears the combined default polling gap (${pollfreq}s + ${pollfreqalert}s)"
+on_battery_page=$(tr -s '[:space:]' ' ' <"$REPO_ROOT/docs/monitoring.md")
+if [ $((on_battery_window % 3600)) -eq 0 ] \
+  && printf '%s\n' "$on_battery_page" | grep -Fq "The range is $((on_battery_window / 3600)) hours"; then
+  ok "NutUpsdOnBattery's page publishes its range (${on_battery_window}s) as the longest outage it holds"
 else
-  no 'NutUpsdOnBattery polling-gap range' "range=${on_battery_window}s; combined default gap=$((pollfreq + pollfreqalert))s"
+  no 'NutUpsdOnBattery published hold' "range=${on_battery_window}s; docs/monitoring.md must name it in whole hours"
 fi
 
 compose_restart=$(awk '$1 == "restart:" { print $2; exit }' "$REPO_ROOT/compose.yaml")

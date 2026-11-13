@@ -268,10 +268,13 @@ generate_upsd_users() {
 
 # MONITOR host: upsd_probe_host (lifecycle.sh) owns the LISTEN-address mapping.
 # MONITOR credential: local_upsmon_credential_active owns the choice.
+
 # ALARM needs EXEC because ups.alarm is upstream's only report of a UPS hardware
 # fault. ALARM and OTHER omit SYSLOG because their stock notices interpolate
 # device-controlled strings (NUT clients/upsmon.h) that would otherwise be
-# re-emitted raw on the alert-matched stream.
+# re-emitted raw on the alert-matched stream. The five NOT* clears carry EXEC,
+# or the alerts/logql.yaml flag rule they end holds until its range runs out.
+
 # The timing and criticality directives below are emitted at NUT v2.8.5's
 # own defaults (clients/upsmon.c:59-133), so a NUT bump cannot move the
 # ones stated here. is_ups_critical reads a fourth criticality knob,
@@ -303,11 +306,16 @@ NOTIFYFLAG SHUTDOWN SYSLOG+EXEC
 NOTIFYFLAG REPLBATT SYSLOG+EXEC
 NOTIFYFLAG NOPARENT SYSLOG+EXEC
 NOTIFYFLAG OFF SYSLOG+EXEC
+NOTIFYFLAG NOTOFF SYSLOG+EXEC
 NOTIFYFLAG BYPASS SYSLOG+EXEC
+NOTIFYFLAG NOTBYPASS SYSLOG+EXEC
 NOTIFYFLAG OVER SYSLOG+EXEC
+NOTIFYFLAG NOTOVER SYSLOG+EXEC
 NOTIFYFLAG CAL SYSLOG+EXEC
+NOTIFYFLAG NOTCAL SYSLOG+EXEC
 NOTIFYFLAG NOCOMM SYSLOG+EXEC
 NOTIFYFLAG ALARM EXEC
+NOTIFYFLAG NOTALARM SYSLOG+EXEC
 NOTIFYFLAG OTHER EXEC
 MONEOF
 }

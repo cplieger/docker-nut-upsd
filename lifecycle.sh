@@ -428,6 +428,7 @@ comms_watchdog() {
         # the fast-retry budget or inflate the restarts log.
         if restart_ups_driver "$((_restarts + 1))"; then
           _restarts=$((_restarts + 1))
+          record_driver_restart
         fi
         _stale_since=""
       fi
@@ -471,23 +472,130 @@ dbus_poweroff_path_ok() {
 
 # dbus_liveness_probe: background loop started by the entrypoint when host
 # shutdown is enabled. Same loop shape as comms_watchdog (`sleep || true` so a
-# signal-interrupted sleep cannot silently end the loop). Logs error on every
-# failed probe while broken (recurring lines keep the Loki alert firing) and
-# info once on recovery.
+# signal-interrupted sleep cannot silently end the loop). While the path is
+# broken it logs one error per probe with broken_for, the seconds since the
+# outage's first failed probe, so a reader sees one outage and its length; the
+# shipped log rule NutUpsdPowerOffPathBroken needs a line inside its range
+# (tests/shell/dbus_probe_alert_test.sh). Recovery logs one info line with the
+# total.
 dbus_liveness_probe() {
   : "${DBUS_PROBE_INTERVAL:?dbus_liveness_probe requires DBUS_PROBE_INTERVAL}"
-  _dbus_broken=0
+  _dbus_broken_since=""
   while true; do
     if dbus_poweroff_path_ok; then
-      if [ "$_dbus_broken" -eq 1 ]; then
-        printf 'level=info msg="D-Bus poweroff path recovered"\n' >&2
+      write_wrapper_state "$POWEROFF_PATH_STATE" 1
+      if [ -n "$_dbus_broken_since" ]; then
+        printf 'level=info msg="D-Bus poweroff path recovered" broken_for=%d\n' \
+          "$(($(watchdog_epoch) - _dbus_broken_since))" >&2
       fi
-      _dbus_broken=0
+      _dbus_broken_since=""
     else
-      printf 'level=error msg="D-Bus poweroff path unreachable; host poweroff on battery critical would fail" socket=/run/dbus/system_bus_socket detail="%s"\n' \
-        "$(log_value "${_dbus_detail:-}")" >&2
-      _dbus_broken=1
+      write_wrapper_state "$POWEROFF_PATH_STATE" 0
+      _dbus_now=$(watchdog_epoch)
+      : "${_dbus_broken_since:=$_dbus_now}"
+      printf 'level=error msg="D-Bus poweroff path unreachable; host poweroff on battery critical would fail" broken_for=%d socket=/run/dbus/system_bus_socket detail="%s"\n' \
+        "$((_dbus_now - _dbus_broken_since))" "$(log_value "${_dbus_detail:-}")" >&2
     fi
     sleep "$DBUS_PROBE_INTERVAL" || true
   done
+}
+
+# ---------------------------------------------------------------------------
+# Metrics exporter and the wrapper state it serves
+# ---------------------------------------------------------------------------
+# nut-exporter (state.go) reads these files at scrape time and names them
+# itself, so a rename here must change state.go too. Each file has one writer,
+# and the entrypoint empties the directory at boot.
+readonly WRAPPER_STATE_DIR=/var/run/nut-state
+readonly DRIVER_RESTARTS_STATE=driver-restarts
+# shellcheck disable=SC2034  # read by entrypoint.sh, which sources this file
+readonly UPSMON_PID_STATE=upsmon.pid
+readonly POWEROFF_PATH_STATE=poweroff-path
+readonly EXPORTER_READY_STATE=exporter.ready
+readonly EXPORTER_BIN=/usr/local/bin/nut-exporter
+# Seconds start_metrics_exporter waits for the exporter to bind.
+readonly EXPORTER_START_TIMEOUT=10
+
+# write_wrapper_state NAME VALUE: replace one state file by rename, so a scrape
+# never reads half a value. Always returns 0: a lost record must not end the
+# loop that writes it.
+write_wrapper_state() {
+  _ws_tmp="$WRAPPER_STATE_DIR/.$1.tmp"
+  if ! { printf '%s\n' "$2" >"$_ws_tmp" && mv -f "$_ws_tmp" "$WRAPPER_STATE_DIR/$1"; } 2>/dev/null; then
+    printf 'level=warn msg="could not record state for the metrics exporter" name=%s\n' "$1" >&2
+  fi
+  return 0
+}
+
+# record_driver_restart: add one to the driver restart count the exporter
+# serves. The count lives in the file, so a respawned watchdog continues it.
+record_driver_restart() {
+  _rdr=$(head -c 18 "$WRAPPER_STATE_DIR/$DRIVER_RESTARTS_STATE" 2>/dev/null) || _rdr=0
+  _rdr=$(printf '%s' "$_rdr" | tr -d '\n')
+  case "$_rdr" in
+    '' | *[!0-9]*) _rdr=0 ;;
+  esac
+  write_wrapper_state "$DRIVER_RESTARTS_STATE" "$(($(strip_leading_zeros "$_rdr") + 1))"
+}
+
+# pid_running PID: return 0 while PID is a live process. Not kill -0, which
+# succeeds for an unreaped zombie, and fails with EPERM for the exporter once
+# it runs as nut in a container without CAP_KILL.
+pid_running() {
+  case "$1" in
+    '' | *[!0-9]*) return 1 ;;
+  esac
+  _pr_stat=$(head -c 1024 "/proc/$1/stat" 2>/dev/null) || return 1
+  case "${_pr_stat##*) }" in
+    '' | Z* | X*) return 1 ;;
+  esac
+  return 0
+}
+
+# metrics_listen_address: METRICS_ADDRESS:METRICS_PORT, with an IPv6 address
+# in brackets.
+metrics_listen_address() {
+  case "$METRICS_ADDRESS" in
+    *:*) printf '[%s]:%s' "$METRICS_ADDRESS" "$METRICS_PORT" ;;
+    *) printf '%s:%s' "$METRICS_ADDRESS" "$METRICS_PORT" ;;
+  esac
+}
+
+# start_metrics_exporter: start nut-exporter in the background and wait until
+# it has bound its listener, which it marks with the ready file; sets
+# EXPORTER_PID. Returns 1 with an error record when the exporter exits or does
+# not bind in time, so a malformed METRICS_ADDRESS or a taken port stops the
+# boot.
+start_metrics_exporter() {
+  EXPORTER_PID=""
+  rm -f "$WRAPPER_STATE_DIR/$EXPORTER_READY_STATE"
+  _sme_listen=$(metrics_listen_address)
+  "$EXPORTER_BIN" -listen "$_sme_listen" -upsd "$(upsd_probe_host):$API_PORT" \
+    -ups "$UPS_NAME" -state-dir "$WRAPPER_STATE_DIR" \
+    -host-poweroff="$SHUTDOWN_ON_BATTERY_CRITICAL" -user nut &
+  _sme_pid=$!
+  _sme_ticks=0
+  while [ ! -e "$WRAPPER_STATE_DIR/$EXPORTER_READY_STATE" ]; do
+    if ! pid_running "$_sme_pid"; then
+      _sme_rc=0
+      wait "$_sme_pid" || _sme_rc=$?
+      printf 'level=error msg="metrics exporter failed to start; check METRICS_ADDRESS and METRICS_PORT" listen="%s" rc=%d\n' \
+        "$(log_value "$_sme_listen")" "$_sme_rc" >&2
+      return 1
+    fi
+    if [ "$_sme_ticks" -ge $((EXPORTER_START_TIMEOUT * 5)) ]; then
+      kill "$_sme_pid" 2>/dev/null || true
+      wait "$_sme_pid" 2>/dev/null || true
+      printf 'level=error msg="metrics exporter did not bind its listener in time" listen="%s" timeout=%ss\n' \
+        "$(log_value "$_sme_listen")" "$EXPORTER_START_TIMEOUT" >&2
+      return 1
+    fi
+    # Background + wait, as everywhere in this file, so a trapped SIGTERM
+    # interrupts the wait at once.
+    sleep 0.2 &
+    wait "$!" || true
+    _sme_ticks=$((_sme_ticks + 1))
+  done
+  # shellcheck disable=SC2034  # read by entrypoint.sh, which sources this file
+  EXPORTER_PID=$_sme_pid
 }
