@@ -95,7 +95,10 @@ func TestRunServesMetricsAfterTheReadyFile(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("GET /metrics: status %d", resp.StatusCode)
 	}
-	for _, line := range []string{`nut_upsd_ups_status{flag="OL"} 1`, "nut_upsd_host_poweroff_enabled 1", "nut_upsd_upsd_up 1"} {
+	for _, line := range []string{
+		`nut_upsd_ups_status{flag="OL"} 1`, "nut_upsd_host_poweroff_enabled 1", "nut_upsd_upsd_up 1",
+		`nut_upsd_build_info{nut_version="unknown",version="dev"} 1`,
+	} {
 		if !bytes.Contains(body, []byte(line+"\n")) {
 			t.Errorf("/metrics lacks %q", line)
 		}

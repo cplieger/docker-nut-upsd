@@ -1,5 +1,9 @@
 # check=error=true
 
+# Global so the NUT build and the exporter's build_info read one pin.
+# renovate: datasource=github-releases depName=networkupstools/nut
+ARG NUT_VERSION=v2.8.5
+
 FROM alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf AS builder
 
 SHELL ["/bin/ash", "-eo", "pipefail", "-c"]
@@ -69,8 +73,7 @@ RUN wget -qO netsnmp.tar.gz \
     && mkdir -p /out/usr/share/licenses/net-snmp \
     && cp COPYING /out/usr/share/licenses/net-snmp/
 
-# renovate: datasource=github-releases depName=networkupstools/nut
-ARG NUT_VERSION=v2.8.5
+ARG NUT_VERSION
 # The signature authenticates the publisher; the same-channel sha pin preserves transport integrity.
 # Release subkey BFA06D7C653B64C11DFDAF0442061031267D11B1 belongs to primary
 # B83459F776B90224988F36C0DE0184DA7043DCF7, cross-checked against the tarball's
@@ -172,8 +175,11 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY *.go ./
+ARG NUT_VERSION
+# The release pipeline passes the channel tag; a local build reports dev.
+ARG BUILD_VERSION=dev
 RUN --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /nut-exporter .
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${BUILD_VERSION} -X main.nutVersion=${NUT_VERSION#v}" -o /nut-exporter .
 COPY LICENSE NOTICE ./
 COPY scripts/collect-licenses.sh scripts/
 RUN sh scripts/collect-licenses.sh --name nut-upsd .

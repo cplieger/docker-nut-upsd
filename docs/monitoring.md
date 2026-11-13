@@ -39,6 +39,7 @@ The exporter asks `upsd` for the UPS's variables at each scrape, with a 3-second
 | `nut_upsd_host_poweroff_enabled` | gauge | none | `1` when `SHUTDOWN_ON_BATTERY_CRITICAL=true` |
 | `nut_upsd_poweroff_path_ok` | gauge | none | `1` when the last D-Bus check found the host poweroff path usable. Served once a check has run |
 | `nut_upsd_poweroff_path_probe_timestamp_seconds` | gauge | none | Unix time of the last D-Bus check |
+| `nut_upsd_build_info` | gauge | `version`, `nut_version` | always `1`; `version` is the image release and `nut_version` the NUT release it runs, for a query to join on |
 
 The `flag` label carries one `ups.status` word: `OL`, `OB`, `LB`, `HB`, `RB`, `CHRG`, `DISCHRG`, `BYPASS`, `CAL`, `OFF`, `OVER`, `TRIM`, `BOOST`, `FSD`, `ALARM` or `ECO`. Any other word sets `OTHER`. The UPS variables are served only while the data is fresh and only for the variables your UPS reports, and the percentages NUT reports are served as ratios.
 

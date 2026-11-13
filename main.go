@@ -99,6 +99,10 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 		_ = ln.Close()
 		return fmt.Errorf("register metrics: %w", err)
 	}
+	if err := registerBuildInfo(reg); err != nil {
+		_ = ln.Close()
+		return fmt.Errorf("register build info: %w", err)
+	}
 	mux := http.NewServeMux()
 	mux.Handle("GET /metrics", reg.Handler())
 	mux.Handle("GET /healthz", healthzHandler(upsd))
