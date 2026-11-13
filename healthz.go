@@ -4,7 +4,7 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/cplieger/go/health"
+	"github.com/cplieger/go/health/v2"
 )
 
 const upsStatusStaleReason = "upsd has no fresh status for the UPS: the data is stale, the driver is not connected, or upsd did not answer."
