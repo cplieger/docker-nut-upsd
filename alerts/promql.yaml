@@ -6,7 +6,7 @@
 # file's nut-upsd-events group beside this file either way, because a forced
 # shutdown, a failed poweroff and an error line leave no series.
 # NutUpsdDown exists only here. Thresholds, for: windows and severity labels
-# are starting points. docs/monitoring.md explains each rule.
+# are starting points. docs/alert-rules.md explains each rule.
 groups:
   - name: nut-upsd
     rules:

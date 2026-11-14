@@ -3,16 +3,16 @@
 [![Image Size](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/cplieger/docker-nut-upsd/badges/size.json)](https://github.com/cplieger/docker-nut-upsd/pkgs/container/docker-nut-upsd) [![Platforms](https://img.shields.io/badge/platforms-amd64%20%7C%20arm64-blue)](https://github.com/cplieger/docker-nut-upsd/pkgs/container/docker-nut-upsd) [![base: Alpine](https://img.shields.io/badge/base-Alpine-0D597F?logo=alpinelinux)](https://github.com/cplieger/docker-nut-upsd/blob/main/Dockerfile) [![SBOM](https://img.shields.io/badge/SBOM-SPDX-1D4ED8)](https://github.com/cplieger/docker-nut-upsd/releases)
 
 <!-- hub-overview BEGIN -->
-docker-nut-upsd is a container for Network UPS Tools (NUT), set up from compose settings, with TLS and USB reconnect. It shares the status of the UPS on this machine with your network. It has no web page.
+docker-nut-upsd runs Network UPS Tools (NUT) on the machine your UPS plugs into and shares the UPS with every machine on the same power. It has no web page.
 
 ## What it does
 
-Your NAS, servers and other NUT clients follow one UPS and shut down cleanly when its battery runs low.
+Your NAS, servers and other NUT clients shut down cleanly on low battery, and Home Assistant shows the UPS status.
 
 - Sets up NUT from a few compose settings, with no NUT config files to write.
 - Works with USB, serial, Modbus and network (SNMP) UPSes, on `amd64` and `arm64`.
 - Reconnects to a UPS that drops off USB and comes back, without a container restart.
-- Encrypts the connection for clients that support TLS. Clients without TLS still connect.
+- Encrypts the connection for clients that support TLS, and still serves the others.
 - Can also power off this machine on low battery. This is off by default.
 
 ## Who it is for
@@ -21,7 +21,7 @@ docker-nut-upsd is built for a UPS on an always-on Linux machine that runs Docke
 
 Two other projects suit a different setup:
 
-- Consider [NUT for Unraid](https://github.com/desertwitch/NUT-unRAID) if your UPS plugs into an Unraid server. The plugin adds NUT to Unraid itself, with a settings frontend and frequent NUT updates.
+- Consider [NUT for Unraid](https://github.com/desertwitch/NUT-unRAID) if your UPS plugs into an Unraid server. The plugin adds NUT to Unraid itself, with a settings frontend. Its maintainer ends support on 30 November 2026.
 - Consider [gpdm/nut-upsd](https://github.com/gpdm/nut/blob/master/nut-upsd/README.md) if you want one container to monitor several UPSes from NUT config files you write.
 
 docker-nut-upsd is free software under the Apache-2.0 license.
@@ -29,7 +29,7 @@ docker-nut-upsd is free software under the Apache-2.0 license.
 
 ## Quick start
 
-The image is on GitHub Container Registry and Docker Hub, for `amd64` and `arm64`. This is the [`compose.yaml`](compose.yaml) in this repository.
+The image is on GitHub Container Registry and Docker Hub, for `amd64` and `arm64`. It builds the NUT release that the `NUT_VERSION` line of the [`Dockerfile`](Dockerfile) names. This is the [`compose.yaml`](compose.yaml) in this repository.
 
 ```yaml
 services:
@@ -49,8 +49,8 @@ services:
     ports:
       - "3493:3493"
 
-    # Keep both USB lines below. Together they let the driver reach a UPS that
-    # drops off USB and comes back. A devices: mapping cannot do that.
+    # Keep both USB lines below. They let the driver reach the UPS again after it
+    # drops off USB and comes back, which a devices: mapping cannot do.
     device_cgroup_rules:
       - "c 189:* rmw"
     volumes:
@@ -58,24 +58,24 @@ services:
 ```
 
 1. Find your UPS model on the [NUT hardware list](https://networkupstools.org/stable-hcl.html) and set `UPS_DRIVER` to the driver it names.
-2. Change `API_PASSWORD` to a password of 12 characters or more. If a Synology NAS will use this server, keep `API_USER`, `API_PASSWORD` and `UPS_NAME` at their defaults instead. The NAS logs in only as `monuser` with `secret`, to a UPS named `ups`.
+2. If no Synology NAS will use this server, change `API_PASSWORD` to a password of 12 characters or more. If a Synology NAS will use this server, keep `API_USER`, `API_PASSWORD` and `UPS_NAME` as they are. It logs in only as `monuser` with `secret`, to a UPS named `ups`.
 3. Run `docker compose up -d`.
 
 Run `docker logs nut-upsd`. You should see `NUT services started; supervising upsmon`. If you see `upsdrvctl start failed or timed out at boot`, the driver could not reach the UPS. Check `UPS_DRIVER` and the USB cable.
 
 ## Connecting your other machines
 
-Point each NUT client at this machine on port 3493, with `API_USER` and `API_PASSWORD`. Use the address other devices on your network reach this machine at, such as `192.168.1.10`, not `localhost`.
+Point each NUT client at this machine on port 3493, with `API_USER` and `API_PASSWORD`. Use the address other devices on your network reach this machine at, such as `192.0.2.10`, not `localhost`.
 
-- In Home Assistant, add the [Network UPS Tools (NUT)](https://www.home-assistant.io/integrations/nut/) integration under **Settings** > **Devices & services**. `API_USER` can read the UPS but cannot run UPS commands, such as a battery test, from Home Assistant.
-- On a Synology NAS, open **Control Panel** > **Hardware & Power** > **UPS**, turn on UPS support, choose **Synology UPS server** and enter this machine's address. The NAS needs the defaults `monuser`, `secret` and `ups`.
+- In Home Assistant, open Settings > Devices & services and add the [Network UPS Tools (NUT)](https://www.home-assistant.io/integrations/nut/) integration. `API_USER` can read the UPS but cannot run UPS commands, such as a battery test, from Home Assistant.
+- On a Synology NAS, open Control Panel > Hardware & Power > UPS, turn on UPS support, choose Synology UPS server and enter this machine's address. The NAS needs the defaults `monuser`, `secret` and `ups`.
 - On a Linux machine that runs NUT's `upsmon`, add this line to `upsmon.conf`:
 
 ```text
-MONITOR ups@192.168.1.10:3493 1 monuser your-password secondary
+MONITOR ups@192.0.2.10:3493 1 monuser your-password secondary
 ```
 
-When the battery runs low, this server tells every client to shut down and waits up to `HOSTSYNC` seconds (default 15) for them to log off. One container serves one UPS.
+When the battery runs low, this server tells every client to shut down and waits up to `HOSTSYNC` seconds (default 15) for them to log off. One container serves one UPS, and [More than one UPS](docs/configuration.md#more-than-one-ups) covers a second one.
 
 ## Configuration reference
 
@@ -88,7 +88,7 @@ Settings are environment variables in `compose.yaml`. The container reads them a
 | `UPS_PORT` | `auto` for USB, a device node such as `/dev/ttyUSB0` for serial, or `host[:port]` for a network UPS | `auto` |
 | `API_USER` | User name your NUT clients log in with. Letters, numbers, `_` and `-` | `monuser` |
 | `API_PASSWORD` | Password for `API_USER`. Use 12 characters or more. No `"`, `\` or `#` | `secret` |
-| `ADMIN_PASSWORD` | Password for the `admin` account, which can run UPS commands. Generated and kept when unset | Random (cached when generated) |
+| `ADMIN_PASSWORD` | Password for the `admin` account, which can run UPS commands. When unset, one is generated and kept until the container is recreated | Random |
 | `API_TLS` | Offer TLS encryption to clients that ask for it | `true` |
 | `LOWBATT_PERCENT` | Battery percentage at which the UPS counts as low. `0` turns this threshold off | Hardware default |
 | `LOWBATT_RUNTIME` | Seconds of runtime left at which the UPS counts as low. `0` turns this threshold off | Hardware default |
@@ -100,7 +100,7 @@ Settings are environment variables in `compose.yaml`. The container reads them a
 
 | Mount | Description |
 | --- | --- |
-| `/dev/bus/usb` | The USB bus, bound live under `volumes:`. Needed for a USB UPS, and for a serial-or-USB driver with `UPS_PORT` at `auto` |
+| `/dev/bus/usb` | The USB bus, bound live under `volumes:`. Needed for a USB UPS, and for a driver that supports serial and USB when `UPS_PORT` is `auto` |
 | `/run/dbus/system_bus_socket` | Host D-Bus socket. Needed only with `SHUTDOWN_ON_BATTERY_CRITICAL=true` |
 | `/etc/nut/{ups.conf,upsd.conf,upsd.users,upsmon.conf}.user` | Your own NUT config files, replacing the generated ones |
 | `/etc/nut/upsd.pem` | Your own TLS certificate and private key in one PEM file. Never modified, so mount it read-only |
@@ -112,11 +112,11 @@ Settings are environment variables in `compose.yaml`. The container reads them a
 
 ## Security
 
-Your clients shut down on what this server reports, and anyone who can reach port 3493 can read the UPS status without a password. Keep the port on your own network, and change `API_PASSWORD` from `secret` unless a Synology NAS uses this server. The metrics port shows the same UPS state with no password, so keep it on your network too.
+Your clients shut down on what this server reports, and anyone who can reach port 3493 can read the UPS status without a password. Keep port 3493 and the metrics port on your network. Change `API_PASSWORD` from `secret` unless a Synology NAS uses this server.
 
-TLS is on by default, with a certificate the container creates. A client that does not check that certificate gets an encrypted connection but cannot tell this server from an impostor. The PEM file inside the container holds the private key, so export only the certificate, as [Security](docs/hardening.md#tls-starttls) shows.
+TLS is on by default, with a certificate the container creates. A client that skips the certificate check gets encryption but cannot tell this server from an impostor. The PEM file inside the container holds the private key, so export only the certificate, as [Security](docs/hardening.md#tls-starttls) shows.
 
-The container starts as root. With the generated configuration, the UPS driver and the server then run as the `nut` user. `upsmon` keeps a root parent process to run the shutdown command. The live USB bind gives the container's `nut` group read and write access to every USB device on the host. Members of a host group with the same group ID get that access too. Host shutdown does not work with Docker user-namespace remapping under systemd-logind's default policy. [Security](docs/hardening.md) covers TLS certificates, privileges and what the image contains.
+The container starts as root, then runs the UPS driver and the server as its `nut` user. So the UPS driver can reach the UPS, the container gives every USB device on the host to its `nut` group. Members of a host group with the same numeric group ID can then read and write those devices. Host shutdown fails when Docker remaps user namespaces and the host keeps systemd-logind's default policy. [Security](docs/hardening.md) covers the rest.
 
 ## Troubleshooting
 
@@ -124,13 +124,13 @@ An unhealthy container means the UPS is unplugged, the driver failed, or the ser
 
 - The log shows `/dev/bus/usb not found`. Put back the two USB lines from the example.
 - The container stops with `env var contains` and a character name. Remove that character from the variable the line names.
-- The container restarts in a loop after the battery ran low with host shutdown off. That repeats until mains power returns, as expected after a forced shutdown.
+- With host shutdown off, the container restarts again and again after the battery ran low. That is expected until mains power returns, because `upsmon` exits after each forced shutdown and the container exits with it.
 
 [How docker-nut-upsd works](docs/how-it-works.md) explains the watchdog timing and every planned exit.
 
 ## Monitoring
 
-docker-nut-upsd serves Prometheus metrics for the UPS and its shutdown path on port 9199, and logs each UPS event, such as `event="ONBATT"`. Alert rules for Prometheus and for Loki ship in [`alerts/`](alerts/). A Grafana dashboard of the UPS state, battery, load and firing alerts ships as [`grafana-dashboard.json`](grafana-dashboard.json) and needs Grafana 13.2 or newer. [Monitoring and alerts](docs/monitoring.md) says which to load together, and the [monitoring guide](https://github.com/cplieger/docs/blob/main/docs/monitoring.md) shows how to load them. The image has a Docker healthcheck, and [Knowing the app is alive](docs/monitoring.md#knowing-the-app-is-alive) says what it proves and who is told.
+docker-nut-upsd serves Prometheus metrics on port 9199 and logs each UPS event, such as `event="ONBATT"`. Alert rules for Prometheus and for Loki ship in [`alerts/`](alerts/), and [`grafana-dashboard.json`](grafana-dashboard.json) is a UPS dashboard for Grafana 13.2 or newer. [Monitoring and alerts](docs/monitoring.md) says which rules to load, and how to run your own `NOTIFYCMD` script on each UPS event. The image has a Docker healthcheck, and [Knowing the app is alive](docs/monitoring.md#knowing-the-app-is-alive) says what it proves and who is told.
 
 ## Documentation
 
@@ -138,6 +138,7 @@ docker-nut-upsd serves Prometheus metrics for the UPS and its shutdown path on p
 - [How docker-nut-upsd works](docs/how-it-works.md) explains recovery, the healthcheck and planned exits.
 - [Security](docs/hardening.md) covers TLS, privileges and the image contents.
 - [Monitoring and alerts](docs/monitoring.md) lists the metrics, the log lines, both rule files and which groups to load.
+- [How each alert rule works](docs/alert-rules.md) explains each rule's window, its source and what to check when it fires.
 
 ## Credits
 

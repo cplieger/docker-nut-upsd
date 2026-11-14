@@ -18,7 +18,7 @@ The container refuses to start when a value would break a NUT config file. It re
 | `UPS_PORT` | `auto` for USB, a device node such as `/dev/ttyUSB0` for serial, or `host[:port]` for a network UPS | `auto` |
 | `API_USER` | User name your NUT clients log in with. Letters, numbers, `_` and `-` | `monuser` |
 | `API_PASSWORD` | Password for `API_USER`. Use 12 characters or more. No `"`, `\` or `#` | `secret` |
-| `ADMIN_PASSWORD` | Password for the `admin` account, which can run UPS commands. Generated and kept when unset | Random (cached when generated) |
+| `ADMIN_PASSWORD` | Password for the `admin` account, which can run UPS commands. When unset, one is generated and kept until the container is recreated | Random |
 | `API_TLS` | Offer TLS encryption to clients that ask for it | `true` |
 | `LOWBATT_PERCENT` | Battery percentage at which the UPS counts as low. `0` turns this threshold off | Hardware default |
 | `LOWBATT_RUNTIME` | Seconds of runtime left at which the UPS counts as low. `0` turns this threshold off | Hardware default |
@@ -27,7 +27,7 @@ The container refuses to start when a value would break a NUT config file. It re
 | `API_ADDRESS` | Address the server listens on. Write IPv6 without brackets, such as `::1` | `0.0.0.0` |
 | `API_PORT` | Port the server listens on | `3493` |
 | `METRICS_PORT` | Port the built-in exporter serves Prometheus metrics and `/healthz` on. `0` starts no exporter. Must differ from `API_PORT`. Published only if you map it | `9199` |
-| `METRICS_ADDRESS` | Address the exporter listens on, the same as `API_ADDRESS` unless you set it. Write IPv6 without brackets. A value it cannot listen on stops the container at startup | `$API_ADDRESS` |
+| `METRICS_ADDRESS` | Address the exporter listens on. Write IPv6 without brackets. A value it cannot listen on stops the container at startup | `$API_ADDRESS` |
 | `POLLFREQ` | Seconds between status checks on mains power. `1` or more | `5` |
 | `POLLFREQALERT` | Seconds between status checks on battery. `1` or more | `5` |
 | `DEADTIME` | Seconds without fresh data before the UPS counts as lost | `15` |
@@ -48,7 +48,7 @@ The container refuses to start when a value would break a NUT config file. It re
 - `API_PASSWORD` and `ADMIN_PASSWORD` refuse `"`, `\` and `#`, because NUT's config parser would change the password. They are at most 501 bytes, and a value that NUT would store as an empty word is refused.
 - The container logs a warning for a password shorter than 12 characters. The default `secret` gets that warning too.
 - A password with spaces is accepted with a warning. Only a client that quotes the password, as the NUT network protocol allows, can then log in. The NUT clients in this image send it unquoted.
-- When `ADMIN_PASSWORD` is unset, the container generates one and keeps it for later restarts. A mounted `upsd.users.user` owns the `admin` account instead.
+- When `ADMIN_PASSWORD` is unset, the container generates one and keeps it for later restarts. A recreate of the container generates a new one. Run `docker exec nut-upsd cat /var/run/nut-secrets/admin_password` to read it. A mounted `upsd.users.user` owns the `admin` account instead.
 
 ## Accounts the server creates
 
@@ -79,6 +79,14 @@ Every driver in this image opens the device as the `nut` user. Give that user ac
 Keep both USB lines of the example. One binds `/dev/bus/usb` live under `volumes:`, and `device_cgroup_rules: ["c 189:* rmw"]` allows the USB major number 189. A `devices:` mapping of the bus is not enough, because it keeps only the device nodes present at start. [How docker-nut-upsd works](how-it-works.md#a-ups-that-drops-off-usb) explains why.
 
 The bus is needed for every USB driver, and for a driver that talks serial or USB when `UPS_PORT` is `auto` or a `/dev/bus/usb` node. A network or serial setup runs without it.
+
+## More than one UPS
+
+One container serves one UPS. For a second UPS, run another container with its own `container_name` and its own host port, such as `"3494:3493"`, and point that UPS's clients at the new port.
+
+The shipped log rules select the container named `nut-upsd`, and `NutUpsdDown` reads the scrape job `nut-upsd`. For the second container, load a copy of the log rules and of `NutUpsdDown` with its container name and scrape job, as [Alerting](monitoring.md#alerting) describes. The other metric rules match the UPS metrics of every target you scrape.
+
+With two USB UPSes on one machine, both containers see the whole USB bus, and a driver at `UPS_PORT=auto` takes the first UPS it supports. Mount an `ups.conf.user` in each container that picks its UPS by serial number with the driver's `serial` option, as the [usbhid-ups manual](https://networkupstools.org/docs/man/usbhid-ups.html) describes. Follow the rules of [Your own NUT config files](#your-own-nut-config-files) for that file.
 
 ## Low-battery thresholds
 
@@ -125,7 +133,7 @@ Anything mounted under `/etc/nut` is used exactly as provided, with no ownership
 
 | Mount | Description |
 | --- | --- |
-| `/dev/bus/usb` | The USB bus, bound live under `volumes:`. Needed for a USB UPS, and for a serial-or-USB driver with `UPS_PORT` at `auto` |
+| `/dev/bus/usb` | The USB bus, bound live under `volumes:`. Needed for a USB UPS, and for a driver that supports serial and USB when `UPS_PORT` is `auto` |
 | `/run/dbus/system_bus_socket` | Host D-Bus socket. Needed only with `SHUTDOWN_ON_BATTERY_CRITICAL=true` |
 | `/etc/nut/{ups.conf,upsd.conf,upsd.users,upsmon.conf}.user` | Your own NUT config files, replacing the generated ones |
 | `/etc/nut/upsd.pem` | Your own TLS certificate and private key in one PEM file. Never modified, so mount it read-only |
