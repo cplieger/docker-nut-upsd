@@ -16,9 +16,9 @@ The entrypoint rejects control characters and NUT config delimiters before it wr
 
 ## Privileges
 
-The container starts as root to set config file ownership and give the `nut` group access to USB devices. With the generated configuration, the UPS driver and `upsd` then drop to the `nut` user. `upsmon` keeps a privileged parent process so it can run the shutdown command, and its monitoring child runs as `nut`. The container works with `no-new-privileges`. It does not run with a read-only root filesystem: each start writes the generated NUT configuration into `/etc/nut` and runtime state under `/var/run`. Host shutdown is off by default and needs both `SHUTDOWN_ON_BATTERY_CRITICAL=true` and the host D-Bus socket mount.
+The container starts as root to set config file ownership and give the `nut` group access to USB devices. With the generated configuration, the UPS driver and `upsd` then drop to the `nut` user. `upsmon` keeps a privileged parent process so it can run the shutdown command, and its monitoring child runs as `nut`. The container works with `no-new-privileges`. It does not run with a read-only root filesystem, because each start writes the generated NUT configuration into `/etc/nut` and runtime state under `/var/run`. Host shutdown is off by default and needs both `SHUTDOWN_ON_BATTERY_CRITICAL=true` and the host D-Bus socket mount.
 
-The live `/dev/bus/usb` bind lets the container give every host USB device node to its `nut` group ID. If a host group uses that same numeric group ID, its members get read and write access to those devices. Use a user-namespace remap in Docker, or keep that group ID for a dedicated group on the host.
+The live `/dev/bus/usb` bind lets the container give every host USB device node to its `nut` group ID. If a host group uses that same numeric group ID, its members get read and write access to those devices. Run `docker exec nut-upsd id -g nut` to see the ID. Use a user-namespace remap in Docker, or keep that group ID for a dedicated group on the host.
 
 A user-namespace remap also changes host shutdown. Without the remap, the power-off request comes from root, which `systemd-logind` accepts without asking. With it, logind's default policy asks for admin authentication, which the container cannot provide, so `SHUTDOWN_ON_BATTERY_CRITICAL=true` fails.
 

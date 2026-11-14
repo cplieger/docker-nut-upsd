@@ -441,8 +441,8 @@ comms_watchdog() {
 # ---------------------------------------------------------------------------
 # With SHUTDOWN_ON_BATTERY_CRITICAL=true the poweroff path (upsmon SHUTDOWNCMD
 # -> nut-shutdown.sh -> D-Bus PowerOff) is otherwise first exercised during a
-# real forced shutdown. docs/monitoring.md "Alerting" owns the operator-facing
-# contract.
+# real forced shutdown. docs/alert-rules.md "NutUpsdPowerOffPathBroken" owns the
+# operator-facing contract.
 
 # dbus_poweroff_path_ok: return 0 when the host D-Bus socket is mounted and
 # logind's own CanPowerOff answers yes — same polkit action as the PowerOff
