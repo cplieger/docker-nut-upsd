@@ -30,7 +30,7 @@
       }
     ],
     "cursorSync": "Crosshair",
-    "description": "What your UPS reports through docker-nut-upsd: its state, charge, runtime and load now, what needs your attention, and the battery and mains over time. The attention tiles need the rules from alerts/promql.yaml loaded, and Exporter health shows what the exporter could read.",
+    "description": "What your UPS reports through docker-nut-upsd: its state now, what needs your attention, and its battery, load and mains over time, each graph ending on the value now. The attention tiles need the rules from alerts/promql.yaml loaded, and Exporter health shows what the exporter could read.",
     "editable": true,
     "elements": {
       "panel-1": {
@@ -136,292 +136,12 @@
           }
         }
       },
-      "panel-2": {
-        "kind": "Panel",
-        "spec": {
-          "id": 2,
-          "title": "Battery charge",
-          "description": "The battery charge the UPS reports, with its trend over the selected range. Red below 50% and yellow from 50% to 90% while the battery recharges after an outage, green from 90%. No value means the UPS reports no charge or the data is stale.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "nut_upsd_battery_charge_ratio{instance=\"$instance\"}",
-                        "legendFormat": "Charge"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "",
-            "spec": {
-              "options": {
-                "colorMode": "background",
-                "graphMode": "area",
-                "justifyMode": "center",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "values": false
-                },
-                "textMode": "auto",
-                "text": {
-                  "titleSize": 14,
-                  "valueSize": 28
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "percentunit",
-                  "noValue": "No charge reading",
-                  "color": {
-                    "mode": "thresholds"
-                  },
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "red"
-                      },
-                      {
-                        "value": 0.5,
-                        "color": "yellow"
-                      },
-                      {
-                        "value": 0.9,
-                        "color": "green"
-                      }
-                    ]
-                  },
-                  "decimals": 0,
-                  "min": 0,
-                  "max": 1
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-3": {
-        "kind": "Panel",
-        "spec": {
-          "id": 3,
-          "title": "Runtime left",
-          "description": "How long the battery would carry the present load, beside the low battery mark, the runtime at which the UPS reports low battery. The gap between the two is the time left before a shutdown starts. No value means the UPS reports no runtime or the data is stale.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "nut_upsd_battery_runtime_seconds{instance=\"$instance\"}",
-                        "legendFormat": "Left"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                },
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "nut_upsd_battery_runtime_low_seconds{instance=\"$instance\"}",
-                        "legendFormat": "Low mark"
-                      }
-                    },
-                    "refId": "B",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "",
-            "spec": {
-              "options": {
-                "colorMode": "value",
-                "graphMode": "area",
-                "justifyMode": "center",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "values": false
-                },
-                "textMode": "value_and_name",
-                "text": {
-                  "titleSize": 14,
-                  "valueSize": 28
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "s",
-                  "noValue": "No runtime reading",
-                  "color": {
-                    "mode": "fixed",
-                    "fixedColor": "text"
-                  },
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "text"
-                      }
-                    ]
-                  },
-                  "min": 0
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
-      "panel-4": {
-        "kind": "Panel",
-        "spec": {
-          "id": 4,
-          "title": "Load",
-          "description": "The load on the UPS as a share of its rating, with its trend over the selected range. Green below 70%, yellow from 70% and red from 90%, where a power cut leaves little runtime and an overload can follow. No value means the UPS reports no load or the data is stale.",
-          "links": [],
-          "data": {
-            "kind": "QueryGroup",
-            "spec": {
-              "queries": [
-                {
-                  "kind": "PanelQuery",
-                  "spec": {
-                    "query": {
-                      "kind": "DataQuery",
-                      "group": "prometheus",
-                      "version": "v0",
-                      "datasource": {
-                        "name": "${datasource}"
-                      },
-                      "spec": {
-                        "expr": "nut_upsd_ups_load_ratio{instance=\"$instance\"}",
-                        "legendFormat": "Load"
-                      }
-                    },
-                    "refId": "A",
-                    "hidden": false
-                  }
-                }
-              ],
-              "transformations": [],
-              "queryOptions": {}
-            }
-          },
-          "vizConfig": {
-            "kind": "VizConfig",
-            "group": "stat",
-            "version": "",
-            "spec": {
-              "options": {
-                "colorMode": "background",
-                "graphMode": "area",
-                "justifyMode": "center",
-                "reduceOptions": {
-                  "calcs": [
-                    "lastNotNull"
-                  ],
-                  "values": false
-                },
-                "textMode": "auto",
-                "text": {
-                  "titleSize": 14,
-                  "valueSize": 28
-                }
-              },
-              "fieldConfig": {
-                "defaults": {
-                  "unit": "percentunit",
-                  "noValue": "No load reading",
-                  "color": {
-                    "mode": "thresholds"
-                  },
-                  "thresholds": {
-                    "mode": "absolute",
-                    "steps": [
-                      {
-                        "value": null,
-                        "color": "green"
-                      },
-                      {
-                        "value": 0.7,
-                        "color": "yellow"
-                      },
-                      {
-                        "value": 0.9,
-                        "color": "red"
-                      }
-                    ]
-                  },
-                  "decimals": 0,
-                  "min": 0,
-                  "max": 1
-                },
-                "overrides": []
-              }
-            }
-          }
-        }
-      },
       "panel-20": {
         "kind": "Panel",
         "spec": {
           "id": 20,
           "title": "Exporter down",
-          "description": "Shows while the NutUpsdDown alert fires: no scrape of a nut-upsd exporter has succeeded for 5 minutes, so every other panel is out of date. The tile counts every exporter, because a target that is gone carries no instance. Needs the rules from alerts/promql.yaml in a ruler that stores its `ALERTS` series beside the metrics, as Prometheus and Mimir do.",
+          "description": "Shows while the NutUpsdDown alert fires: no scrape of a nut-upsd exporter has succeeded for 5 minutes, so every other panel is out of date. The tile counts the selected exporter and any target that is gone, because the alert for a gone target carries no instance. Needs the rules from alerts/promql.yaml in a ruler that stores its `ALERTS` series beside the metrics, as Prometheus and Mimir do.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -438,7 +158,7 @@
                         "name": "${datasource}"
                       },
                       "spec": {
-                        "expr": "0 * max(ALERTS{alertname=\"NutUpsdDown\", alertstate=\"firing\"})",
+                        "expr": "0 * max(ALERTS{alertname=\"NutUpsdDown\", alertstate=\"firing\", instance=~\"$instance|\"})",
                         "legendFormat": "",
                         "instant": true,
                         "range": false
@@ -1271,7 +991,10 @@
               "options": {
                 "legend": {
                   "displayMode": "list",
-                  "placement": "bottom"
+                  "placement": "bottom",
+                  "calcs": [
+                    "lastNotNull"
+                  ]
                 },
                 "tooltip": {
                   "mode": "multi"
@@ -1387,7 +1110,10 @@
               "options": {
                 "legend": {
                   "displayMode": "list",
-                  "placement": "bottom"
+                  "placement": "bottom",
+                  "calcs": [
+                    "lastNotNull"
+                  ]
                 },
                 "tooltip": {
                   "mode": "multi"
@@ -1483,7 +1209,10 @@
               "options": {
                 "legend": {
                   "displayMode": "list",
-                  "placement": "bottom"
+                  "placement": "bottom",
+                  "calcs": [
+                    "lastNotNull"
+                  ]
                 },
                 "tooltip": {
                   "mode": "multi"
@@ -1591,7 +1320,10 @@
               "options": {
                 "legend": {
                   "displayMode": "list",
-                  "placement": "bottom"
+                  "placement": "bottom",
+                  "calcs": [
+                    "lastNotNull"
+                  ]
                 },
                 "tooltip": {
                   "mode": "multi"
@@ -1729,7 +1461,7 @@
         "spec": {
           "id": 40,
           "title": "Scrape",
-          "description": "Whether the last scrape of this exporter succeeded, the up series your scraper writes for the job nut-upsd. Down means the container is stopped, METRICS_PORT is 0 or the scraper cannot reach port 9199. No value means no scrape in the last few minutes.",
+          "description": "Whether the last scrape of this exporter succeeded, the up series your scraper writes for the selected UPS's instance. Down means the container is stopped, METRICS_PORT is 0 or the scraper cannot reach port 9199. No value means no scrape in the last few minutes.",
           "links": [],
           "data": {
             "kind": "QueryGroup",
@@ -1746,7 +1478,7 @@
                         "name": "${datasource}"
                       },
                       "spec": {
-                        "expr": "up{job=\"nut-upsd\", instance=\"$instance\"}",
+                        "expr": "up{instance=\"$instance\"}",
                         "legendFormat": "",
                         "instant": true,
                         "range": false
@@ -2502,50 +2234,11 @@
                                 "spec": {
                                   "x": 0,
                                   "y": 0,
-                                  "width": 9,
+                                  "width": 24,
                                   "height": 4,
                                   "element": {
                                     "kind": "ElementReference",
                                     "name": "panel-1"
-                                  }
-                                }
-                              },
-                              {
-                                "kind": "GridLayoutItem",
-                                "spec": {
-                                  "x": 9,
-                                  "y": 0,
-                                  "width": 5,
-                                  "height": 4,
-                                  "element": {
-                                    "kind": "ElementReference",
-                                    "name": "panel-2"
-                                  }
-                                }
-                              },
-                              {
-                                "kind": "GridLayoutItem",
-                                "spec": {
-                                  "x": 14,
-                                  "y": 0,
-                                  "width": 5,
-                                  "height": 4,
-                                  "element": {
-                                    "kind": "ElementReference",
-                                    "name": "panel-3"
-                                  }
-                                }
-                              },
-                              {
-                                "kind": "GridLayoutItem",
-                                "spec": {
-                                  "x": 19,
-                                  "y": 0,
-                                  "width": 5,
-                                  "height": 4,
-                                  "element": {
-                                    "kind": "ElementReference",
-                                    "name": "panel-4"
                                   }
                                 }
                               }
@@ -2830,20 +2523,7 @@
                           }
                         }
                       }
-                    }
-                  ]
-                }
-              }
-            }
-          },
-          {
-            "kind": "TabsLayoutTab",
-            "spec": {
-              "title": "Power over time",
-              "layout": {
-                "kind": "RowsLayout",
-                "spec": {
-                  "rows": [
+                    },
                     {
                       "kind": "RowsLayoutRow",
                       "spec": {
@@ -3118,7 +2798,7 @@
       "hideTimepicker": false,
       "fiscalYearStartMonth": 0
     },
-    "title": "NUT UPS",
+    "title": "NUT upsd",
     "variables": [
       {
         "kind": "DatasourceVariable",
@@ -3194,10 +2874,10 @@
               "name": "${datasource}"
             },
             "spec": {
-              "query": "query_result(count(label_replace(count(0 * max(ALERTS{alertname=\"NutUpsdDown\", alertstate=\"firing\"})), \"tile\", \"20\", \"\", \"\") or label_replace(count(0 * max(ALERTS{alertname=\"NutUpsdOnBattery\", alertstate=\"firing\", instance=\"$instance\"})), \"tile\", \"21\", \"\", \"\") or label_replace(count(0 * max(ALERTS{alertname=\"NutUpsdLowBattery\", alertstate=\"firing\", instance=\"$instance\"})), \"tile\", \"22\", \"\", \"\") or label_replace(count(0 * max(ALERTS{alertname=\"NutUpsdCommsLost\", alertstate=\"firing\", instance=\"$instance\"})), \"tile\", \"23\", \"\", \"\") or label_replace(count(sum(ALERTS{alertname=\"NutUpsdHardwareFault\", alertstate=\"firing\", instance=\"$instance\", flag=\"RB\"} * 0 + 1 or ALERTS{alertname=\"NutUpsdHardwareFault\", alertstate=\"firing\", instance=\"$instance\", flag=\"ALARM\"} * 0 + 2)), \"tile\", \"24\", \"\", \"\") or label_replace(count(max(ALERTS{alertname=\"NutUpsdProtectionDegraded\", alertstate=\"firing\", instance=\"$instance\", flag=\"BYPASS\"} * 0 + 3 or ALERTS{alertname=\"NutUpsdProtectionDegraded\", alertstate=\"firing\", instance=\"$instance\", flag=\"OVER\"} * 0 + 2 or ALERTS{alertname=\"NutUpsdProtectionDegraded\", alertstate=\"firing\", instance=\"$instance\", flag=\"CAL\"} * 0 + 1)), \"tile\", \"25\", \"\", \"\") or label_replace(count(max(ALERTS{alertname=\"NutUpsdProtectionUnavailable\", alertstate=\"firing\", instance=\"$instance\", flag=\"OFF\"} * 0 + 2 or ALERTS{alertname=\"NutUpsdProtectionUnavailable\", alertstate=\"firing\", instance=\"$instance\", flag=\"\"} * 0 + 1)), \"tile\", \"26\", \"\", \"\") or label_replace(count(0 * max(ALERTS{alertname=\"NutUpsdPowerOffPathBroken\", alertstate=\"firing\", instance=\"$instance\"})), \"tile\", \"27\", \"\", \"\")) or vector(0))"
+              "query": "query_result(count(label_replace(count(0 * max(ALERTS{alertname=\"NutUpsdDown\", alertstate=\"firing\", instance=~\"$instance|\"})), \"tile\", \"20\", \"\", \"\") or label_replace(count(0 * max(ALERTS{alertname=\"NutUpsdOnBattery\", alertstate=\"firing\", instance=\"$instance\"})), \"tile\", \"21\", \"\", \"\") or label_replace(count(0 * max(ALERTS{alertname=\"NutUpsdLowBattery\", alertstate=\"firing\", instance=\"$instance\"})), \"tile\", \"22\", \"\", \"\") or label_replace(count(0 * max(ALERTS{alertname=\"NutUpsdCommsLost\", alertstate=\"firing\", instance=\"$instance\"})), \"tile\", \"23\", \"\", \"\") or label_replace(count(sum(ALERTS{alertname=\"NutUpsdHardwareFault\", alertstate=\"firing\", instance=\"$instance\", flag=\"RB\"} * 0 + 1 or ALERTS{alertname=\"NutUpsdHardwareFault\", alertstate=\"firing\", instance=\"$instance\", flag=\"ALARM\"} * 0 + 2)), \"tile\", \"24\", \"\", \"\") or label_replace(count(max(ALERTS{alertname=\"NutUpsdProtectionDegraded\", alertstate=\"firing\", instance=\"$instance\", flag=\"BYPASS\"} * 0 + 3 or ALERTS{alertname=\"NutUpsdProtectionDegraded\", alertstate=\"firing\", instance=\"$instance\", flag=\"OVER\"} * 0 + 2 or ALERTS{alertname=\"NutUpsdProtectionDegraded\", alertstate=\"firing\", instance=\"$instance\", flag=\"CAL\"} * 0 + 1)), \"tile\", \"25\", \"\", \"\") or label_replace(count(max(ALERTS{alertname=\"NutUpsdProtectionUnavailable\", alertstate=\"firing\", instance=\"$instance\", flag=\"OFF\"} * 0 + 2 or ALERTS{alertname=\"NutUpsdProtectionUnavailable\", alertstate=\"firing\", instance=\"$instance\", flag=\"\"} * 0 + 1)), \"tile\", \"26\", \"\", \"\") or label_replace(count(0 * max(ALERTS{alertname=\"NutUpsdPowerOffPathBroken\", alertstate=\"firing\", instance=\"$instance\"})), \"tile\", \"27\", \"\", \"\")) or vector(0))"
             }
           },
-          "definition": "query_result(count(label_replace(count(0 * max(ALERTS{alertname=\"NutUpsdDown\", alertstate=\"firing\"})), \"tile\", \"20\", \"\", \"\") or label_replace(count(0 * max(ALERTS{alertname=\"NutUpsdOnBattery\", alertstate=\"firing\", instance=\"$instance\"})), \"tile\", \"21\", \"\", \"\") or label_replace(count(0 * max(ALERTS{alertname=\"NutUpsdLowBattery\", alertstate=\"firing\", instance=\"$instance\"})), \"tile\", \"22\", \"\", \"\") or label_replace(count(0 * max(ALERTS{alertname=\"NutUpsdCommsLost\", alertstate=\"firing\", instance=\"$instance\"})), \"tile\", \"23\", \"\", \"\") or label_replace(count(sum(ALERTS{alertname=\"NutUpsdHardwareFault\", alertstate=\"firing\", instance=\"$instance\", flag=\"RB\"} * 0 + 1 or ALERTS{alertname=\"NutUpsdHardwareFault\", alertstate=\"firing\", instance=\"$instance\", flag=\"ALARM\"} * 0 + 2)), \"tile\", \"24\", \"\", \"\") or label_replace(count(max(ALERTS{alertname=\"NutUpsdProtectionDegraded\", alertstate=\"firing\", instance=\"$instance\", flag=\"BYPASS\"} * 0 + 3 or ALERTS{alertname=\"NutUpsdProtectionDegraded\", alertstate=\"firing\", instance=\"$instance\", flag=\"OVER\"} * 0 + 2 or ALERTS{alertname=\"NutUpsdProtectionDegraded\", alertstate=\"firing\", instance=\"$instance\", flag=\"CAL\"} * 0 + 1)), \"tile\", \"25\", \"\", \"\") or label_replace(count(max(ALERTS{alertname=\"NutUpsdProtectionUnavailable\", alertstate=\"firing\", instance=\"$instance\", flag=\"OFF\"} * 0 + 2 or ALERTS{alertname=\"NutUpsdProtectionUnavailable\", alertstate=\"firing\", instance=\"$instance\", flag=\"\"} * 0 + 1)), \"tile\", \"26\", \"\", \"\") or label_replace(count(0 * max(ALERTS{alertname=\"NutUpsdPowerOffPathBroken\", alertstate=\"firing\", instance=\"$instance\"})), \"tile\", \"27\", \"\", \"\")) or vector(0))",
+          "definition": "query_result(count(label_replace(count(0 * max(ALERTS{alertname=\"NutUpsdDown\", alertstate=\"firing\", instance=~\"$instance|\"})), \"tile\", \"20\", \"\", \"\") or label_replace(count(0 * max(ALERTS{alertname=\"NutUpsdOnBattery\", alertstate=\"firing\", instance=\"$instance\"})), \"tile\", \"21\", \"\", \"\") or label_replace(count(0 * max(ALERTS{alertname=\"NutUpsdLowBattery\", alertstate=\"firing\", instance=\"$instance\"})), \"tile\", \"22\", \"\", \"\") or label_replace(count(0 * max(ALERTS{alertname=\"NutUpsdCommsLost\", alertstate=\"firing\", instance=\"$instance\"})), \"tile\", \"23\", \"\", \"\") or label_replace(count(sum(ALERTS{alertname=\"NutUpsdHardwareFault\", alertstate=\"firing\", instance=\"$instance\", flag=\"RB\"} * 0 + 1 or ALERTS{alertname=\"NutUpsdHardwareFault\", alertstate=\"firing\", instance=\"$instance\", flag=\"ALARM\"} * 0 + 2)), \"tile\", \"24\", \"\", \"\") or label_replace(count(max(ALERTS{alertname=\"NutUpsdProtectionDegraded\", alertstate=\"firing\", instance=\"$instance\", flag=\"BYPASS\"} * 0 + 3 or ALERTS{alertname=\"NutUpsdProtectionDegraded\", alertstate=\"firing\", instance=\"$instance\", flag=\"OVER\"} * 0 + 2 or ALERTS{alertname=\"NutUpsdProtectionDegraded\", alertstate=\"firing\", instance=\"$instance\", flag=\"CAL\"} * 0 + 1)), \"tile\", \"25\", \"\", \"\") or label_replace(count(max(ALERTS{alertname=\"NutUpsdProtectionUnavailable\", alertstate=\"firing\", instance=\"$instance\", flag=\"OFF\"} * 0 + 2 or ALERTS{alertname=\"NutUpsdProtectionUnavailable\", alertstate=\"firing\", instance=\"$instance\", flag=\"\"} * 0 + 1)), \"tile\", \"26\", \"\", \"\") or label_replace(count(0 * max(ALERTS{alertname=\"NutUpsdPowerOffPathBroken\", alertstate=\"firing\", instance=\"$instance\"})), \"tile\", \"27\", \"\", \"\")) or vector(0))",
           "regex": "/^\\{\\} ([0-9]+) /",
           "sort": "disabled",
           "options": [],

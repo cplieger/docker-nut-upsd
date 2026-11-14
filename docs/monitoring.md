@@ -90,10 +90,9 @@ Thresholds, `for:` windows and the `severity` labels are starting points. Change
 
 ## Dashboard
 
-[`grafana-dashboard.json`](../grafana-dashboard.json) imports as the NUT UPS dashboard. It reads the metrics above from a Prometheus data source and needs Grafana 13.2 or newer. When you run more than one container, the UPS variable picks the exporter to show. It has three tabs:
+[`grafana-dashboard.json`](../grafana-dashboard.json) imports as the NUT upsd dashboard. It reads the metrics above from a Prometheus data source and needs Grafana 13.2 or newer. When you run more than one container, the UPS variable picks the exporter to show. It has two tabs:
 
-- Overview shows the UPS status in words, the battery charge, the runtime left beside the low battery mark, and the load. Below them, a Needs attention row appears only while an alert from `alerts/promql.yaml` fires, with one tile per rule. Each tile reads its rule's `ALERTS` series, which Prometheus and the Mimir ruler store beside your metrics, so the row stays hidden while those rules are not loaded.
-- Power over time charts the charge and the runtime against their low battery marks, the load, the mains and output voltage, and when the UPS ran on battery.
+- Overview shows the UPS status in words. Below it, a Needs attention row appears only while an alert from `alerts/promql.yaml` fires, with one tile per rule. Each tile reads its rule's `ALERTS` series, which Prometheus and the Mimir ruler store beside your metrics, so the row stays hidden while those rules are not loaded. Graphs below chart the charge and the runtime against their low battery marks, the load, the mains and output voltage, and when the UPS ran on battery; each line graph's legend shows its latest value.
 - Exporter health shows whether the scrape, `upsd` and the UPS data are healthy, the driver restarts the comms watchdog made, and the state of host poweroff, the D-Bus check and the `upsmon` parent.
 
 The status box shows the forced-shutdown flag (`FSD`) while the UPS reports it. The forced-shutdown event, a failed poweroff, an error line and the other events of the `nut-upsd-events` group of `alerts/logql.yaml` leave no series, so they stay in the log and in that group.
