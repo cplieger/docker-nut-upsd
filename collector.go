@@ -30,9 +30,9 @@ var statusFlags = []string{
 }
 
 // upsVariable maps one numeric NUT variable to its series, scaled to a base
-// unit: NUT reports percentages, which the series serve as ratios. A unit
-// measure has no constant for (volts, celsius, hertz, watts, voltamperes) is
-// UnitNone.
+// unit: NUT reports percentages, which the series serve as ratios. Volts,
+// celsius, hertz, watts and voltamperes are not on measure's unit list, so
+// those series declare UnitNone.
 type upsVariable struct {
 	nut, metric, help string
 	unit              measure.Unit
