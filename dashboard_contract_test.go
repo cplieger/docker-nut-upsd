@@ -88,8 +88,9 @@ type layoutNode struct {
 type dashVariable struct {
 	Kind string `json:"kind"`
 	Spec struct {
-		Name  string          `json:"name"`
-		Query json.RawMessage `json:"query"`
+		Name       string          `json:"name"`
+		Definition string          `json:"definition"`
+		Query      json.RawMessage `json:"query"`
 	} `json:"spec"`
 }
 
@@ -170,7 +171,72 @@ var (
 	labelValuesRe = regexp.MustCompile(`label_values\(([^,]+),\s*\w+\)`)
 	variableRe    = regexp.MustCompile(`\$\{?\w+(?::\w+)?\}?`)
 	alertsRe      = regexp.MustCompile(`ALERTS\{alertname="([A-Za-z]+)"([^}]*)\}`)
+	// bracedVariableRe matches ${name}, whose braces are no selector.
+	bracedVariableRe = regexp.MustCompile(`\$\{\w+(?::\w+)?\}`)
+	// matcherPartRe matches one label matcher. PromQL lets the label name be
+	// quoted and takes a string in any of its three quotings.
+	matcherPartRe = regexp.MustCompile(`^([a-zA-Z_][a-zA-Z0-9_]*|` + promqlString + `)\s*(=~|!~|!=|=)\s*(` + promqlString + `)$`)
+	stringPartRe  = regexp.MustCompile(`^(?:` + promqlString + `)$`)
 )
+
+const promqlString = `"(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*'|` + "`[^`]*`"
+
+// skipString returns the index just past the string literal opening at s[i].
+func skipString(s string, i int) int {
+	q := s[i]
+	for i++; i < len(s); i++ {
+		switch {
+		case s[i] == '\\' && q != '`':
+			i++
+		case s[i] == q:
+			return i + 1
+		}
+	}
+	return len(s)
+}
+
+func unquote(s string) string {
+	if s != "" && strings.ContainsRune("\"'`", rune(s[0])) {
+		return s[1 : len(s)-1]
+	}
+	return s
+}
+
+type selectorBlock struct {
+	text  string
+	parts []string
+}
+
+// selectors returns each {...} block of expr, as written with its series name,
+// split at its commas. Quoted strings are skipped, so a brace or comma inside
+// a label value neither ends a block nor splits a matcher.
+func selectors(expr string) []selectorBlock {
+	var out []selectorBlock
+	start, part := -1, 0
+	var parts []string
+	for i := 0; i < len(expr); i++ {
+		switch c := expr[i]; {
+		case c == '"' || c == '\'' || c == '`':
+			i = skipString(expr, i) - 1
+		case c == '{':
+			start, part, parts = i, i+1, nil
+		case (c == ',' || c == '}') && start >= 0:
+			if p := strings.TrimSpace(expr[part:i]); p != "" {
+				parts = append(parts, p)
+			}
+			part = i + 1
+			if c == '}' {
+				before := strings.TrimRight(expr[:start], " ")
+				name := before[len(strings.TrimRightFunc(before, func(r rune) bool {
+					return r == '_' || r == ':' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9'
+				})):]
+				out = append(out, selectorBlock{text: name + expr[start:i+1], parts: parts})
+				start = -1
+			}
+		}
+	}
+	return out
+}
 
 // dashboardSeries returns the series names a panel or variable query reads;
 // label_values names a label after its series, which is no series.
@@ -212,7 +278,11 @@ func TestDashboardReadsOnlyExportedSeries(t *testing.T) {
 // TestDashboardScopesEveryQueryToTheInstance fails when a query reads a series
 // without the UPS variable's instance, or matches a label the user's scrape or
 // log config names (job, hostname, container), so the dashboard works under
-// any job name and shows only the picked exporter.
+// any job name and shows only the picked exporter. The instance is matched
+// exactly, never as a regular expression, because Grafana does not escape a
+// single-select value: an IPv6 target's brackets or a host name's dots would
+// match other instances. instance="" passes only beside instance="$instance",
+// for the alert absent() raises with no instance.
 func TestDashboardScopesEveryQueryToTheInstance(t *testing.T) {
 	d := loadDashboard(t)
 	queries := variableQueries(&d)
@@ -222,24 +292,54 @@ func TestDashboardScopesEveryQueryToTheInstance(t *testing.T) {
 		}
 	}
 	for where, expr := range queries {
-		for _, sel := range selectorRe.FindAllStringSubmatch(expr, -1) {
-			scoped := false
-			for _, m := range matcherRe.FindAllStringSubmatch(sel[2], -1) {
-				switch m[1] {
+		type pick struct{ series, matcher string }
+		var picks []pick
+		pinned := false
+		for _, sel := range selectors(bracedVariableRe.ReplaceAllString(expr, "$$v")) {
+			matched := false
+			for _, part := range sel.parts {
+				m := matcherPartRe.FindStringSubmatch(part)
+				if m == nil {
+					if !stringPartRe.MatchString(part) {
+						t.Errorf("%s holds %q in %s, which is no label matcher", where, part, sel.text)
+					}
+					continue
+				}
+				switch label := unquote(m[1]); label {
 				case "job", "hostname", "container":
-					t.Errorf("%s matches %s on %s, a label the user's own config names", where, m[1], sel[1])
+					t.Errorf("%s matches %s on %s, a label the user's own config names", where, label, sel.text)
 				case "instance":
-					scoped = m[2] == `=` && m[3] == "$instance" ||
-						m[2] == `=~` && slices.Contains(strings.Split(m[3], "|"), "$instance")
+					p := pick{series: sel.text, matcher: m[2] + `"` + unquote(m[3]) + `"`}
+					pinned = pinned || p.matcher == `="$instance"`
+					picks = append(picks, p)
+					matched = true
 				}
 			}
-			if !scoped {
-				t.Errorf("%s reads %s without instance=\"$instance\"", where, sel[1])
+			if !matched {
+				picks = append(picks, pick{series: sel.text})
+			}
+		}
+		for _, p := range picks {
+			if p.matcher != `="$instance"` && (p.matcher != `=""` || !pinned) {
+				t.Errorf("%s reads %s with instance matcher %q, want instance=\"$instance\"", where, p.series, p.matcher)
 			}
 		}
 		// The instance variable lists every instance, so it alone reads unscoped.
 		if bare := dashboardSeries(selectorRe.ReplaceAllString(expr, " ")); where != "instance" && len(bare) > 0 {
 			t.Errorf("%s reads %v without a label matcher", where, bare)
+		}
+	}
+}
+
+// TestDashboardVariableDefinitionsMatchTheirQueries fails when a query
+// variable's definition, the text Grafana's variable editor shows, differs
+// from the query it runs.
+func TestDashboardVariableDefinitionsMatchTheirQueries(t *testing.T) {
+	d := loadDashboard(t)
+	queries := variableQueries(&d)
+	for _, v := range d.Spec.Variables {
+		if v.Kind == "QueryVariable" && v.Spec.Definition != queries[v.Spec.Name] {
+			t.Errorf("variable %s shows definition\n%s\nbut runs\n%s", v.Spec.Name, v.Spec.Definition, queries[v.Spec.Name])
 		}
 	}
 }
@@ -301,6 +401,93 @@ func TestDashboardAttentionTilesMirrorEveryShippedRule(t *testing.T) {
 		if _, ok := rules[name]; !ok {
 			t.Errorf("a tile mirrors %s, which %s does not hold", name, promqlRules)
 		}
+	}
+}
+
+var (
+	// counterCallRe matches the opening of a call that needs two samples in
+	// its window.
+	counterCallRe = regexp.MustCompile(`\b(increase|rate|irate)\s*\(`)
+	// oneSlotRangeRe matches a range or subquery range of exactly one
+	// $__interval, in each of Grafana's spellings of it.
+	oneSlotRangeRe = regexp.MustCompile(`\[\s*\$(?:__interval|\{__interval\}|\{__interval_ms\}ms)\s*(?::[^\]]*)?\]`)
+)
+
+// callArgs returns the arguments of the call whose parenthesis opens at
+// expr[open], up to its matching parenthesis, skipping quoted strings.
+func callArgs(expr string, open int) string {
+	depth := 0
+	for i := open; i < len(expr); i++ {
+		switch expr[i] {
+		case '"', '\'', '`':
+			i = skipString(expr, i) - 1
+		case '(':
+			depth++
+		case ')':
+			if depth--; depth == 0 {
+				return expr[open+1 : i]
+			}
+		}
+	}
+	return expr[open+1:]
+}
+
+// TestDashboardCountsNeverReadOneSlotRange fails when a query takes a
+// counter's increase or rate over [$__interval]: at short ranges Grafana sets
+// $__interval to the scrape interval, the window holds one sample, and the
+// panel goes empty while the user zooms in on an incident.
+func TestDashboardCountsNeverReadOneSlotRange(t *testing.T) {
+	d := loadDashboard(t)
+	queries := variableQueries(&d)
+	for name, p := range d.Spec.Elements {
+		for i, e := range panelExprs(&p) {
+			queries[fmt.Sprintf("%s %s query %d", name, p.Spec.Title, i)] = e
+		}
+	}
+	for where, expr := range queries {
+		for _, loc := range counterCallRe.FindAllStringSubmatchIndex(expr, -1) {
+			if oneSlotRangeRe.MatchString(callArgs(expr, loc[1]-1)) {
+				t.Errorf("%s takes %s over [$__interval], want [$__rate_interval] or an offset difference", where, expr[loc[2]:loc[3]])
+			}
+		}
+	}
+}
+
+// TestDashboardQueriesAreTheTestedOnes fails when a panel query differs from
+// the one alerts/promql_test.yaml evaluates under its anchor, with $instance
+// as [::1]:9199 and $__interval as the anchor's slot: 1m, the scrape interval
+// where a slot holds one sample, or 5m, where a counter reset can recover
+// inside the slot. A change to either runs through promtool in CI.
+func TestDashboardQueriesAreTheTestedOnes(t *testing.T) {
+	d := loadDashboard(t)
+	raw, err := os.ReadFile("alerts/promql_test.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ title, anchor, slot string }{
+		{"Exporter down", "exporter_down", "1m"},
+		{"Driver restarts", "driver_restarts", "1m"},
+		{"Driver restarts", "driver_restarts_5m", "5m"},
+	} {
+		t.Run(tc.anchor, func(t *testing.T) {
+			var exprs []string
+			for _, p := range d.Spec.Elements {
+				if p.Spec.Title == tc.title {
+					exprs = append(exprs, panelExprs(&p)...)
+				}
+			}
+			if len(exprs) != 1 {
+				t.Fatalf("found %d %s queries, want 1", len(exprs), tc.title)
+			}
+			m := regexp.MustCompile(`(?m)expr: &` + tc.anchor + ` '([^']*)'$`).FindSubmatch(raw)
+			if m == nil {
+				t.Fatalf("alerts/promql_test.yaml has no expr anchored as %s", tc.anchor)
+			}
+			fill := strings.NewReplacer(`$instance`, "[::1]:9199", `$__interval`, tc.slot)
+			if want := fill.Replace(exprs[0]); string(m[1]) != want {
+				t.Errorf("alerts/promql_test.yaml tests\n%s\nthe dashboard reads, with its variables filled in,\n%s", m[1], want)
+			}
+		})
 	}
 }
 
