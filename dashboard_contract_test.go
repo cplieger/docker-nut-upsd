@@ -203,8 +203,43 @@ func TestDashboardReadsOnlyExportedSeries(t *testing.T) {
 				t.Errorf("%s reads %s, which the exporter does not serve", where, name)
 			}
 		}
-		for _, problem := range selectorProblems(expr, exported, []string{"job", "instance"}) {
+		for _, problem := range selectorProblems(expr, exported, []string{"instance"}) {
 			t.Errorf("%s %s", where, problem)
+		}
+	}
+}
+
+// TestDashboardScopesEveryQueryToTheInstance fails when a query reads a series
+// without the UPS variable's instance, or matches a label the user's scrape or
+// log config names (job, hostname, container), so the dashboard works under
+// any job name and shows only the picked exporter.
+func TestDashboardScopesEveryQueryToTheInstance(t *testing.T) {
+	d := loadDashboard(t)
+	queries := variableQueries(&d)
+	for name, p := range d.Spec.Elements {
+		for i, e := range panelExprs(&p) {
+			queries[fmt.Sprintf("%s %s query %d", name, p.Spec.Title, i)] = e
+		}
+	}
+	for where, expr := range queries {
+		for _, sel := range selectorRe.FindAllStringSubmatch(expr, -1) {
+			scoped := false
+			for _, m := range matcherRe.FindAllStringSubmatch(sel[2], -1) {
+				switch m[1] {
+				case "job", "hostname", "container":
+					t.Errorf("%s matches %s on %s, a label the user's own config names", where, m[1], sel[1])
+				case "instance":
+					scoped = m[2] == `=` && m[3] == "$instance" ||
+						m[2] == `=~` && slices.Contains(strings.Split(m[3], "|"), "$instance")
+				}
+			}
+			if !scoped {
+				t.Errorf("%s reads %s without instance=\"$instance\"", where, sel[1])
+			}
+		}
+		// The instance variable lists every instance, so it alone reads unscoped.
+		if bare := dashboardSeries(selectorRe.ReplaceAllString(expr, " ")); where != "instance" && len(bare) > 0 {
+			t.Errorf("%s reads %v without a label matcher", where, bare)
 		}
 	}
 }
