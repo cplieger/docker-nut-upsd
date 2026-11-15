@@ -8,7 +8,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/cplieger/go/measure"
+	"github.com/cplieger/go/measure/v2"
 )
 
 // fakeUpsd answers LIST VAR for one UPS the way upsd does (RFC 9271): the
