@@ -22,7 +22,7 @@ import (
 	"time"
 
 	"github.com/cplieger/go/httpserver"
-	"github.com/cplieger/go/measure"
+	"github.com/cplieger/go/measure/v2"
 )
 
 func main() {

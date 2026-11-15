@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/cplieger/go/measure"
+	"github.com/cplieger/go/measure/v2"
 )
 
 // metricPrefix prefixes every family name; alerts/promql.yaml reads the prefixed names.
@@ -30,29 +30,32 @@ var statusFlags = []string{
 }
 
 // upsVariable maps one numeric NUT variable to its series, scaled to a base
-// unit: NUT reports percentages, which the series serve as ratios.
+// unit: NUT reports percentages, which the series serve as ratios. A unit
+// measure has no constant for (volts, celsius, hertz, watts, voltamperes) is
+// UnitNone.
 type upsVariable struct {
 	nut, metric, help string
+	unit              measure.Unit
 	scale             float64
 }
 
 var upsVariables = []upsVariable{
-	{"battery.charge", "battery_charge_ratio", "Battery charge, 0 to 1.", 0.01},
-	{"battery.charge.low", "battery_charge_low_ratio", "Battery charge at which the UPS reports low battery, 0 to 1.", 0.01},
-	{"battery.runtime", "battery_runtime_seconds", "Battery runtime left at the current load.", 1},
-	{"battery.runtime.low", "battery_runtime_low_seconds", "Battery runtime at which the UPS reports low battery.", 1},
-	{"battery.voltage", "battery_voltage_volts", "Battery voltage.", 1},
-	{"battery.temperature", "battery_temperature_celsius", "Battery temperature.", 1},
-	{"input.voltage", "input_voltage_volts", "Input (mains) voltage.", 1},
-	{"input.frequency", "input_frequency_hertz", "Input (mains) frequency.", 1},
-	{"output.voltage", "output_voltage_volts", "Output voltage.", 1},
-	{"output.frequency", "output_frequency_hertz", "Output frequency.", 1},
-	{"ups.load", "ups_load_ratio", "Load on the UPS as a share of its rating, 0 to 1.", 0.01},
-	{"ups.realpower", "ups_realpower_watts", "Real power the load draws.", 1},
-	{"ups.realpower.nominal", "ups_realpower_nominal_watts", "Rated real power of the UPS.", 1},
-	{"ups.power", "ups_power_voltamperes", "Apparent power the load draws.", 1},
-	{"ups.power.nominal", "ups_power_nominal_voltamperes", "Rated apparent power of the UPS.", 1},
-	{"ups.temperature", "ups_temperature_celsius", "UPS temperature.", 1},
+	{"battery.charge", "battery_charge_ratio", "Battery charge, 0 to 1.", measure.UnitRatio, 0.01},
+	{"battery.charge.low", "battery_charge_low_ratio", "Battery charge at which the UPS reports low battery, 0 to 1.", measure.UnitRatio, 0.01},
+	{"battery.runtime", "battery_runtime_seconds", "Battery runtime left at the current load.", measure.UnitSeconds, 1},
+	{"battery.runtime.low", "battery_runtime_low_seconds", "Battery runtime at which the UPS reports low battery.", measure.UnitSeconds, 1},
+	{"battery.voltage", "battery_voltage_volts", "Battery voltage.", measure.UnitNone, 1},
+	{"battery.temperature", "battery_temperature_celsius", "Battery temperature.", measure.UnitNone, 1},
+	{"input.voltage", "input_voltage_volts", "Input (mains) voltage.", measure.UnitNone, 1},
+	{"input.frequency", "input_frequency_hertz", "Input (mains) frequency.", measure.UnitNone, 1},
+	{"output.voltage", "output_voltage_volts", "Output voltage.", measure.UnitNone, 1},
+	{"output.frequency", "output_frequency_hertz", "Output frequency.", measure.UnitNone, 1},
+	{"ups.load", "ups_load_ratio", "Load on the UPS as a share of its rating, 0 to 1.", measure.UnitRatio, 0.01},
+	{"ups.realpower", "ups_realpower_watts", "Real power the load draws.", measure.UnitNone, 1},
+	{"ups.realpower.nominal", "ups_realpower_nominal_watts", "Rated real power of the UPS.", measure.UnitNone, 1},
+	{"ups.power", "ups_power_voltamperes", "Apparent power the load draws.", measure.UnitNone, 1},
+	{"ups.power.nominal", "ups_power_nominal_voltamperes", "Rated apparent power of the UPS.", measure.UnitNone, 1},
+	{"ups.temperature", "ups_temperature_celsius", "UPS temperature.", measure.UnitNone, 1},
 }
 
 // exporter reads upsd and the wrapper's state at scrape time.
@@ -71,22 +74,22 @@ func newExporter(upsd upsdClient, state wrapperState, hostPoweroff bool) *export
 		upsd:         upsd,
 		state:        state,
 		hostPoweroff: hostPoweroff,
-		upsdUp:       measure.NewGaugeDesc("upsd_up", "1 when upsd answered the NUT protocol on the last scrape.", nil),
-		dataFresh:    measure.NewGaugeDesc("ups_data_fresh", "1 when upsd served fresh data for the UPS, 0 when the data is stale, the driver is gone or upsd did not answer.", nil),
-		status:       measure.NewGaugeDesc("ups_status", "1 when ups.status carries the flag, 0 when it does not. Served only while the data is fresh.", []string{"flag"}),
+		upsdUp:       measure.NewGaugeDesc("upsd_up", "1 when upsd answered the NUT protocol on the last scrape.", measure.UnitNone, nil),
+		dataFresh:    measure.NewGaugeDesc("ups_data_fresh", "1 when upsd served fresh data for the UPS, 0 when the data is stale, the driver is gone or upsd did not answer.", measure.UnitNone, nil),
+		status:       measure.NewGaugeDesc("ups_status", "1 when ups.status carries the flag, 0 when it does not. Served only while the data is fresh.", measure.UnitNone, []string{"flag"}),
 		driverRestarts: measure.NewCounterDesc("driver_restarts_total",
-			"UPS driver restarts the comms watchdog issued since the container started.", nil),
+			"UPS driver restarts the comms watchdog issued since the container started.", measure.UnitCount, nil),
 		parentAlive: measure.NewGaugeDesc("upsmon_parent_alive",
-			"1 while upsmon's privileged parent, the process that runs the shutdown command, is running. Served only once the container has started upsmon.", nil),
+			"1 while upsmon's privileged parent, the process that runs the shutdown command, is running. Served only once the container has started upsmon.", measure.UnitNone, nil),
 		poweroffEnabled: measure.NewGaugeDesc("host_poweroff_enabled",
-			"1 when SHUTDOWN_ON_BATTERY_CRITICAL lets a forced shutdown power off the host.", nil),
+			"1 when SHUTDOWN_ON_BATTERY_CRITICAL lets a forced shutdown power off the host.", measure.UnitNone, nil),
 		poweroffOK: measure.NewGaugeDesc("poweroff_path_ok",
-			"1 when the last D-Bus probe found the host poweroff path usable, 0 when it did not. Served only once a probe has run.", nil),
+			"1 when the last D-Bus probe found the host poweroff path usable, 0 when it did not. Served only once a probe has run.", measure.UnitNone, nil),
 		probeAt: measure.NewGaugeDesc("poweroff_path_probe_timestamp_seconds",
-			"Unix time of the last D-Bus poweroff path probe.", nil),
+			"Unix time of the last D-Bus poweroff path probe.", measure.UnitSeconds, nil),
 	}
 	for _, v := range upsVariables {
-		e.vars = append(e.vars, measure.NewGaugeDesc(v.metric, v.help, nil))
+		e.vars = append(e.vars, measure.NewGaugeDesc(v.metric, v.help, v.unit, nil))
 	}
 	return e
 }
@@ -104,7 +107,8 @@ func (e *exporter) register(reg *measure.Registry) error {
 // image runs, for a query to join on.
 func registerBuildInfo(reg *measure.Registry) error {
 	info := measure.NewLabeledGauge("build_info",
-		"Always 1; the labels are the image release and the NUT release it runs.", []string{"version", "nut_version"})
+		"Always 1; the labels are the image release and the NUT release it runs.", measure.UnitNone,
+		[]string{"version", "nut_version"})
 	if err := reg.Register(info); err != nil {
 		return err
 	}
