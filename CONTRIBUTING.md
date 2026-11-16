@@ -10,12 +10,12 @@ The [shared rules](https://github.com/cplieger/.github/blob/main/CONTRIBUTING.md
 - Check a NUT daemon's PID with `pid_matches_binary` in `lifecycle.sh`, never through `/proc/<pid>/exe` alone. The daemons drop to the `nut` user without a new exec, so `exe` is unreadable in a running container. An `exe` check passes the build-stage tests and fails every real start.
 - Each file in `patches/` backports an upstream NUT commit. Never edit its diff. Report a defect in patched code upstream, because removing the patch later would drop a local change with no record of it.
 - When a NUT update includes the upstream commit a patch backports, remove the patch rather than rebase it. Removing a patch touches its file, its `COPY` entry, `patch` line, comment and SBOM `patch=` list in the `Dockerfile`, the "What the image contains" section of `docs/hardening.md`, and the README's License section.
-- Removing `cve-2026-54161-notifycmd-execvp.patch` also touches the `NOTIFYCMD` paragraph of `docs/monitoring.md` and the `NutUpsdNotifyExecFailed` rule in `alerts/logql.yaml`. That rule matches the `execvp(` failure line the patch adds. No test checks that NUT still logs that line, so confirm it in the new release.
+- Removing `cve-2026-54161-notifycmd-execvp.patch` also touches the `NOTIFYCMD` paragraph of `docs/monitoring.md`, the `NutUpsdNotifyExecFailed` section of `docs/alert-rules.md` and the `NutUpsdNotifyExecFailed` rule in `alerts/logql.yaml`. That rule matches the `execvp(` failure line the patch adds. No test checks that NUT still logs that line, so confirm it in the new release.
 - When the build's source check reports that the `OFFDURATION`, `OBLBDURATION` or `ALARMCRITICAL` pin in `generate-config.sh` differs from `clients/upsmon.c`, choose NUT's new default or keep the current value. Keeping it means changing that check in the `Dockerfile` too.
 - Either way, update the `NutUpsdHardwareFault` and `NutUpsdProtectionUnavailable` descriptions in `alerts/logql.yaml` and the "Host shutdown" section of `docs/configuration.md`, which call the pins NUT's defaults. No test checks that wording.
-
-## Dashboard
-
 - `grafana-dashboard.json` reads series names, labels and `ups.status` flags as text. A test fails when a panel reads one the exporter does not serve, or when a rule in `alerts/promql.yaml` has no Needs attention tile. Update the dashboard with any rename.
 - Save a dashboard change made in the Grafana UI with Export, then Export as code, choosing the V2 Resource model.
+
+## Releases
+
 - A change to `grafana-dashboard.json` takes `fix:` or `feat:`. Under `chore:` or `docs:` it replaces the dashboard's OCI artifact at the current version tags, and the GitHub Release keeps the old file.

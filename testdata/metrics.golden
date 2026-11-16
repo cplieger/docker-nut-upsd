@@ -1,0 +1,91 @@
+# HELP nut_upsd_build_info Always 1; the labels are the image release and the NUT release it runs.
+# TYPE nut_upsd_build_info gauge
+nut_upsd_build_info{nut_version="unknown",version="dev"} 1
+# HELP nut_upsd_upsd_up 1 when upsd answered the NUT protocol on the last scrape.
+# TYPE nut_upsd_upsd_up gauge
+nut_upsd_upsd_up 1
+# HELP nut_upsd_ups_data_fresh 1 when upsd served fresh data for the UPS, 0 when the data is stale, the driver is gone or upsd did not answer.
+# TYPE nut_upsd_ups_data_fresh gauge
+nut_upsd_ups_data_fresh 1
+# HELP nut_upsd_ups_status 1 when ups.status carries the flag, 0 when it does not. Served only while the data is fresh.
+# TYPE nut_upsd_ups_status gauge
+nut_upsd_ups_status{flag="ALARM"} 1
+nut_upsd_ups_status{flag="BOOST"} 0
+nut_upsd_ups_status{flag="BYPASS"} 0
+nut_upsd_ups_status{flag="CAL"} 0
+nut_upsd_ups_status{flag="CHRG"} 1
+nut_upsd_ups_status{flag="DISCHRG"} 0
+nut_upsd_ups_status{flag="ECO"} 0
+nut_upsd_ups_status{flag="FSD"} 0
+nut_upsd_ups_status{flag="HB"} 0
+nut_upsd_ups_status{flag="LB"} 0
+nut_upsd_ups_status{flag="OB"} 0
+nut_upsd_ups_status{flag="OFF"} 0
+nut_upsd_ups_status{flag="OL"} 1
+nut_upsd_ups_status{flag="OTHER"} 1
+nut_upsd_ups_status{flag="OVER"} 0
+nut_upsd_ups_status{flag="RB"} 0
+nut_upsd_ups_status{flag="TRIM"} 0
+# HELP nut_upsd_driver_restarts_total UPS driver restarts the comms watchdog issued since the container started.
+# TYPE nut_upsd_driver_restarts_total counter
+nut_upsd_driver_restarts_total 3
+# HELP nut_upsd_upsmon_parent_alive 1 while upsmon's privileged parent, the process that runs the shutdown command, is running. Served only once the container has started upsmon.
+# TYPE nut_upsd_upsmon_parent_alive gauge
+nut_upsd_upsmon_parent_alive 1
+# HELP nut_upsd_host_poweroff_enabled 1 when SHUTDOWN_ON_BATTERY_CRITICAL lets a forced shutdown power off the host.
+# TYPE nut_upsd_host_poweroff_enabled gauge
+nut_upsd_host_poweroff_enabled 1
+# HELP nut_upsd_poweroff_path_ok 1 when the last D-Bus probe found the host poweroff path usable, 0 when it did not. Served only once a probe has run.
+# TYPE nut_upsd_poweroff_path_ok gauge
+nut_upsd_poweroff_path_ok 1
+# HELP nut_upsd_poweroff_path_probe_timestamp_seconds Unix time of the last D-Bus poweroff path probe.
+# TYPE nut_upsd_poweroff_path_probe_timestamp_seconds gauge
+nut_upsd_poweroff_path_probe_timestamp_seconds 1800000000
+# HELP nut_upsd_battery_charge_ratio Battery charge, 0 to 1.
+# TYPE nut_upsd_battery_charge_ratio gauge
+nut_upsd_battery_charge_ratio 0.87
+# HELP nut_upsd_battery_charge_low_ratio Battery charge at which the UPS reports low battery, 0 to 1.
+# TYPE nut_upsd_battery_charge_low_ratio gauge
+nut_upsd_battery_charge_low_ratio 0.1
+# HELP nut_upsd_battery_runtime_seconds Battery runtime left at the current load.
+# TYPE nut_upsd_battery_runtime_seconds gauge
+nut_upsd_battery_runtime_seconds 1260
+# HELP nut_upsd_battery_runtime_low_seconds Battery runtime at which the UPS reports low battery.
+# TYPE nut_upsd_battery_runtime_low_seconds gauge
+nut_upsd_battery_runtime_low_seconds 120
+# HELP nut_upsd_battery_voltage_volts Battery voltage.
+# TYPE nut_upsd_battery_voltage_volts gauge
+nut_upsd_battery_voltage_volts 27.3
+# HELP nut_upsd_battery_temperature_celsius Battery temperature.
+# TYPE nut_upsd_battery_temperature_celsius gauge
+nut_upsd_battery_temperature_celsius 31.5
+# HELP nut_upsd_input_voltage_volts Input (mains) voltage.
+# TYPE nut_upsd_input_voltage_volts gauge
+nut_upsd_input_voltage_volts 231
+# HELP nut_upsd_input_frequency_hertz Input (mains) frequency.
+# TYPE nut_upsd_input_frequency_hertz gauge
+nut_upsd_input_frequency_hertz 50.1
+# HELP nut_upsd_output_voltage_volts Output voltage.
+# TYPE nut_upsd_output_voltage_volts gauge
+nut_upsd_output_voltage_volts 230
+# HELP nut_upsd_output_frequency_hertz Output frequency.
+# TYPE nut_upsd_output_frequency_hertz gauge
+nut_upsd_output_frequency_hertz 49.9
+# HELP nut_upsd_ups_load_ratio Load on the UPS as a share of its rating, 0 to 1.
+# TYPE nut_upsd_ups_load_ratio gauge
+nut_upsd_ups_load_ratio 0.23
+# HELP nut_upsd_ups_realpower_watts Real power the load draws.
+# TYPE nut_upsd_ups_realpower_watts gauge
+nut_upsd_ups_realpower_watts 184
+# HELP nut_upsd_ups_realpower_nominal_watts Rated real power of the UPS.
+# TYPE nut_upsd_ups_realpower_nominal_watts gauge
+nut_upsd_ups_realpower_nominal_watts 900
+# HELP nut_upsd_ups_power_voltamperes Apparent power the load draws.
+# TYPE nut_upsd_ups_power_voltamperes gauge
+nut_upsd_ups_power_voltamperes 210
+# HELP nut_upsd_ups_power_nominal_voltamperes Rated apparent power of the UPS.
+# TYPE nut_upsd_ups_power_nominal_voltamperes gauge
+nut_upsd_ups_power_nominal_voltamperes 1500
+# HELP nut_upsd_ups_temperature_celsius UPS temperature.
+# TYPE nut_upsd_ups_temperature_celsius gauge
+nut_upsd_ups_temperature_celsius 35

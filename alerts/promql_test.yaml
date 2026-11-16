@@ -306,3 +306,163 @@ tests:
   - eval_time: 20m
     alertname: NutUpsdPowerOffPathBroken
     exp_alerts: []
+# The dashboard's Exporter down and Driver restarts queries, with $instance and a 1m or 5m slot filled in.
+# TestDashboardQueriesAreTheTestedOnes fails when these differ from the dashboard.
+- name: 'Exporter down: shows for an IPv6 target the alert names'
+  interval: 1m
+  input_series:
+  - series: 'up{job="nut-upsd", instance="[::1]:9199"}'
+    values: 0x10
+  promql_expr_test:
+  - expr: &exporter_down '0 * max((ALERTS{alertname="NutUpsdDown", alertstate="firing", instance="[::1]:9199"} or ALERTS{alertname="NutUpsdDown", alertstate="firing", instance=""}))'
+    eval_time: 8m
+    exp_samples:
+    - labels: '{}'
+      value: 0
+- name: 'Exporter down: stays hidden while only another target is down'
+  interval: 1m
+  input_series:
+  - series: 'up{job="nut-upsd", instance="[::1]:9199"}'
+    values: 1x10
+  - series: 'up{job="nut-upsd", instance="1:9199"}'
+    values: 0x10
+  promql_expr_test:
+  - expr: *exporter_down
+    eval_time: 8m
+    exp_samples: []
+- name: 'Exporter down: shows when every target is gone'
+  interval: 1m
+  input_series:
+  - series: 'up{job="other", instance="x:1"}'
+    values: 1x10
+  promql_expr_test:
+  - expr: *exporter_down
+    eval_time: 8m
+    exp_samples:
+    - labels: '{}'
+      value: 0
+- name: 'Driver restarts: a slot one scrape long counts the restarts made in it'
+  interval: 1m
+  input_series:
+  - series: 'nut_upsd_driver_restarts_total{job="nut-upsd", instance="[::1]:9199"}'
+    values: 0x10 1 3x10
+  promql_expr_test:
+  - expr: &driver_restarts 'sum without () (((nut_upsd_driver_restarts_total{instance="[::1]:9199"} - nut_upsd_driver_restarts_total{instance="[::1]:9199"} offset 1m) unless ((min_over_time(nut_upsd_driver_restarts_total{instance="[::1]:9199"}[1m]) < nut_upsd_driver_restarts_total{instance="[::1]:9199"} offset 1m) or (resets(nut_upsd_driver_restarts_total{instance="[::1]:9199"}[1m]) > 0))) or (nut_upsd_driver_restarts_total{instance="[::1]:9199"} and ((min_over_time(nut_upsd_driver_restarts_total{instance="[::1]:9199"}[1m]) < nut_upsd_driver_restarts_total{instance="[::1]:9199"} offset 1m) or (resets(nut_upsd_driver_restarts_total{instance="[::1]:9199"}[1m]) > 0))) or (nut_upsd_driver_restarts_total{instance="[::1]:9199"} - min_over_time(nut_upsd_driver_restarts_total{instance="[::1]:9199"}[1m])))'
+    eval_time: 11m
+    exp_samples:
+    - labels: '{instance="[::1]:9199", job="nut-upsd"}'
+      value: 1
+  - expr: *driver_restarts
+    eval_time: 12m
+    exp_samples:
+    - labels: '{instance="[::1]:9199", job="nut-upsd"}'
+      value: 2
+  - expr: *driver_restarts
+    eval_time: 14m
+    exp_samples:
+    - labels: '{instance="[::1]:9199", job="nut-upsd"}'
+      value: 0
+- name: 'Driver restarts: a container restart counts the new total, not the drop from the old one'
+  interval: 1m
+  input_series:
+  - series: 'nut_upsd_driver_restarts_total{job="nut-upsd", instance="[::1]:9199"}'
+    values: 3x10 1x10
+  promql_expr_test:
+  - expr: *driver_restarts
+    eval_time: 11m
+    exp_samples:
+    - labels: '{instance="[::1]:9199", job="nut-upsd"}'
+      value: 1
+- name: 'Driver restarts: a first scrape counts the growth inside the slot, not the lifetime total'
+  interval: 1m
+  input_series:
+  - series: 'nut_upsd_driver_restarts_total{job="nut-upsd", instance="[::1]:9199"}'
+    values: _x11 7 8x10
+  promql_expr_test:
+  - expr: *driver_restarts
+    eval_time: 11m
+    exp_samples:
+    - labels: '{instance="[::1]:9199", job="nut-upsd"}'
+      value: 0
+  - expr: *driver_restarts
+    eval_time: 12m
+    exp_samples:
+    - labels: '{instance="[::1]:9199", job="nut-upsd"}'
+      value: 1
+- name: 'Driver restarts: a failed scrape draws no false spike'
+  interval: 1m
+  input_series:
+  - series: 'nut_upsd_driver_restarts_total{job="nut-upsd", instance="[::1]:9199"}'
+    values: 4x10 stale 4x10
+  promql_expr_test:
+  - expr: *driver_restarts
+    eval_time: 12m
+    exp_samples:
+    - labels: '{instance="[::1]:9199", job="nut-upsd"}'
+      value: 0
+- name: 'Driver restarts: a failed scrape at the start of a slot can show fewer than happened'
+  interval: 1m
+  input_series:
+  - series: 'nut_upsd_driver_restarts_total{job="nut-upsd", instance="[::1]:9199"}'
+    values: 0x4 stale 1x10
+  promql_expr_test:
+  - expr: *driver_restarts
+    eval_time: 6m
+    exp_samples:
+    - labels: '{instance="[::1]:9199", job="nut-upsd"}'
+      value: 0
+- name: 'Driver restarts: a scrape outage that leaves no stale marker can show more than happened'
+  interval: 1m
+  input_series:
+  - series: 'nut_upsd_driver_restarts_total{job="nut-upsd", instance="[::1]:9199"}'
+    values: 0x4 _ _ 3x3
+  promql_expr_test:
+  - expr: *driver_restarts
+    eval_time: 7m
+    exp_samples:
+    - labels: '{instance="[::1]:9199", job="nut-upsd"}'
+      value: 3
+- name: 'Driver restarts: a container restart whose counter climbs back to the slot-start value counts the new total'
+  interval: 1m
+  input_series:
+  - series: 'nut_upsd_driver_restarts_total{job="nut-upsd", instance="[::1]:9199"}'
+    values: 4x5 0 1 2 3 4 5 6
+  promql_expr_test:
+  - expr: &driver_restarts_5m 'sum without () (((nut_upsd_driver_restarts_total{instance="[::1]:9199"} - nut_upsd_driver_restarts_total{instance="[::1]:9199"} offset 5m) unless ((min_over_time(nut_upsd_driver_restarts_total{instance="[::1]:9199"}[5m]) < nut_upsd_driver_restarts_total{instance="[::1]:9199"} offset 5m) or (resets(nut_upsd_driver_restarts_total{instance="[::1]:9199"}[5m]) > 0))) or (nut_upsd_driver_restarts_total{instance="[::1]:9199"} and ((min_over_time(nut_upsd_driver_restarts_total{instance="[::1]:9199"}[5m]) < nut_upsd_driver_restarts_total{instance="[::1]:9199"} offset 5m) or (resets(nut_upsd_driver_restarts_total{instance="[::1]:9199"}[5m]) > 0))) or (nut_upsd_driver_restarts_total{instance="[::1]:9199"} - min_over_time(nut_upsd_driver_restarts_total{instance="[::1]:9199"}[5m])))'
+    eval_time: 10m
+    exp_samples:
+    - labels: '{instance="[::1]:9199", job="nut-upsd"}'
+      value: 4
+- name: 'Driver restarts: a slot five scrapes long counts every restart made in it'
+  interval: 1m
+  input_series:
+  - series: 'nut_upsd_driver_restarts_total{job="nut-upsd", instance="[::1]:9199"}'
+    values: 0x5 1+1x10
+  promql_expr_test:
+  - expr: *driver_restarts_5m
+    eval_time: 10m
+    exp_samples:
+    - labels: '{instance="[::1]:9199", job="nut-upsd"}'
+      value: 5
+- name: 'Driver restarts: an exporter respawn inside a running container counts only the new restarts'
+  interval: 1m
+  input_series:
+  - series: 'nut_upsd_driver_restarts_total{job="nut-upsd", instance="[::1]:9199"}'
+    values: 3x5 _ 3 4x5
+  promql_expr_test:
+  - expr: *driver_restarts_5m
+    eval_time: 10m
+    exp_samples:
+    - labels: '{instance="[::1]:9199", job="nut-upsd"}'
+      value: 1
+- name: 'Driver restarts: a container restart after a failed scrape at the start of a slot counts the new total'
+  interval: 1m
+  input_series:
+  - series: 'nut_upsd_driver_restarts_total{job="nut-upsd", instance="[::1]:9199"}'
+    values: 5x4 stale 3 4 stale 1 2 2
+  promql_expr_test:
+  - expr: *driver_restarts_5m
+    eval_time: 10m
+    exp_samples:
+    - labels: '{instance="[::1]:9199", job="nut-upsd"}'
+      value: 2
