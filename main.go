@@ -11,7 +11,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -21,7 +20,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/cplieger/go/httpserver"
+	"github.com/cplieger/go/httpserver/v2"
 	"github.com/cplieger/go/measure/v2"
 )
 
@@ -78,10 +77,9 @@ func run(ctx context.Context, args []string, logger *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	var lc net.ListenConfig
-	ln, err := lc.Listen(ctx, "tcp", cfg.listen)
+	ln, err := httpserver.Listen(ctx, httpserver.ListenSetting{Name: "METRICS_PORT", Addr: cfg.listen})
 	if err != nil {
-		return fmt.Errorf("listen on %s: %w", cfg.listen, err)
+		return err
 	}
 	if err := writeReady(cfg.stateDir); err != nil {
 		_ = ln.Close()
