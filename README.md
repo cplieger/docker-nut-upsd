@@ -5,6 +5,8 @@
 <!-- hub-overview BEGIN -->
 docker-nut-upsd runs Network UPS Tools (NUT) on the machine your UPS plugs into and shares the UPS with every machine on the same power. It has no web page.
 
+![The bundled Grafana dashboard's Overview tab showing the UPS on mains, its battery charge and runtime left against the low battery marks, and its load and mains and output voltage over 7 days](docs/images/header.png)
+
 ## What it does
 
 Your NAS, servers and other NUT clients shut down cleanly on low battery, and Home Assistant shows the UPS status.
