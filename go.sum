@@ -2,8 +2,8 @@ github.com/cplieger/go/health/v2 v2.0.0 h1:WHZiSYIyvmaFvkohJopPptEg9oW4QxRSV5HUx
 github.com/cplieger/go/health/v2 v2.0.0/go.mod h1:Dmp78r+0ZHF2xMfOQqZ7c5pBiZF1el3QhLHA1y9um2A=
 github.com/cplieger/go/httpserver/v2 v2.0.0-dev.3 h1:lQS+Y6FfV344HO15di9wes49KiJdJDWImEIrZf9WMFg=
 github.com/cplieger/go/httpserver/v2 v2.0.0-dev.3/go.mod h1:nSPC40ZyqeqTSQj5Tytr092CT494nWQiI4dhTGA/l5w=
-github.com/cplieger/go/measure/v2 v2.0.0 h1:QsVroWatxnaS3JWJdm84Rt5RDw26uLpEYFANy6/z72s=
-github.com/cplieger/go/measure/v2 v2.0.0/go.mod h1:gG4hr0jum0sVWiAppZwHPdvHNIVPBbryOCxzCoPSo84=
+github.com/cplieger/go/measure/v2 v2.1.0-dev.1 h1:YV0IKDITW9IZr0uOaLzdx5OlNBw/C/zVQ9DQAQ4t4Vo=
+github.com/cplieger/go/measure/v2 v2.1.0-dev.1/go.mod h1:gG4hr0jum0sVWiAppZwHPdvHNIVPBbryOCxzCoPSo84=
 github.com/cplieger/go/ssrf v1.1.0 h1:gyP7pYm1415RkHmIdod1YCvuX+I1xD1dXiRa8tvz8Bg=
 github.com/cplieger/go/ssrf v1.1.0/go.mod h1:95hUJ04+tP4FHFyd9Vp+egJpNDuf8d+jtgvcxzf7Mkw=
 github.com/cplieger/go/textsafe v1.1.0 h1:D+p7ZDBQmABv/empI2TNMZfvhMXNlfii8E2e5V+dUWE=
