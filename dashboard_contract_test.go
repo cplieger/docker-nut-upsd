@@ -17,8 +17,7 @@ type dashQuery struct {
 	Spec struct {
 		Query struct {
 			Spec struct {
-				Expr  string `json:"expr"`
-				Query string `json:"query"`
+				Expr string `json:"expr"`
 			} `json:"spec"`
 		} `json:"query"`
 	} `json:"spec"`
