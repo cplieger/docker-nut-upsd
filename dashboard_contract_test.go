@@ -130,19 +130,53 @@ func panelExprs(p *dashPanel) []string {
 	return out
 }
 
-// variableQueries returns each query variable's stored query text, by name.
+// variableQueries returns each query variable's query, by name: the one
+// Grafana runs, which is __legacyStringValue, null as "", when that key is
+// present (getDataQueryForVariable), and query otherwise.
 func variableQueries(d *dashboard) map[string]string {
 	out := map[string]string{}
 	for _, v := range d.Spec.Variables {
 		if v.Kind != "QueryVariable" {
 			continue
 		}
-		var q dashQuery
-		if err := json.Unmarshal(v.Spec.Query, &q.Spec.Query); err == nil {
-			out[v.Spec.Name] = q.Spec.Query.Spec.Query
+		var q struct {
+			Spec map[string]json.RawMessage `json:"spec"`
+		}
+		if json.Unmarshal(v.Spec.Query, &q) != nil {
+			continue
+		}
+		raw, ok := q.Spec["__legacyStringValue"]
+		if !ok {
+			raw = q.Spec["query"]
+		}
+		var text string
+		if json.Unmarshal(raw, &text) == nil {
+			out[v.Spec.Name] = text
 		}
 	}
 	return out
+}
+
+// TestVariableQueriesReadTheQueryGrafanaRuns pins variableQueries to the query
+// Grafana runs, so a pin on query cannot pass while __legacyStringValue holds
+// another one.
+func TestVariableQueriesReadTheQueryGrafanaRuns(t *testing.T) {
+	for _, tc := range []struct{ name, spec, want string }{
+		{"query only", `{"query":"up"}`, "up"},
+		{"legacy wins", `{"query":"up","__legacyStringValue":"down"}`, "down"},
+		{"legacy null is empty", `{"query":"up","__legacyStringValue":null}`, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var d dashboard
+			v := dashVariable{Kind: "QueryVariable"}
+			v.Spec.Name = "v"
+			v.Spec.Query = json.RawMessage(`{"spec":` + tc.spec + `}`)
+			d.Spec.Variables = append(d.Spec.Variables, v)
+			if got := variableQueries(&d)["v"]; got != tc.want {
+				t.Errorf("variableQueries = %q, want %q", got, tc.want)
+			}
+		})
+	}
 }
 
 // dashboardQueries returns every query variable's and panel's query, keyed by
@@ -307,14 +341,17 @@ func TestDashboardReadsOnlyExportedSeries(t *testing.T) {
 // TestDashboardInstancePickerListsEveryUPS fails when the instance variable
 // reads anything but every UPS's upsd_up series, filters what it reads with a
 // regex, or never refreshes, so the picker lists every UPS the query finds.
+// Grafana's v2 schema reads an absent refresh as never, so only the two
+// refreshing values pass.
 func TestDashboardInstancePickerListsEveryUPS(t *testing.T) {
 	d := loadDashboard(t)
 	if got, want := variableQueries(&d)["instance"], "label_values(nut_upsd_upsd_up, instance)"; got != want {
 		t.Errorf("the instance variable must read exactly\n%s\nso the picker lists every UPS; it reads\n%s", want, got)
 	}
 	for _, v := range d.Spec.Variables {
-		if v.Spec.Name == "instance" && (v.Spec.Regex != "" || v.Spec.Refresh == "never") {
-			t.Errorf("the instance variable has regex %q and refresh %q: a regex, or a refresh of never, hides UPSs its query lists", v.Spec.Regex, v.Spec.Refresh)
+		if v.Spec.Name == "instance" && (v.Spec.Regex != "" ||
+			(v.Spec.Refresh != "onDashboardLoad" && v.Spec.Refresh != "onTimeRangeChanged")) {
+			t.Errorf("the instance variable has regex %q and refresh %q, want no regex and onDashboardLoad or onTimeRangeChanged: a regex, or a refresh that is absent or never, hides UPSs its query lists", v.Spec.Regex, v.Spec.Refresh)
 		}
 	}
 }
