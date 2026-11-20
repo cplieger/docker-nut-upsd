@@ -4,7 +4,7 @@ go 1.27.4
 
 require (
 	github.com/cplieger/go/health/v2 v2.0.0
-	github.com/cplieger/go/httpserver/v2 v2.0.0-dev.11
+	github.com/cplieger/go/httpserver/v2 v2.0.0-dev.12
 	github.com/cplieger/go/measure/v2 v2.1.0-dev.2
 )
 
